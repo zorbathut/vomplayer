@@ -1,12 +1,11 @@
 using System;
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
-using Vomplayer.Controls;
 using Vomplayer.Mpv;
 
 namespace Vomplayer.Playback;
 
-// Owns MpvClient and the mapping from mpv events to strongly-typed observable state. No UI-framework dependency — the one cross-thread coupling is injected via Action<Action> (pass a GLib.Functions.IdleAdd wrapper in production, a => a() in tests). Never exposes MpvClient past the service boundary; VideoView attaches through AttachRenderSurface.
+// Owns MpvClient and the mapping from mpv events to strongly-typed observable state. No UI-framework dependency — the one cross-thread coupling is injected via Action<Action> (pass a GLib.Functions.IdleAdd wrapper in production, a => a() in tests). Never exposes MpvClient past the service boundary; the render surface receives it only inside the AttachRenderSurface callback.
 public sealed partial class Playback : ObservableObject, IPlayback
 {
     private readonly MpvClient mpv;
@@ -89,14 +88,14 @@ public sealed partial class Playback : ObservableObject, IPlayback
         mpv.Command("seek", target, "absolute");
     }
 
-    // Attaches the VideoView's render surface to this playback session. Keeps MpvClient behind the service boundary — only Playback is allowed to hand the native handle to VideoView.
-    public void AttachRenderSurface(VideoView videoView)
+    // Hands the MpvClient to a render-surface attacher. Keeps MpvClient behind the service boundary — the caller receives the client only inside the callback scope. Used by both the GLArea path (client => videoView.AttachClient(client)) and the Wayland subsurface path (client => videoSurface.SetMpvClient(client)).
+    public void AttachRenderSurface(Action<MpvClient> attach)
     {
-        if (videoView == null)
+        if (attach == null)
         {
-            throw new ArgumentNullException(nameof(videoView));
+            throw new ArgumentNullException(nameof(attach));
         }
-        videoView.AttachClient(mpv);
+        attach(mpv);
     }
 
     // Callable for tests. In production it's invoked indirectly via postToMainThread.

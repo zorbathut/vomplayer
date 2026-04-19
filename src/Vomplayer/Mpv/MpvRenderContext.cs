@@ -101,6 +101,16 @@ public sealed class MpvRenderContext : IDisposable
         }
     }
 
+    // Tell mpv the last rendered frame was presented. Part of the ADVANCED_CONTROL contract: improves mpv's internal frame-timing estimate and enables display-sync. Safe no-op on a torn-down context.
+    public void ReportSwap()
+    {
+        if (ctx == IntPtr.Zero)
+        {
+            return;
+        }
+        LibMpv.RenderContextReportSwap(ctx);
+    }
+
     public void Dispose()
     {
         if (ctx == IntPtr.Zero)

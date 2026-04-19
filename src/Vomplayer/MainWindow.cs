@@ -5,22 +5,29 @@ using Vomplayer.Playback;
 using Vomplayer.Services;
 using Vomplayer.Util;
 using Vomplayer.ViewModels;
+using Vomplayer.Wayland;
 
 namespace Vomplayer;
 
-// Code-only GTK4 application window. Vertical box: VideoView on top, controls row below. The VM's property changes push widget updates through a switch on PropertyName; the widgets push user actions straight into VM commands.
+// Code-only GTK4 application window. Vertical box: video region on top, controls row below. The VM's property changes push widget updates through a switch on PropertyName; the widgets push user actions straight into VM commands.
+//
+// Two render paths, selected at runtime:
+//   - Wayland path: video goes to a wl_subsurface (VideoArea + VideoSurface). Main surface stays sRGB; only the subsurface is HDR-tagged. UI doesn't get re-interpreted as PQ.
+//   - GLArea path: video renders into Gtk.GLArea's FBO on the main surface (VideoView). HDR requests attach PQ to the main surface as before (known issue: UI looks blown out in HDR — accept on X11/Windows/macOS fallback).
 public sealed class MainWindow : Gtk.ApplicationWindow
 {
     private readonly Playback.Playback playback;
     private readonly ViewModelMain viewModel;
-    private readonly VideoView videoView;
     private readonly Gtk.Scale seekScale;
     private readonly Gtk.Label positionLabel;
     private readonly Gtk.Label durationLabel;
     private readonly Gtk.Button playPauseButton;
     private readonly bool hdrRequested;
+    private readonly VideoView? videoView;
+    private readonly VideoArea? videoArea;
+    private readonly VideoSurface? videoSurface;
     private bool updatingFromVm;
-    private bool hdrApplied;
+    private bool hdrAppliedOnMainSurface;
     private uint pendingDragEndId;
 
     public MainWindow(Gtk.Application app, Playback.Playback playback, string? initialFile, bool hdrRequested)
@@ -44,10 +51,27 @@ public sealed class MainWindow : Gtk.ApplicationWindow
         viewModel = new ViewModelMain(playback, filePicker);
         viewModel.InitialFile = initialFile;
 
-        videoView = new VideoView();
-        playback.AttachRenderSurface(videoView);
-        videoView.RenderContextReady += OnVideoRenderContextReady;
-        videoView.RenderFailed += OnVideoRenderFailed;
+        Gtk.Widget videoWidget;
+        if (WaylandDetect.IsWaylandBackend(GetDisplay()))
+        {
+            var area = new VideoArea();
+            var surface = new VideoSurface(this, area, hdrRequested);
+            playback.AttachRenderSurface(client => surface.SetMpvClient(client));
+            surface.RenderContextReady += OnVideoRenderContextReadyWayland;
+            surface.RenderFailed += OnVideoRenderFailed;
+            videoArea = area;
+            videoSurface = surface;
+            videoWidget = area;
+        }
+        else
+        {
+            var view = new VideoView();
+            playback.AttachRenderSurface(client => view.AttachClient(client));
+            view.RenderContextReady += OnVideoRenderContextReadyGLArea;
+            view.RenderFailed += OnVideoRenderFailed;
+            videoView = view;
+            videoWidget = view;
+        }
 
         var openButton = Gtk.Button.NewWithLabel("Open");
         playPauseButton = Gtk.Button.NewWithLabel("Play");
@@ -73,7 +97,7 @@ public sealed class MainWindow : Gtk.ApplicationWindow
         controlsBox.Append(durationLabel);
 
         var rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
-        rootBox.Append(videoView);
+        rootBox.Append(videoWidget);
         rootBox.Append(controlsBox);
         SetChild(rootBox);
 
@@ -85,14 +109,6 @@ public sealed class MainWindow : Gtk.ApplicationWindow
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         OnCloseRequest += OnWindowCloseRequest;
-    }
-
-    public VideoView VideoView
-    {
-        get
-        {
-            return videoView;
-        }
     }
 
     // GTK4's Gtk.Scale doesn't expose drag-start / drag-end signals we can reliably observe (its internal gesture claims pointer sequences, cancelling sibling GestureClick, and GirCore 0.7.0 can't marshal raw GdkEvent to let us use EventControllerLegacy). Instead we auto-detect the end of a drag: the first ValueChanged opens a drag, and 150 ms after the last change we close it. Short enough to feel responsive, long enough to cover a continuous drag's sample cadence.
@@ -146,18 +162,28 @@ public sealed class MainWindow : Gtk.ApplicationWindow
         }
     }
 
-    private void OnVideoRenderContextReady()
+    // Wayland path: subsurface is HDR-tagged by the shim if supported. Only tell libplacebo to target PQ if the shim actually attached the description — otherwise mpv would output PQ into a sRGB-interpreted surface and colors would be badly overdriven.
+    private void OnVideoRenderContextReadyWayland()
     {
         viewModel.OnRenderContextReady();
-        if (hdrRequested && !hdrApplied)
+        if (hdrRequested && videoSurface != null && videoSurface.HdrActive)
+        {
+            playback.EnableHdrOutput();
+        }
+    }
+
+    // GLArea path: HDR has to be attached to the main surface (no subsurface). UI will look blown out because GTK widgets render sRGB values into a surface KWin interprets as PQ. Documented fallback behavior.
+    private void OnVideoRenderContextReadyGLArea()
+    {
+        viewModel.OnRenderContextReady();
+        if (hdrRequested && !hdrAppliedOnMainSurface)
         {
             int rc = HdrHelper.ApplyPqToGtkWindow(this);
             if (rc == 0)
             {
-                // Surface is now PQ/BT.2020; libplacebo must target the same, or the compositor will interpret sRGB-encoded output as PQ and colors will be badly overdriven.
                 playback.EnableHdrOutput();
             }
-            hdrApplied = true;
+            hdrAppliedOnMainSurface = true;
         }
     }
 
@@ -169,6 +195,7 @@ public sealed class MainWindow : Gtk.ApplicationWindow
     private bool OnWindowCloseRequest(Gtk.Window sender, EventArgs e)
     {
         viewModel.Dispose();
+        videoSurface?.Dispose();
         playback.Dispose();
         return false;
     }
