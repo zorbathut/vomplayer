@@ -1,26 +1,54 @@
-using Avalonia;
 using System;
 
 namespace Vomplayer;
 
-class Program
+public static class Program
 {
-    // Initialization code. Don't use any Avalonia, third-party APIs or any SynchronizationContext-reliant code before AppMain is called: things aren't initialized yet and stuff might break.
-    [STAThread]
-    public static void Main(string[] args)
+    public static int Main(string[] args)
     {
-        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        string? initialFile = null;
+        bool hdr = true;
+        foreach (var a in args)
+        {
+            if (a == "--sdr" || a == "--no-hdr")
+            {
+                hdr = false;
+            }
+            else if (a.StartsWith('-'))
+            {
+                Console.Error.WriteLine($"[vomplayer] unknown flag: {a}");
+                return 2;
+            }
+            else
+            {
+                initialFile = a;
+            }
+        }
+
+        var app = Gtk.Application.New("net.vomplayer.Vomplayer", Gio.ApplicationFlags.NonUnique);
+        app.OnActivate += (sender, _) =>
+        {
+            BuildAndPresent((Gtk.Application)sender, initialFile, hdr);
+        };
+        return app.RunWithSynchronizationContext(null);
     }
 
-    // Avalonia configuration, don't remove; also used by visual designer.
-    public static AppBuilder BuildAvaloniaApp()
+    private static void BuildAndPresent(Gtk.Application app, string? initialFile, bool hdr)
     {
-        return AppBuilder.Configure<App>()
-            .UsePlatformDetect()
-#if DEBUG
-            .WithDeveloperTools()
-#endif
-            .WithInterFont()
-            .LogToTrace();
+        // gtk_init ran setlocale(LC_ALL, "") already; force LC_NUMERIC=C back before any mpv call. Must happen on the main thread after GTK init, not before Main.
+        LibC.ForceCNumericLocale();
+
+        var playback = new Playback.Playback(
+            a => GLib.Functions.IdleAdd(
+                (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
+                () =>
+                {
+                    a();
+                    return false;
+                }));
+        playback.Initialize();
+
+        var window = new MainWindow(app, playback, initialFile, hdr);
+        window.Present();
     }
 }

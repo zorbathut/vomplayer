@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace Vomplayer.Mpv;
 
-// Wraps mpv_render_context_*. Owns the native context, the managed delegates mpv will call, and per-frame parameter arrays. Constructor and Dispose must run on a thread with the GL context current. Abandon is the context-lost variant: drops managed state without calling the native free (the GL context it would need is already gone). The get_proc_address and update-callback delegates are held as instance fields so their thunks stay alive as long as the native context; Dispose clears them only after the native free returns.
+// Wraps mpv_render_context_*. Owns the native context, the managed delegates mpv will call, and per-frame parameter arrays. Constructor and Dispose must run on a thread with the GL context current. GTK4's GLArea pairs realize/unrealize on the main thread with the GL context current, so Dispose can always call mpv_render_context_free safely — no Abandon variant is needed. The get_proc_address and update-callback delegates are held as instance fields so their thunks stay alive as long as the native context; Dispose clears them only after the native free returns.
 public sealed class MpvRenderContext : IDisposable
 {
     // Static pinned UTF-8 bytes for the "opengl" API type string; lives for process lifetime.
@@ -73,7 +73,7 @@ public sealed class MpvRenderContext : IDisposable
             return;
         }
 
-        // Required by the ADVANCED_CONTROL contract: poll mpv before each render so it knows we're keeping up. We render unconditionally (Avalonia may have asked for a redraw for non-frame reasons — window damage, resize — and we want to repaint to the new FBO either way; mpv re-renders the current frame if no new one is available).
+        // Required by the ADVANCED_CONTROL contract: poll mpv before each render so it knows we're keeping up. We render unconditionally — GTK may have asked for a redraw for non-frame reasons (window damage, resize) and we want to repaint to the new FBO either way; mpv re-renders the current frame if no new one is available.
         LibMpv.RenderContextUpdate(ctx);
 
         unsafe
@@ -99,15 +99,6 @@ public sealed class MpvRenderContext : IDisposable
                 RenderFailed?.Invoke(rc);
             }
         }
-    }
-
-    // OpenGL context is gone; drop managed state but do not call mpv_render_context_free (it would touch the dead GL context and crash).
-    public void Abandon()
-    {
-        ctx = IntPtr.Zero;
-        updateCallback = null;
-        getProcAddressDelegate = null;
-        getProcAddress = null;
     }
 
     public void Dispose()
