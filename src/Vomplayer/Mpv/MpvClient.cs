@@ -55,12 +55,20 @@ public readonly record struct MpvPropertyValue(object? Raw)
     }
 }
 
-// Thread model: all methods except the wakeup callback must be called from a single thread (typically the UI thread). libmpv fires the wakeup on its own event thread; we only raise EventAvailable from there — no mpv_* calls happen inside the callback. Callers must subscribe to PropertyChanged before calling ObserveProperty, since libmpv synthesizes an initial change event as part of the observe call.
+// Thread model: all methods except the wakeup callback must be called from a single thread (typically the UI thread). libmpv fires the wakeup on its own event thread; we only raise EventAvailable from there — no mpv_* calls happen inside the callback. Callers must subscribe to PropertyChanged before calling ObserveProperty, since libmpv synthesizes an initial change event as part of the observe call. MpvRenderContext runs on the Avalonia GL render thread — that's a sibling concern and does not change MpvClient's single-thread invariant.
 public sealed class MpvClient : IDisposable
 {
     private IntPtr ctx;
     private LibMpv.WakeupCallback? wakeup;
     private ulong nextObserveId;
+
+    internal IntPtr Handle
+    {
+        get
+        {
+            return ctx;
+        }
+    }
 
     public event Action? EventAvailable;
     public event Action? FileLoaded;

@@ -20,7 +20,7 @@ public partial class MainWindow : Window
     private readonly TextBlock textPosition;
     private readonly TextBlock textDuration;
 
-    private MpvClient? mpv;
+    private readonly MpvClient mpv;
     private bool seekingByUser;
     private bool isPaused = true;
     private double duration;
@@ -39,7 +39,25 @@ public partial class MainWindow : Window
         textPosition = this.FindControl<TextBlock>("TextPosition")!;
         textDuration = this.FindControl<TextBlock>("TextDuration")!;
 
-        videoView.HandleCreated += OnVideoHandleCreated;
+        mpv = new MpvClient();
+        // vo=libmpv tells mpv to defer VO selection until a render context is registered (see VideoView). Without it mpv picks a default VO at Initialize() time, which under Wayland is waylandvk, which ignores our render context and spawns its own window.
+        mpv.SetOption("vo", "libmpv");
+        mpv.SetOption("osc", "no");
+        mpv.SetOption("keep-open", "yes");
+        mpv.SetOption("terminal", "no");
+
+        mpv.EventAvailable += OnMpvEventAvailable;
+        mpv.PropertyChanged += OnMpvPropertyChanged;
+        mpv.FileLoaded += UpdatePlayPauseLabel;
+
+        mpv.Initialize();
+
+        mpv.ObserveProperty("time-pos", MpvFormat.Double);
+        mpv.ObserveProperty("duration", MpvFormat.Double);
+        mpv.ObserveProperty("pause", MpvFormat.Flag);
+
+        videoView.Attach(mpv);
+        videoView.RenderFailed += OnVideoRenderFailed;
 
         buttonOpen.Click += async (_, _) =>
         {
@@ -51,7 +69,7 @@ public partial class MainWindow : Window
         };
         buttonStop.Click += (_, _) =>
         {
-            mpv?.Command("stop");
+            mpv.Command("stop");
         };
 
         sliderSeek.AddHandler(Slider.PointerPressedEvent, (_, _) =>
@@ -60,7 +78,7 @@ public partial class MainWindow : Window
         }, handledEventsToo: true);
         sliderSeek.AddHandler(Slider.PointerReleasedEvent, (_, _) =>
         {
-            if (duration > 0 && mpv != null)
+            if (duration > 0)
             {
                 var target = (sliderSeek.Value * duration).ToString("F3", CultureInfo.InvariantCulture);
                 mpv.Command("seek", target, "absolute");
@@ -68,54 +86,30 @@ public partial class MainWindow : Window
             seekingByUser = false;
         }, handledEventsToo: true);
 
+        // Dispose ordering: Avalonia tears down the visual tree (firing VideoView.OnDetachedFromVisualTree → MpvRenderContext.Dispose) before raising this Closed event, so the render context is already freed by the time we dispose mpv. mpv_render_context_free must precede mpv_terminate_destroy; the ordering relies on that Avalonia guarantee.
         Closed += (_, _) =>
         {
-            mpv?.Dispose();
+            mpv.Dispose();
+        };
+
+        // Defer loadfile until the render context is live, otherwise mpv starts the file with no VO attached and the video stream fails.
+        videoView.RenderContextReady += () =>
+        {
+            if (!string.IsNullOrEmpty(InitialFile))
+            {
+                mpv.Command("loadfile", InitialFile);
+                mpv.SetProperty("pause", "no");
+                InitialFile = null;
+            }
         };
     }
 
-    private void OnVideoHandleCreated(Avalonia.Platform.IPlatformHandle handle)
+    private void OnMpvEventAvailable()
     {
-        // NativeControlHost can re-fire this if the control is reparented; today we only support the one-shot case and ignore subsequent handles. If reparenting ever matters, mpv's wid will need to be swapped here (or we move to the render API).
-        if (mpv != null)
+        Dispatcher.UIThread.Post(() =>
         {
-            return;
-        }
-
-        mpv = new MpvClient();
-        mpv.SetOption("wid", ((long)handle.Handle).ToString(CultureInfo.InvariantCulture));
-        // mpv's default Linux VO is waylandvk, which ignores wid and spawns its own window. Force the X11 EGL context when we actually have an X11 child window to embed into.
-        if (handle.HandleDescriptor == "XID")
-        {
-            mpv.SetOption("gpu-context", "x11egl");
-        }
-        mpv.SetOption("input-default-bindings", "yes");
-        mpv.SetOption("input-vo-keyboard", "yes");
-        mpv.SetOption("osc", "no");
-        mpv.SetOption("keep-open", "yes");
-        mpv.SetOption("terminal", "no");
-
-        mpv.EventAvailable += () =>
-        {
-            Dispatcher.UIThread.Post(() =>
-            {
-                mpv?.DrainEvents();
-            });
-        };
-        mpv.PropertyChanged += OnMpvPropertyChanged;
-        mpv.FileLoaded += UpdatePlayPauseLabel;
-
-        mpv.Initialize();
-
-        mpv.ObserveProperty("time-pos", MpvFormat.Double);
-        mpv.ObserveProperty("duration", MpvFormat.Double);
-        mpv.ObserveProperty("pause", MpvFormat.Flag);
-
-        if (!string.IsNullOrEmpty(InitialFile))
-        {
-            mpv.Command("loadfile", InitialFile);
-            mpv.SetProperty("pause", "no");
-        }
+            mpv.DrainEvents();
+        });
     }
 
     private void OnMpvPropertyChanged(PropertyChange change)
@@ -148,19 +142,16 @@ public partial class MainWindow : Window
 
     private void TogglePause()
     {
-        if (mpv == null)
-        {
-            return;
-        }
         mpv.SetProperty("pause", isPaused ? "no" : "yes");
+    }
+
+    private void OnVideoRenderFailed(int code)
+    {
+        Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
     }
 
     private async Task OpenFileAsync()
     {
-        if (mpv == null)
-        {
-            return;
-        }
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = "Open media",

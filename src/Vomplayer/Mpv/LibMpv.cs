@@ -58,8 +58,32 @@ internal static partial class LibMpv
     [LibraryImport(Lib, EntryPoint = "mpv_error_string", StringMarshalling = StringMarshalling.Utf8)]
     public static partial string? ErrorString(int error);
 
+    [LibraryImport(Lib, EntryPoint = "mpv_render_context_create")]
+    public static partial int RenderContextCreate(out IntPtr res, IntPtr mpv, ref MpvRenderParam parameters);
+
+    [LibraryImport(Lib, EntryPoint = "mpv_render_context_render")]
+    public static partial int RenderContextRender(IntPtr ctx, ref MpvRenderParam parameters);
+
+    [LibraryImport(Lib, EntryPoint = "mpv_render_context_set_update_callback")]
+    public static partial void RenderContextSetUpdateCallback(IntPtr ctx, RenderUpdateCallback callback, IntPtr cbCtx);
+
+    [LibraryImport(Lib, EntryPoint = "mpv_render_context_set_update_callback")]
+    public static partial void RenderContextClearUpdateCallback(IntPtr ctx, IntPtr callback, IntPtr cbCtx);
+
+    [LibraryImport(Lib, EntryPoint = "mpv_render_context_report_swap")]
+    public static partial void RenderContextReportSwap(IntPtr ctx);
+
+    [LibraryImport(Lib, EntryPoint = "mpv_render_context_free")]
+    public static partial void RenderContextFree(IntPtr ctx);
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void WakeupCallback(IntPtr data);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void RenderUpdateCallback(IntPtr cbCtx);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate IntPtr MpvOpenGlGetProcAddress(IntPtr ctx, IntPtr name);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct Event
@@ -137,4 +161,50 @@ public enum MpvFormat
     NodeArray = 7,
     NodeMap = 8,
     ByteArray = 9,
+}
+
+public enum MpvRenderParamType
+{
+    Invalid = 0,
+    ApiType = 1,
+    OpenglInitParams = 2,
+    OpenglFbo = 3,
+    FlipY = 4,
+    Depth = 5,
+    IccProfile = 6,
+    AmbientLight = 7,
+    X11Display = 8,
+    WlDisplay = 9,
+    AdvancedControl = 10,
+    NextFrameInfo = 11,
+    BlockForTargetTime = 12,
+    SkipRendering = 13,
+    Drm = 14,
+    SwSize = 15,
+    SwFormat = 16,
+    SwStride = 17,
+    SwPointer = 18,
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct MpvRenderParam
+{
+    public MpvRenderParamType Type;
+    public IntPtr Data;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct MpvOpenGlInitParams
+{
+    public IntPtr GetProcAddress;
+    public IntPtr GetProcAddressCtx;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct MpvOpenGlFbo
+{
+    public int Fbo;
+    public int Width;
+    public int Height;
+    public int InternalFormat;
 }
