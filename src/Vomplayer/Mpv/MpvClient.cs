@@ -14,7 +14,7 @@ public sealed class MpvException : Exception
     }
 }
 
-public readonly record struct PropertyChange(string Name, MpvPropertyValue Value);
+public readonly record struct PropertyChange(string Name, MpvPropertyValue Value, ulong Id);
 
 public readonly record struct MpvPropertyValue(object? Raw)
 {
@@ -55,10 +55,12 @@ public readonly record struct MpvPropertyValue(object? Raw)
     }
 }
 
+// Thread model: all methods except the wakeup callback must be called from a single thread (typically the UI thread). libmpv fires the wakeup on its own event thread; we only raise EventAvailable from there — no mpv_* calls happen inside the callback. Callers must subscribe to PropertyChanged before calling ObserveProperty, since libmpv synthesizes an initial change event as part of the observe call.
 public sealed class MpvClient : IDisposable
 {
     private IntPtr ctx;
     private LibMpv.WakeupCallback? wakeup;
+    private ulong nextObserveId;
 
     public event Action? EventAvailable;
     public event Action? FileLoaded;
@@ -156,9 +158,22 @@ public sealed class MpvClient : IDisposable
         return value != 0;
     }
 
-    public void ObserveProperty(string name, MpvFormat format)
+    public ulong ObserveProperty(string name, MpvFormat format)
     {
-        Check(LibMpv.ObserveProperty(ctx, 0, name, format));
+        var id = ++nextObserveId;
+        Check(LibMpv.ObserveProperty(ctx, id, name, format));
+        return id;
+    }
+
+    // Returns the number of observations removed — 0 means the id wasn't registered. Not throwing on 0 lets callers write idempotent cleanup paths.
+    public int UnobserveProperty(ulong id)
+    {
+        var rc = LibMpv.UnobserveProperty(ctx, id);
+        if (rc < 0)
+        {
+            throw new MpvException(rc, LibMpv.ErrorString(rc));
+        }
+        return rc;
     }
 
     public void DrainEvents()
@@ -200,7 +215,7 @@ public sealed class MpvClient : IDisposable
                 var prop = Marshal.PtrToStructure<LibMpv.EventProperty>(evt.Data);
                 var name = Marshal.PtrToStringUTF8(prop.Name) ?? "";
                 var value = ReadPropertyValue(prop);
-                PropertyChanged?.Invoke(new PropertyChange(name, value));
+                PropertyChanged?.Invoke(new PropertyChange(name, value, evt.ReplyUserData));
                 break;
         }
     }
@@ -246,9 +261,7 @@ public sealed class MpvClient : IDisposable
         {
             return;
         }
-        // Clear the native wakeup callback first so libmpv can't fire into a disposed object
-        // during teardown. Then drop managed event subscribers before destroying ctx so any
-        // late dispatch this thread is still servicing becomes a no-op.
+        // Clear the native wakeup callback first so libmpv can't fire into a disposed object during teardown. Then drop managed event subscribers before destroying ctx so any late dispatch this thread is still servicing becomes a no-op.
         LibMpv.ClearWakeupCallback(ctx, IntPtr.Zero, IntPtr.Zero);
         EventAvailable = null;
         FileLoaded = null;

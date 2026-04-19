@@ -34,6 +34,9 @@ internal static partial class LibMpv
     [LibraryImport(Lib, EntryPoint = "mpv_observe_property", StringMarshalling = StringMarshalling.Utf8)]
     public static partial int ObserveProperty(IntPtr ctx, ulong replyUserData, string name, MpvFormat format);
 
+    [LibraryImport(Lib, EntryPoint = "mpv_unobserve_property")]
+    public static partial int UnobserveProperty(IntPtr ctx, ulong registeredReplyUserData);
+
     [LibraryImport(Lib, EntryPoint = "mpv_free")]
     public static partial void Free(IntPtr data);
 

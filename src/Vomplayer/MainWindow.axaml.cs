@@ -76,9 +76,7 @@ public partial class MainWindow : Window
 
     private void OnVideoHandleCreated(Avalonia.Platform.IPlatformHandle handle)
     {
-        // NativeControlHost can re-fire this if the control is reparented; today we only
-        // support the one-shot case and ignore subsequent handles. If reparenting ever
-        // matters, mpv's wid will need to be swapped here (or we move to the render API).
+        // NativeControlHost can re-fire this if the control is reparented; today we only support the one-shot case and ignore subsequent handles. If reparenting ever matters, mpv's wid will need to be swapped here (or we move to the render API).
         if (mpv != null)
         {
             return;
@@ -86,8 +84,7 @@ public partial class MainWindow : Window
 
         mpv = new MpvClient();
         mpv.SetOption("wid", ((long)handle.Handle).ToString(CultureInfo.InvariantCulture));
-        // mpv's default Linux VO is waylandvk, which ignores wid and spawns its own window.
-        // Force the X11 EGL context when we actually have an X11 child window to embed into.
+        // mpv's default Linux VO is waylandvk, which ignores wid and spawns its own window. Force the X11 EGL context when we actually have an X11 child window to embed into.
         if (handle.HandleDescriptor == "XID")
         {
             mpv.SetOption("gpu-context", "x11egl");
