@@ -12,7 +12,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 {
     private readonly IPlayback playback;
     private readonly IFilePicker filePicker;
-    private bool isSeekingByUser;
     private bool initialFileLoaded;
 
     [ObservableProperty]
@@ -80,16 +79,10 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         initialFileLoaded = true;
     }
 
-    public void OnSeekDragStart()
+    // Seek to a normalized position in [0, 1]. View calls this on every user change to the scale; mpv's position catches up and pushes SeekValue back on the next playback tick, which is fine — the scale follows playback when the user isn't pressing it.
+    public void SeekTo(double normalizedPosition)
     {
-        isSeekingByUser = true;
-    }
-
-    public void OnSeekDragEnd()
-    {
-        isSeekingByUser = false;
-        var target = SeekValue * Duration.TotalSeconds;
-        playback.Seek(target);
+        playback.Seek(normalizedPosition * Duration.TotalSeconds);
     }
 
     private void OnPlaybackPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -98,7 +91,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             case nameof(IPlayback.PositionSeconds):
                 Position = TimeSpan.FromSeconds(playback.PositionSeconds);
-                if (!isSeekingByUser && playback.DurationSeconds > 0)
+                if (playback.DurationSeconds > 0)
                 {
                     SeekValue = Math.Clamp(playback.PositionSeconds / playback.DurationSeconds, 0, 1);
                 }

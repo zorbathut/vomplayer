@@ -20,6 +20,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private bool isPaused = true;
 
+    [ObservableProperty]
+    private bool isSeeking;
+
     public event Action? FileLoaded;
     public event Action<int>? FileEnded;
 
@@ -52,6 +55,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         mpv.ObserveProperty("time-pos", MpvFormat.Double);
         mpv.ObserveProperty("duration", MpvFormat.Double);
         mpv.ObserveProperty("pause", MpvFormat.Flag);
+        mpv.ObserveProperty("seeking", MpvFormat.Flag);
     }
 
     public void LoadFile(string path)
@@ -121,6 +125,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 break;
             case "pause":
                 IsPaused = change.Value.AsFlag ?? true;
+                break;
+            case "seeking":
+                IsSeeking = change.Value.AsFlag ?? false;
                 break;
             default:
                 // Log-and-skip rather than throw: MpvClient.PropertyChanged is a broadcast and an unrecognized name here would otherwise take down the whole event-drain loop. A future observer on the same client shouldn't be able to ambush us.

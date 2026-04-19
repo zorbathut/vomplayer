@@ -21,6 +21,9 @@ public partial class ViewModelMainTests
         [ObservableProperty]
         private bool isPaused = true;
 
+        [ObservableProperty]
+        private bool isSeeking;
+
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
 
@@ -136,32 +139,27 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public void SeekValueDoesNotUpdateFromPlaybackWhileDragging()
+    public void SeekToSeeksToNormalizedPositionScaledByDuration()
     {
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker());
         pb.DurationSeconds = 100;
-        pb.PositionSeconds = 25;
-        var before = vm.SeekValue;
 
-        vm.OnSeekDragStart();
-        pb.PositionSeconds = 75;
+        vm.SeekTo(0.4);
 
-        Assert.That(vm.SeekValue, Is.EqualTo(before));
+        Assert.That(pb.LastSeekSeconds, Is.EqualTo(40));
     }
 
     [Test]
-    public void OnSeekDragEndCommitsSeekToPlayback()
+    public void SeekValueTracksPlaybackPosition()
     {
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker());
         pb.DurationSeconds = 100;
 
-        vm.OnSeekDragStart();
-        vm.SeekValue = 0.4;
-        vm.OnSeekDragEnd();
+        pb.PositionSeconds = 75;
 
-        Assert.That(pb.LastSeekSeconds, Is.EqualTo(40));
+        Assert.That(vm.SeekValue, Is.EqualTo(0.75));
     }
 
     [Test]

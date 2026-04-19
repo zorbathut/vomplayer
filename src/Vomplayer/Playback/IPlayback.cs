@@ -8,6 +8,7 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     double PositionSeconds { get; }
     double DurationSeconds { get; }
     bool IsPaused { get; }
+    bool IsSeeking { get; }
 
     event Action? FileLoaded;
     event Action<int>? FileEnded;
