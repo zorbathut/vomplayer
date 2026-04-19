@@ -1,0 +1,29 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="using:Vomplayer.Controls"
+        x:Class="Vomplayer.MainWindow"
+        Title="Vomplayer"
+        Width="960" Height="600"
+        Background="Black">
+    <Grid RowDefinitions="*,Auto">
+        <controls:VideoView Grid.Row="0" Name="VideoView" />
+        <Border Grid.Row="1" Background="#1e1e1e" Padding="8">
+            <StackPanel Orientation="Vertical" Spacing="4">
+                <Grid ColumnDefinitions="Auto,*,Auto">
+                    <TextBlock Grid.Column="0" Name="TextPosition" Foreground="White"
+                               VerticalAlignment="Center" Text="00:00" MinWidth="48" />
+                    <Slider Grid.Column="1" Name="SliderSeek" Margin="8,0"
+                            Minimum="0" Maximum="1" Value="0" />
+                    <TextBlock Grid.Column="2" Name="TextDuration" Foreground="White"
+                               VerticalAlignment="Center" Text="00:00" MinWidth="48"
+                               TextAlignment="Right" />
+                </Grid>
+                <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                    <Button Name="ButtonOpen" Content="Open..." />
+                    <Button Name="ButtonPlayPause" Content="Play" Width="80" />
+                    <Button Name="ButtonStop" Content="Stop" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
