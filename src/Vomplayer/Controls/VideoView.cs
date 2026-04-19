@@ -35,7 +35,7 @@ public class VideoView : OpenGlControlBase
 
     public event Action<int>? RenderFailed;
 
-    public void Attach(MpvClient client)
+    internal void AttachClient(MpvClient client)
     {
         if (this.client != null)
         {

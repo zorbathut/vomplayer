@@ -1,7 +1,9 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="using:Vomplayer.Controls"
+        xmlns:vm="using:Vomplayer.ViewModels"
         x:Class="Vomplayer.MainWindow"
+        x:DataType="vm:ViewModelMain"
         Title="Vomplayer"
         Width="960" Height="600"
         Background="Black">
@@ -10,18 +12,21 @@
         <Border Grid.Row="1" Background="#1e1e1e" Padding="8">
             <StackPanel Orientation="Vertical" Spacing="4">
                 <Grid ColumnDefinitions="Auto,*,Auto">
-                    <TextBlock Grid.Column="0" Name="TextPosition" Foreground="White"
-                               VerticalAlignment="Center" Text="00:00" MinWidth="48" />
+                    <TextBlock Grid.Column="0" Foreground="White" VerticalAlignment="Center" MinWidth="48"
+                               Text="{Binding Position, Converter={StaticResource TimeFormatConverter}}" />
                     <Slider Grid.Column="1" Name="SliderSeek" Margin="8,0"
-                            Minimum="0" Maximum="1" Value="0" />
-                    <TextBlock Grid.Column="2" Name="TextDuration" Foreground="White"
-                               VerticalAlignment="Center" Text="00:00" MinWidth="48"
-                               TextAlignment="Right" />
+                            Minimum="0" Maximum="1"
+                            Value="{Binding SeekValue, Mode=TwoWay}" />
+                    <TextBlock Grid.Column="2" Foreground="White" VerticalAlignment="Center" MinWidth="48"
+                               TextAlignment="Right"
+                               Text="{Binding Duration, Converter={StaticResource TimeFormatConverter}}" />
                 </Grid>
                 <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
-                    <Button Name="ButtonOpen" Content="Open..." />
-                    <Button Name="ButtonPlayPause" Content="Play" Width="80" />
-                    <Button Name="ButtonStop" Content="Stop" />
+                    <Button Content="Open..." Command="{Binding OpenCommand}" />
+                    <Button Width="80"
+                            Content="{Binding IsPaused, Converter={StaticResource PlayPauseLabelConverter}}"
+                            Command="{Binding PlayPauseCommand}" />
+                    <Button Content="Stop" Command="{Binding StopCommand}" />
                 </StackPanel>
             </StackPanel>
         </Border>
