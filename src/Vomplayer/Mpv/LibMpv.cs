@@ -64,6 +64,9 @@ internal static partial class LibMpv
     [LibraryImport(Lib, EntryPoint = "mpv_render_context_render")]
     public static partial int RenderContextRender(IntPtr ctx, ref MpvRenderParam parameters);
 
+    [LibraryImport(Lib, EntryPoint = "mpv_render_context_update")]
+    public static partial ulong RenderContextUpdate(IntPtr ctx);
+
     [LibraryImport(Lib, EntryPoint = "mpv_render_context_set_update_callback")]
     public static partial void RenderContextSetUpdateCallback(IntPtr ctx, RenderUpdateCallback callback, IntPtr cbCtx);
 
@@ -161,6 +164,13 @@ public enum MpvFormat
     NodeArray = 7,
     NodeMap = 8,
     ByteArray = 9,
+}
+
+[Flags]
+public enum MpvRenderUpdateFlag : ulong
+{
+    None = 0,
+    Frame = 1UL << 0,
 }
 
 public enum MpvRenderParamType

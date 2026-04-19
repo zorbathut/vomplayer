@@ -41,12 +41,16 @@ public sealed class MpvRenderContext : IDisposable
             GetProcAddressCtx = IntPtr.Zero,
         };
 
+        // ADVANCED_CONTROL=1 enables direct rendering (decoder writes straight to GL textures), GPU screenshots, hwdec interop, and frame-timing alignment with display refresh. Contract: we must have a wakeup callback registered (we do, below) and we must call mpv_render_context_update before mpv_render_context_render so mpv knows the user is keeping up. Failure to follow the contract risks deadlock of the mpv core thread.
+        int advancedControl = 1;
+
         unsafe
         {
-            Span<MpvRenderParam> parameters = stackalloc MpvRenderParam[3];
+            Span<MpvRenderParam> parameters = stackalloc MpvRenderParam[4];
             parameters[0] = new MpvRenderParam { Type = MpvRenderParamType.ApiType, Data = openGlApiTypePtr };
             parameters[1] = new MpvRenderParam { Type = MpvRenderParamType.OpenglInitParams, Data = (IntPtr)(&initParams) };
-            parameters[2] = new MpvRenderParam { Type = MpvRenderParamType.Invalid, Data = IntPtr.Zero };
+            parameters[2] = new MpvRenderParam { Type = MpvRenderParamType.AdvancedControl, Data = (IntPtr)(&advancedControl) };
+            parameters[3] = new MpvRenderParam { Type = MpvRenderParamType.Invalid, Data = IntPtr.Zero };
 
             var rc = LibMpv.RenderContextCreate(out ctx, client.Handle, ref parameters[0]);
             if (rc < 0)
@@ -68,6 +72,9 @@ public sealed class MpvRenderContext : IDisposable
         {
             return;
         }
+
+        // Required by the ADVANCED_CONTROL contract: poll mpv before each render so it knows we're keeping up. We render unconditionally (Avalonia may have asked for a redraw for non-frame reasons — window damage, resize — and we want to repaint to the new FBO either way; mpv re-renders the current frame if no new one is available).
+        LibMpv.RenderContextUpdate(ctx);
 
         unsafe
         {
