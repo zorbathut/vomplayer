@@ -40,10 +40,34 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Gtk.Label positionLabel;
     private readonly Gtk.Label durationLabel;
     private readonly Gtk.Button playPauseButton;
+    private readonly Gtk.Box controlsBox;
+    private readonly Gtk.Box rootBox;
+    private readonly Gtk.Overlay videoOverlay;
     private readonly bool hdrRequested;
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
     private readonly VideoSurface? videoSurface;
+    // Fullscreen state is a mirror of Gtk.Window.Fullscreened — the notify::fullscreened handler is authoritative. This lets compositor/WM-initiated fullscreen exits (Super-key, window menu, tiling WM shortcut) restore the controls even though our own toggles didn't run.
+    private bool isFullscreen;
+    private uint controlsHideTimeoutId;
+    private bool isClosing;
+    private int motionEventCount;
+    private double armPositionX = double.NaN;
+    private double armPositionY = double.NaN;
+    private const uint ControlsHideDelayMs = 2000;
+    // Ignore motion events whose position is within this many px of the position at the last timer arm. Filters out sub-pixel jitter and any spurious synthetic events the compositor/GTK might emit. Real user motion easily exceeds this.
+    private const double MotionDeadZonePx = 3.0;
+    // Set VOM_FS_DEBUG=1 in the environment to dump [fs] traces to stderr covering timer arms, timer fires, motion events (rate-limited), and the hide path — helps diagnose why autohide isn't firing if the default logic fails in the wild.
+    private static readonly bool FsDebug = Environment.GetEnvironmentVariable("VOM_FS_DEBUG") == "1";
+    private static readonly System.Diagnostics.Stopwatch FsStopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+    private static void FsLog(string msg)
+    {
+        if (FsDebug)
+        {
+            Console.Error.WriteLine($"[fs t={FsStopwatch.Elapsed.TotalSeconds:F3}] {msg}");
+        }
+    }
     private bool updatingFromVm;
     // Seek-scale state machine. idle = both false; holding = userHolding; settling = awaitingSeekSettle (post-release, waiting for mpv's in-flight seek to report a time-pos distinct from the pre-release one). `seekValueAtRelease` is the baseline we wait to move away from — gating on "time-pos has actually advanced" avoids a race where mpv fires `seeking=false` before its `time-pos` update, which would otherwise let a stale SeekValue push flicker the scale.
     private bool userHolding;
@@ -73,6 +97,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         SetApplication(app);
         Title = hdrRequested ? "Vomplayer" : "Vomplayer — SDR";
         SetDefaultSize(1280, 720);
+
+        InstallVomCss();
 
         var filePicker = new FilePickerGtk(this);
         viewModel = new ViewModelMain(playback, filePicker);
@@ -112,11 +138,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         positionLabel = Gtk.Label.New("00:00");
         durationLabel = Gtk.Label.New("00:00");
 
-        var controlsBox = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
-        controlsBox.SetMarginStart(6);
-        controlsBox.SetMarginEnd(6);
-        controlsBox.SetMarginTop(6);
-        controlsBox.SetMarginBottom(6);
+        controlsBox = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
+        // Spacing around the bar comes from CSS padding on .vom-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges.
+        controlsBox.AddCssClass("vom-controls-bar");
         controlsBox.Append(openButton);
         controlsBox.Append(playPauseButton);
         controlsBox.Append(stopButton);
@@ -124,8 +148,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         controlsBox.Append(seekScale);
         controlsBox.Append(durationLabel);
 
-        var rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
-        rootBox.Append(videoWidget);
+        // Video sits inside an Overlay so fullscreen can move the controls on top of the video (valign=End + "osd" style class) without taking space in the layout. In windowed mode the overlay has no overlay children — controls are packed below in rootBox as usual.
+        videoOverlay = Gtk.Overlay.New();
+        videoOverlay.SetChild(videoWidget);
+        videoOverlay.SetHexpand(true);
+        videoOverlay.SetVexpand(true);
+
+        rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
+        rootBox.Append(videoOverlay);
         rootBox.Append(controlsBox);
         SetChild(rootBox);
 
@@ -147,6 +177,27 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             "event",
             Marshal.GetFunctionPointerForDelegate(seekLegacyCallback),
             IntPtr.Zero, IntPtr.Zero, 0);
+
+        // Fullscreen: key controller at Capture phase on the window so F/F11/Escape work regardless of which child has focus. None of those keys are consumed by any focused child today (the scale uses arrow keys for seek; no text entry exists), so capture is safe. Unlike EventControllerLegacy, OnKeyPressed delivers primitives (uint, uint, ModifierType), not a GdkEvent* — no GirCore marshalling hazard here.
+        var keyController = Gtk.EventControllerKey.New();
+        keyController.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        keyController.OnKeyPressed += OnWindowKeyPressed;
+        AddController(keyController);
+
+        // Mouse-motion drives the auto-hide timer while fullscreen. Capture phase so the controller fires before any child-widget controller — motion isn't normally consumed, but Capture guarantees delivery regardless.
+        var motionController = Gtk.EventControllerMotion.New();
+        motionController.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        motionController.OnMotion += OnWindowPointerMotion;
+        AddController(motionController);
+
+        // Double-click on the video widget toggles fullscreen. GestureClick does participate in the gesture-claim protocol, but the video widgets (VideoArea/VideoView) attach no other gestures, so there's nothing to contend with. Single-click is unbound; any future click-to-pause must consider that double-click fires a single-press first (GestureClick delivers pressed for each of the two presses, with NPress incrementing).
+        var clickGesture = Gtk.GestureClick.New();
+        clickGesture.Button = (uint)Gdk.Constants.BUTTON_PRIMARY;
+        clickGesture.OnPressed += OnVideoClickPressed;
+        videoWidget.AddController(clickGesture);
+
+        // Mirror the real fullscreen state rather than treating a local bool as authority. Covers compositor/WM-initiated un-fullscreen that bypasses our key/gesture paths.
+        OnNotify += OnWindowNotify;
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         playback.PropertyChanged += OnPlaybackPropertyChangedForSeekSettle;
@@ -297,8 +348,195 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
     }
 
+    // The window background needs to be transparent so the video subsurface (placed below the parent wl_surface) shows through the video area. Widgets that need an opaque background — specifically the controls bar in windowed mode — set their own via the vom-controls-bar class. Priority APPLICATION (600) beats theme defaults; GTK will cascade the widget's own @theme_bg_color reference inside the class so the bar matches the platform theme.
+    private static void InstallVomCss()
+    {
+        var provider = Gtk.CssProvider.New();
+        provider.LoadFromString("window { background: transparent; } .vom-controls-bar { background-color: @theme_bg_color; padding: 6px; } .osd { padding: 6px; }");
+        Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+
+    private bool OnWindowKeyPressed(Gtk.EventControllerKey sender, Gtk.EventControllerKey.KeyPressedSignalArgs args)
+    {
+        uint keyval = args.Keyval;
+        if (keyval == (uint)Gdk.Constants.KEY_f
+            || keyval == (uint)Gdk.Constants.KEY_F
+            || keyval == (uint)Gdk.Constants.KEY_F11)
+        {
+            SetFullscreen(!isFullscreen);
+            return true;
+        }
+        if (keyval == (uint)Gdk.Constants.KEY_Escape)
+        {
+            if (isFullscreen)
+            {
+                SetFullscreen(false);
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    private void OnWindowPointerMotion(Gtk.EventControllerMotion sender, Gtk.EventControllerMotion.MotionSignalArgs args)
+    {
+        if (!isFullscreen)
+        {
+            return;
+        }
+        motionEventCount++;
+        double x = args.X;
+        double y = args.Y;
+        if (!double.IsNaN(armPositionX))
+        {
+            double dx = x - armPositionX;
+            double dy = y - armPositionY;
+            if (dx * dx + dy * dy < MotionDeadZonePx * MotionDeadZonePx)
+            {
+                if (motionEventCount % 30 == 1)
+                {
+                    FsLog($"motion #{motionEventCount} x={x:F1} y={y:F1} (in dead zone, ignored)");
+                }
+                return;
+            }
+        }
+        armPositionX = x;
+        armPositionY = y;
+        if (motionEventCount % 10 == 1)
+        {
+            FsLog($"motion #{motionEventCount} x={x:F1} y={y:F1}");
+        }
+        if (!controlsBox.GetVisible())
+        {
+            controlsBox.SetVisible(true);
+        }
+        ArmControlsHideTimer();
+    }
+
+    private void OnVideoClickPressed(Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
+    {
+        if (args.NPress == 2)
+        {
+            SetFullscreen(!isFullscreen);
+        }
+    }
+
+    // Notify handler for the "fullscreened" property. Resyncs when the compositor/WM changes the window state behind our back (e.g., a tiling-WM shortcut that un-fullscreens). If the state already matches, SetFullscreen already applied the visibility logic synchronously — no work left.
+    private void OnWindowNotify(GObject.Object sender, GObject.Object.NotifySignalArgs args)
+    {
+        if (args.Pspec.GetName() != "fullscreened")
+        {
+            return;
+        }
+        if (Fullscreened == isFullscreen)
+        {
+            return;
+        }
+        ApplyFullscreenState(Fullscreened);
+    }
+
+    // isFullscreen tracks user intent, not the mirrored GTK state: it updates synchronously on keypress/click so a rapid F-F or F-then-doubleclick before notify arrives toggles correctly. OnWindowNotify resyncs if the compositor changes state externally.
+    private void SetFullscreen(bool on)
+    {
+        if (isFullscreen == on)
+        {
+            return;
+        }
+        if (on)
+        {
+            Fullscreen();
+        }
+        else
+        {
+            Unfullscreen();
+        }
+        ApplyFullscreenState(on);
+    }
+
+    // Reparent controlsBox between rootBox (windowed, stacked below video) and videoOverlay (fullscreen, floating over the bottom of the video). Toggling visibility on the overlay child doesn't resize the video widget, so controls appearing/disappearing during auto-hide don't cause the video to rescale. The background class swaps at the same time: "vom-controls-bar" is opaque for windowed; "osd" is semi-transparent dark over video for fullscreen. Parent-guarded: if ApplyFullscreenState ever runs twice for the same state (e.g., from our toggle and again from notify::fullscreened after a compositor-initiated transition racing with our own), the double-remove/double-add would fault on a non-child widget.
+    private void ApplyFullscreenState(bool on)
+    {
+        FsLog($"apply on={on}");
+        isFullscreen = on;
+        motionEventCount = 0;
+        armPositionX = double.NaN;
+        armPositionY = double.NaN;
+        if (on)
+        {
+            if (controlsBox.Parent == rootBox)
+            {
+                rootBox.Remove(controlsBox);
+            }
+            controlsBox.SetValign(Gtk.Align.End);
+            controlsBox.RemoveCssClass("vom-controls-bar");
+            controlsBox.AddCssClass("osd");
+            if (controlsBox.Parent != videoOverlay)
+            {
+                videoOverlay.AddOverlay(controlsBox);
+            }
+            controlsBox.SetVisible(true);
+            ArmControlsHideTimer();
+        }
+        else
+        {
+            CancelControlsHideTimer();
+            if (controlsBox.Parent == videoOverlay)
+            {
+                videoOverlay.RemoveOverlay(controlsBox);
+            }
+            controlsBox.RemoveCssClass("osd");
+            controlsBox.AddCssClass("vom-controls-bar");
+            controlsBox.SetValign(Gtk.Align.Fill);
+            if (controlsBox.Parent != rootBox)
+            {
+                rootBox.Append(controlsBox);
+            }
+            controlsBox.SetVisible(true);
+        }
+    }
+
+    private void ArmControlsHideTimer()
+    {
+        CancelControlsHideTimer();
+        controlsHideTimeoutId = GLib.Functions.TimeoutAdd(
+            (int)GLib.Constants.PRIORITY_DEFAULT,
+            ControlsHideDelayMs,
+            OnControlsHideTimeout);
+        FsLog($"arm id={controlsHideTimeoutId}");
+    }
+
+    private void CancelControlsHideTimer()
+    {
+        if (controlsHideTimeoutId != 0)
+        {
+            FsLog($"cancel id={controlsHideTimeoutId}");
+            GLib.Functions.SourceRemove(controlsHideTimeoutId);
+            controlsHideTimeoutId = 0;
+        }
+    }
+
+    // `isClosing` guards against the case where SourceRemove fails to cancel because the callback is already in-flight — dropping into a torn-down window would touch collected native widgets. QueueDraw on videoOverlay forces GTK to repaint the region the hidden controls previously occupied — without it, the parent wl_surface's pixel state under the (now-hidden) widget can linger on-screen because the video subsurface below is what's actually animating frame-to-frame, not the parent.
+    private bool OnControlsHideTimeout()
+    {
+        controlsHideTimeoutId = 0;
+        FsLog($"timeout fired isClosing={isClosing} isFS={isFullscreen} visible={controlsBox.GetVisible()}");
+        if (isClosing)
+        {
+            return false;
+        }
+        if (isFullscreen)
+        {
+            controlsBox.SetVisible(false);
+            videoOverlay.QueueDraw();
+            FsLog($"hide applied visible={controlsBox.GetVisible()}");
+        }
+        return false;
+    }
+
     private bool OnWindowCloseRequest(Gtk.Window sender, EventArgs e)
     {
+        isClosing = true;
+        CancelControlsHideTimer();
         playback.PropertyChanged -= OnPlaybackPropertyChangedForSeekSettle;
         // Disconnect the raw signal BEFORE releasing our delegate reference. GTK flushes pending events during window destruction, which can happen after this handler returns; if we dropped the delegate root first, a late dispatch would land in freed memory. Disconnect is synchronous — once it returns, the function pointer is unwired.
         if (seekLegacyHandlerId != 0 && seekLegacyControllerHandle != IntPtr.Zero)

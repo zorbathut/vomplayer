@@ -18,6 +18,7 @@
 #include <wayland-egl.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <GLES2/gl2.h>
 #include "color-management-v1-client-protocol.h"
 
 //---------------------------------------------------------------
@@ -304,6 +305,14 @@ struct vom_video_surface *vom_video_surface_create(
     }
     wl_surface_set_buffer_scale(vs->wl_surface, initial_buffer_scale);
 
+    // Empty input region: pointer/touch events over the subsurface fall through to the parent wl_surface. Without this, the compositor routes input to the child (since the default input region is infinite), and the main GTK surface's EventControllerMotion never sees motion over the video — which breaks mouse-idle auto-hide and any click/motion UI that lives on the parent.
+    struct wl_region *empty_input = wl_compositor_create_region(g_compositor);
+    if (empty_input)
+    {
+        wl_surface_set_input_region(vs->wl_surface, empty_input);
+        wl_region_destroy(empty_input);
+    }
+
     vs->wl_subsurface = wl_subcompositor_get_subsurface(g_subcompositor, vs->wl_surface, parent);
     if (!vs->wl_subsurface)
     {
@@ -312,7 +321,8 @@ struct vom_video_surface *vom_video_surface_create(
         free(vs);
         return NULL;
     }
-    wl_subsurface_place_above(vs->wl_subsurface, parent);
+    // Place the video subsurface BELOW the parent wl_surface (not above). The GTK main surface is made transparent in the video region (VideoArea paints nothing; window bg is overridden to transparent), so the subsurface shows through from underneath. Anything GTK renders into the main surface — including control-bar widgets overlaid at the bottom in fullscreen — then composites on top of the video. Place-above would hide GTK-drawn pixels behind the subsurface's opaque video buffer, which makes overlaid controls invisible.
+    wl_subsurface_place_below(vs->wl_subsurface, parent);
     wl_subsurface_set_position(vs->wl_subsurface, 0, 0);
     wl_subsurface_set_desync(vs->wl_subsurface);
 
@@ -391,9 +401,15 @@ struct vom_video_surface *vom_video_surface_create(
         goto fail;
     }
 
-    // Commit the child with no buffer yet — this flushes the subsurface creation to the compositor. The first render will attach a buffer and swap.
-    wl_surface_commit(vs->wl_surface);
-    // Parent commit applies the subsurface position.
+    // Paint one opaque-black frame into the subsurface so it has a valid buffer attached from the moment it's visible. The subsurface is placed BELOW the parent wl_surface which is itself transparent in the video region — without this initial buffer, the compositor would show whatever is underneath the window (the desktop) through the transparent parent until mpv's first render lands. mpv will overwrite this with real video frames as soon as it starts rendering.
+    if (eglMakeCurrent(vs->egl_display, vs->egl_surface, vs->egl_surface, vs->egl_context))
+    {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        eglSwapBuffers(vs->egl_display, vs->egl_surface);
+    }
+
+    // Parent commit applies the subsurface position. The child was already committed by eglSwapBuffers above (which implicitly commits the wl_surface whose wl_egl_window we swapped).
     wl_surface_commit(parent);
     wl_display_flush(display);
 
