@@ -43,6 +43,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Gtk.Box controlsBox;
     private readonly Gtk.Box rootBox;
     private readonly Gtk.Overlay videoOverlay;
+    private readonly Gtk.Box noVideoBg;
     private readonly bool hdrRequested;
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
@@ -112,6 +113,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             playback.AttachRenderSurface(client => surface.SetMpvClient(client));
             surface.RenderContextReady += OnVideoRenderContextReadyWayland;
             surface.RenderFailed += OnVideoRenderFailed;
+            surface.FirstFrameRendered += OnVideoFirstFrameRendered;
             videoArea = area;
             videoSurface = surface;
             videoWidget = area;
@@ -153,6 +155,15 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         videoOverlay.SetChild(videoWidget);
         videoOverlay.SetHexpand(true);
         videoOverlay.SetVexpand(true);
+
+        // Black placeholder that fills the video region while the Wayland subsurface has no buffer attached yet (subsurface placed below the transparent parent shows the desktop through otherwise). Hidden permanently on mpv's FirstFrameRendered; we don't re-show on stop, since mpv keeps the last rendered frame in the subsurface and that's a better "stopped" indicator than flashing back to black.
+        noVideoBg = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
+        noVideoBg.AddCssClass("vom-no-video-bg");
+        noVideoBg.SetHalign(Gtk.Align.Fill);
+        noVideoBg.SetValign(Gtk.Align.Fill);
+        noVideoBg.SetHexpand(true);
+        noVideoBg.SetVexpand(true);
+        videoOverlay.AddOverlay(noVideoBg);
 
         rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         rootBox.Append(videoOverlay);
@@ -328,6 +339,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
     }
 
+    private void OnVideoFirstFrameRendered()
+    {
+        noVideoBg.SetVisible(false);
+    }
+
     // GLArea path: HDR has to be attached to the main surface (no subsurface). UI will look blown out because GTK widgets render sRGB values into a surface KWin interprets as PQ. Documented fallback behavior.
     private void OnVideoRenderContextReadyGLArea()
     {
@@ -352,7 +368,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private static void InstallVomCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window { background: transparent; } .vom-controls-bar { background-color: @theme_bg_color; padding: 6px; } .osd { padding: 6px; }");
+        provider.LoadFromString("window { background: transparent; } .vom-controls-bar { background-color: @theme_bg_color; padding: 6px; } .osd { padding: 6px; } .vom-no-video-bg { background-color: black; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 

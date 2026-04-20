@@ -25,10 +25,13 @@ public sealed partial class VideoSurface : IDisposable
     private MpvRenderContext? renderContext;
     private MpvClient? client;
     private int renderQueued;
+    private bool firstFrameRendered;
     private (int x, int y, int w, int h, int scale)? pendingGeometry;
 
     public event Action? RenderContextReady;
     public event Action<int>? RenderFailed;
+    // Fires exactly once, on the main thread, after mpv's first successful frame swap. The Wayland subsurface has no buffer attached between creation and first render; consumers can use this to remove any "placeholder" they drew on the GTK side while the subsurface was empty.
+    public event Action? FirstFrameRendered;
 
     // True iff the subsurface has a PQ/BT.2020 image description successfully attached. Valid only after RenderContextReady fires.
     public bool HdrActive
@@ -221,6 +224,11 @@ public sealed partial class VideoSurface : IDisposable
             renderContext.Render(0, bw, bh);
             surface.Swap();
             renderContext.ReportSwap();
+            if (!firstFrameRendered)
+            {
+                firstFrameRendered = true;
+                FirstFrameRendered?.Invoke();
+            }
         }
         catch (Exception ex)
         {

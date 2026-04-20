@@ -18,7 +18,6 @@
 #include <wayland-egl.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES2/gl2.h>
 #include "color-management-v1-client-protocol.h"
 
 //---------------------------------------------------------------
@@ -401,15 +400,9 @@ struct vom_video_surface *vom_video_surface_create(
         goto fail;
     }
 
-    // Paint one opaque-black frame into the subsurface so it has a valid buffer attached from the moment it's visible. The subsurface is placed BELOW the parent wl_surface which is itself transparent in the video region — without this initial buffer, the compositor would show whatever is underneath the window (the desktop) through the transparent parent until mpv's first render lands. mpv will overwrite this with real video frames as soon as it starts rendering.
-    if (eglMakeCurrent(vs->egl_display, vs->egl_surface, vs->egl_surface, vs->egl_context))
-    {
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        eglSwapBuffers(vs->egl_display, vs->egl_surface);
-    }
-
-    // Parent commit applies the subsurface position. The child was already committed by eglSwapBuffers above (which implicitly commits the wl_surface whose wl_egl_window we swapped).
+    // Commit the child with no buffer yet — this flushes the subsurface creation to the compositor. The first render will attach a buffer and swap.
+    wl_surface_commit(vs->wl_surface);
+    // Parent commit applies the subsurface position.
     wl_surface_commit(parent);
     wl_display_flush(display);
 
