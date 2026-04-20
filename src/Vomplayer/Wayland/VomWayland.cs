@@ -3,6 +3,15 @@ using System.Runtime.InteropServices;
 
 namespace Vomplayer.Wayland;
 
+public enum VrrClassification
+{
+    Unknown = 0,
+    Vrr = 1,
+    Fixed = 2,
+    // Frames on the nominal T grid but the stream is too stable (or metrics in a middle band) to tell fixed-refresh from VRR-locked-to-content-rate. 60 fps content on a 60 Hz panel is the canonical example: behaviorally indistinguishable.
+    CantTell = 3,
+}
+
 // P/Invoke bindings to the native/hdr_helper.c subsurface API. Opaque IntPtr handle. Disposing the wrapper calls vom_video_surface_destroy.
 internal sealed partial class VomVideoSurface : IDisposable
 {
@@ -69,6 +78,18 @@ internal sealed partial class VomVideoSurface : IDisposable
         }
     }
 
+    // Classifies the compositor's recent refresh-period stream. When Fixed, hzCenti is the detected rate × 100 (e.g. 6000 = 60.00Hz). Unknown means the sample window hasn't filled yet; wait a second and re-poll.
+    public VrrClassification GetVrrClassification(out int hzCenti)
+    {
+        hzCenti = 0;
+        if (handle == IntPtr.Zero)
+        {
+            return VrrClassification.Unknown;
+        }
+        int result = GetVrrClassificationNative(handle, out hzCenti);
+        return (VrrClassification)result;
+    }
+
     public void Dispose()
     {
         if (handle == IntPtr.Zero)
@@ -96,6 +117,9 @@ internal sealed partial class VomVideoSurface : IDisposable
 
     [LibraryImport(Lib, EntryPoint = "vom_video_surface_hdr_active")]
     private static partial int HdrActiveNative(IntPtr vs);
+
+    [LibraryImport(Lib, EntryPoint = "vom_video_surface_get_vrr_classification")]
+    private static partial int GetVrrClassificationNative(IntPtr vs, out int hzCenti);
 
     [LibraryImport(Lib, EntryPoint = "vom_video_surface_destroy")]
     private static partial void DestroyNative(IntPtr vs);

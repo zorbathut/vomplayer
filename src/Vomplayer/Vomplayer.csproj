@@ -13,9 +13,9 @@
   </ItemGroup>
 
   <Target Name="BuildHdrHelper" Condition="'$(IsBuildingOnLinux)' == 'true'" BeforeTargets="Build"
-          Inputs="$(MSBuildProjectDirectory)/../../native/hdr_helper.c;$(MSBuildProjectDirectory)/../../native/color-management-v1-protocol.c;$(MSBuildProjectDirectory)/../../native/color-management-v1-client-protocol.h"
+          Inputs="$(MSBuildProjectDirectory)/../../native/hdr_helper.c;$(MSBuildProjectDirectory)/../../native/color-management-v1-protocol.c;$(MSBuildProjectDirectory)/../../native/color-management-v1-client-protocol.h;$(MSBuildProjectDirectory)/../../native/presentation-time-protocol.c;$(MSBuildProjectDirectory)/../../native/presentation-time-client-protocol.h"
           Outputs="$(OutDir)libhdr_helper.so">
-    <Exec Command="gcc -shared -fPIC -O2 -Wall -o $(OutDir)libhdr_helper.so $(MSBuildProjectDirectory)/../../native/hdr_helper.c $(MSBuildProjectDirectory)/../../native/color-management-v1-protocol.c -lwayland-client -lwayland-egl -lEGL" />
+    <Exec Command="gcc -shared -fPIC -O2 -Wall -o $(OutDir)libhdr_helper.so $(MSBuildProjectDirectory)/../../native/hdr_helper.c $(MSBuildProjectDirectory)/../../native/color-management-v1-protocol.c $(MSBuildProjectDirectory)/../../native/presentation-time-protocol.c -lwayland-client -lwayland-egl -lEGL -lm" />
   </Target>
 
   <ItemGroup Condition="'$(IsBuildingOnLinux)' == 'true'">

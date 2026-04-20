@@ -42,6 +42,17 @@ public sealed partial class VideoSurface : IDisposable
         }
     }
 
+    // Read the current VRR classification from the shim's refresh-sample ring. Returns Unknown if the subsurface isn't ready yet.
+    public VrrClassification GetVrrClassification(out int hzCenti)
+    {
+        hzCenti = 0;
+        if (surface == null)
+        {
+            return VrrClassification.Unknown;
+        }
+        return surface.GetVrrClassification(out hzCenti);
+    }
+
     public VideoSurface(Gtk.Window window, VideoArea area, bool hdrRequested)
     {
         if (window == null)
