@@ -385,9 +385,15 @@ static void vs_surface_handle_leave(void *data, struct wl_surface *s, struct wl_
 {
     (void)s;
     struct vom_video_surface *vs = data;
-    if (vs->active_output && vs->active_output->output == o)
+    // Walk g_outputs to find the matching output and (if it matches active) clear it. Cannot compare vs->active_output->output directly — if global_remove freed active_output between the enter and this leave, the deref would UAF.
+    if (!vs->active_output) { return; }
+    for (struct output_info *it = g_outputs; it; it = it->next)
     {
-        vs->active_output = NULL;
+        if (it == vs->active_output && it->output == o)
+        {
+            vs->active_output = NULL;
+            return;
+        }
     }
 }
 
@@ -548,10 +554,11 @@ static void feedback_presented(void *data, struct wp_presentation_feedback *fb,
         double max_hz = ps->delta_min_ms > 0 ? 1000.0 / ps->delta_min_ms : 0;
         double refresh_min_hz = ps->refresh_max_ns > 0 ? 1e9 / ps->refresh_max_ns : 0;
         double refresh_max_hz = ps->refresh_min_ns > 0 ? 1e9 / ps->refresh_min_ns : 0;
-        double nominal_hz = vs->active_output && vs->active_output->current_mode_mhz > 0 ? (double)vs->active_output->current_mode_mhz / 1000.0 : 0;
+        // Get T_nominal via the classifier so we go through its output-membership validation — reading vs->active_output->current_mode_mhz directly would UAF after a global_remove freed the struct.
         int cls_hz_centi = 0;
         int cls = vom_video_surface_get_vrr_classification(vs, &cls_hz_centi);
         const char *cls_name = cls == 1 ? "VRR" : cls == 2 ? "FIXED" : cls == 3 ? "CANT-TELL" : "UNKNOWN";
+        double nominal_hz = cls_hz_centi > 0 ? (double)cls_hz_centi / 100.0 : 0;
         fprintf(stderr,
             "[vom_wayland] presentation %d frames: delta avg=%.2fms (%.1fHz) range=[%.2f..%.2f]ms ([%.1f..%.1f]Hz) refresh=[%.1f..%.1f]Hz nominal=%.2fHz classification=%s discarded=%d\n",
             ps->frames, avg_ms, avg_hz,
