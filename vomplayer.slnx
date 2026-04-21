@@ -1,8 +1,4 @@
 <Solution>
-  <Folder Name="/src/">
-    <Project Path="src/Vomplayer/Vomplayer.csproj" />
-  </Folder>
-  <Folder Name="/test/">
-    <Project Path="test/Vomplayer.Tests/Vomplayer.Tests.csproj" />
-  </Folder>
+  <Project Path="Vomplayer.csproj" />
+  <Project Path="test/Vomplayer.Tests.csproj" />
 </Solution>

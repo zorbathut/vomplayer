@@ -21,7 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Vomplayer\Vomplayer.csproj" />
+    <ProjectReference Include="..\Vomplayer.csproj" />
   </ItemGroup>
 
 </Project>
