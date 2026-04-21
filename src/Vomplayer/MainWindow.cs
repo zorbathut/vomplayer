@@ -44,6 +44,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Gtk.Box rootBox;
     private readonly Gtk.Overlay videoOverlay;
     private readonly Gtk.Box noVideoBg;
+    private readonly Gtk.PopoverMenuBar menuBar;
     private readonly bool hdrRequested;
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
@@ -98,6 +99,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         SetApplication(app);
         Title = hdrRequested ? "Vomplayer" : "Vomplayer — SDR";
         SetDefaultSize(1280, 720);
+        AddCssClass("vom-main-window");
 
         InstallVomCss();
 
@@ -141,7 +143,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         durationLabel = Gtk.Label.New("00:00");
 
         controlsBox = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
-        // Spacing around the bar comes from CSS padding on .vom-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges.
+        // Spacing around the bar comes from CSS padding on .vom-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges. vom-chrome gives it the theme bg; vom-controls-bar adds the padding. Split so the fullscreen OSD swap (below) only touches the background/padding pair and leaves vom-chrome off (OSD has its own semi-transparent fill).
+        controlsBox.AddCssClass("vom-chrome");
         controlsBox.AddCssClass("vom-controls-bar");
         controlsBox.Append(openButton);
         controlsBox.Append(playPauseButton);
@@ -165,7 +168,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         noVideoBg.SetVexpand(true);
         videoOverlay.AddOverlay(noVideoBg);
 
+        menuBar = BuildMenuBar(app);
+
         rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
+        rootBox.Append(menuBar);
         rootBox.Append(videoOverlay);
         rootBox.Append(controlsBox);
         SetChild(rootBox);
@@ -189,7 +195,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             Marshal.GetFunctionPointerForDelegate(seekLegacyCallback),
             IntPtr.Zero, IntPtr.Zero, 0);
 
-        // Fullscreen: key controller at Capture phase on the window so F/F11/Escape work regardless of which child has focus. None of those keys are consumed by any focused child today (the scale uses arrow keys for seek; no text entry exists), so capture is safe. Unlike EventControllerLegacy, OnKeyPressed delivers primitives (uint, uint, ModifierType), not a GdkEvent* — no GirCore marshalling hazard here.
+        // Window-level key controller at Capture phase: f/F/Space/Escape work regardless of which child has focus. Capture pre-empts focused children, so a focused Gtk.Button never sees Space and can't double-fire play/pause. The scale uses arrow keys for seek; no text entry exists — nothing here is a key a focused child legitimately needs. Unlike EventControllerLegacy, OnKeyPressed delivers primitives (uint, uint, ModifierType), not a GdkEvent* — no GirCore marshalling hazard here.
         var keyController = Gtk.EventControllerKey.New();
         keyController.SetPropagationPhase(Gtk.PropagationPhase.Capture);
         keyController.OnKeyPressed += OnWindowKeyPressed;
@@ -364,22 +370,30 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
     }
 
-    // The window background needs to be transparent so the video subsurface (placed below the parent wl_surface) shows through the video area. Widgets that need an opaque background — specifically the controls bar in windowed mode — set their own via the vom-controls-bar class. Priority APPLICATION (600) beats theme defaults; GTK will cascade the widget's own @theme_bg_color reference inside the class so the bar matches the platform theme.
+    // The main window's own CSS background must be transparent so the video subsurface (placed below the parent wl_surface) shows through wherever no widget paints opaque. GTK4's render tree is parent-first, child-on-top with alpha compositing — a child's transparent background can't punch a hole through an opaque parent, so the only way to get alpha=0 anywhere is for the window itself not to paint. Keep the rule scoped by the vom-main-window class so About/file/other dialogs (also Gtk.Window) aren't dragged along. In practice the rendered transparent area is exactly the video widget region, since every other chrome widget opts in to opaque via the vom-chrome class (menu bar, controls bar in windowed mode). Priority APPLICATION (600) beats theme defaults.
     private static void InstallVomCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window { background: transparent; } .vom-controls-bar { background-color: @theme_bg_color; padding: 6px; } .osd { padding: 6px; } .vom-no-video-bg { background-color: black; }");
+        provider.LoadFromString("window.vom-main-window { background: transparent; } .vom-chrome { background-color: @theme_bg_color; } .vom-controls-bar { padding: 6px; } .osd { padding: 6px; } .vom-no-video-bg { background-color: black; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
+    // Keyboard dispatch is split across two sources; check both when debugging input:
+    //   1. This Capture-phase handler: f, F, Space, Escape.
+    //   2. Gtk.Application accelerators registered in BuildMenuBar: Ctrl+O, Ctrl+Q, F11.
+    // Escape stays here (not an accelerator) because its behavior is conditional — only exit-fullscreen, don't swallow otherwise.
     private bool OnWindowKeyPressed(Gtk.EventControllerKey sender, Gtk.EventControllerKey.KeyPressedSignalArgs args)
     {
         uint keyval = args.Keyval;
         if (keyval == (uint)Gdk.Constants.KEY_f
-            || keyval == (uint)Gdk.Constants.KEY_F
-            || keyval == (uint)Gdk.Constants.KEY_F11)
+            || keyval == (uint)Gdk.Constants.KEY_F)
         {
             SetFullscreen(!isFullscreen);
+            return true;
+        }
+        if (keyval == (uint)Gdk.Constants.KEY_space)
+        {
+            viewModel.PlayPauseCommand.Execute(null);
             return true;
         }
         if (keyval == (uint)Gdk.Constants.KEY_Escape)
@@ -469,7 +483,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         ApplyFullscreenState(on);
     }
 
-    // Reparent controlsBox between rootBox (windowed, stacked below video) and videoOverlay (fullscreen, floating over the bottom of the video). Toggling visibility on the overlay child doesn't resize the video widget, so controls appearing/disappearing during auto-hide don't cause the video to rescale. The background class swaps at the same time: "vom-controls-bar" is opaque for windowed; "osd" is semi-transparent dark over video for fullscreen. Parent-guarded: if ApplyFullscreenState ever runs twice for the same state (e.g., from our toggle and again from notify::fullscreened after a compositor-initiated transition racing with our own), the double-remove/double-add would fault on a non-child widget.
+    // Reparent controlsBox between rootBox (windowed, stacked below video) and videoOverlay (fullscreen, floating over the bottom of the video). Toggling visibility on the overlay child doesn't resize the video widget, so controls appearing/disappearing during auto-hide don't cause the video to rescale. The background/padding class pair swaps at the same time: windowed uses vom-chrome + vom-controls-bar (opaque theme bg + 6px padding); fullscreen uses osd (GTK's built-in semi-transparent dark over video). Parent-guarded: if ApplyFullscreenState ever runs twice for the same state (e.g., from our toggle and again from notify::fullscreened after a compositor-initiated transition racing with our own), the double-remove/double-add would fault on a non-child widget.
     private void ApplyFullscreenState(bool on)
     {
         FsLog($"apply on={on}");
@@ -477,6 +491,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         motionEventCount = 0;
         armPositionX = double.NaN;
         armPositionY = double.NaN;
+        // Asymmetric with controlsBox, which reparents into videoOverlay as an OSD in fullscreen. Menu bars don't OSD well, so we just hide unconditionally; users can still use F11/f/Escape/double-click and the action accelerators (Ctrl+O, Ctrl+Q) while fullscreen.
+        menuBar.SetVisible(!on);
         if (on)
         {
             if (controlsBox.Parent == rootBox)
@@ -484,6 +500,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 rootBox.Remove(controlsBox);
             }
             controlsBox.SetValign(Gtk.Align.End);
+            controlsBox.RemoveCssClass("vom-chrome");
             controlsBox.RemoveCssClass("vom-controls-bar");
             controlsBox.AddCssClass("osd");
             if (controlsBox.Parent != videoOverlay)
@@ -501,6 +518,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 videoOverlay.RemoveOverlay(controlsBox);
             }
             controlsBox.RemoveCssClass("osd");
+            controlsBox.AddCssClass("vom-chrome");
             controlsBox.AddCssClass("vom-controls-bar");
             controlsBox.SetValign(Gtk.Align.Fill);
             if (controlsBox.Parent != rootBox)
