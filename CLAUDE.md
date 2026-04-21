@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the codebase map, rendering paths, data-flow diagrams, and the ABI-boundary policy.
+
 ## Interaction Guidelines
 
 **Answer questions before coding**: When asked a question, provide an actual answer first. Don't leap straight to writing code.
