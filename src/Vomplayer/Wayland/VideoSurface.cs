@@ -25,12 +25,14 @@ public sealed partial class VideoSurface : IDisposable
     private MpvRenderContext? renderContext;
     private MpvClient? client;
     private int renderQueued;
+    // Latched (via Interlocked) the first time mpv's update callback fires. Gates DoRender: before mpv has signaled any content, a render+swap commits the EGL back buffer's undefined contents to the subsurface — under KWin + SDR the compositor honors the back buffer's alpha and the (transparent) parent region shows the desktop through the video area. With this latch, the subsurface stays unmapped (no buffer ever attached) until mpv has real content, and the GTK placeholder overlay on the parent keeps the region opaque-black in the meantime. HDR masked this historically: the PQ image description on the subsurface changes the compositor's alpha handling so an undefined swap didn't punch through.
+    private int mpvUpdateSignaled;
     private bool firstFrameRendered;
     private (int x, int y, int w, int h, int scale)? pendingGeometry;
 
     public event Action? RenderContextReady;
     public event Action<int>? RenderFailed;
-    // Fires exactly once, on the main thread, after mpv's first successful frame swap. The Wayland subsurface has no buffer attached between creation and first render; consumers can use this to remove any "placeholder" they drew on the GTK side while the subsurface was empty.
+    // Fires exactly once, on the main thread, after mpv has signaled content AND the first render+swap of that content completes. Deliberately NOT fired on pre-content renders (initial kickoff, geometry-change renders before any file is loaded) — those are gated out of DoRender so the subsurface stays unmapped. Consumers can use this to remove any "placeholder" they drew on the GTK side while the subsurface was empty.
     public event Action? FirstFrameRendered;
 
     // True iff the subsurface has a PQ/BT.2020 image description successfully attached. Valid only after RenderContextReady fires.
@@ -171,7 +173,7 @@ public sealed partial class VideoSurface : IDisposable
             return;
         }
         RenderContextReady?.Invoke();
-        QueueRender();
+        // No kickoff QueueRender here — before mpv has signaled any content, DoRender early-returns (see mpvUpdateSignaled gate) and the native shim has already committed the subsurface bufferless. The first real render will be driven by OnMpvUpdateRequested once a file is loaded.
     }
 
     private void OnAreaGeometryChanged(int x, int y, int w, int h, int scale)
@@ -189,6 +191,7 @@ public sealed partial class VideoSurface : IDisposable
     // Runs on mpv's internal render thread. Coalesce + hop to main.
     private void OnMpvUpdateRequested()
     {
+        Interlocked.Exchange(ref mpvUpdateSignaled, 1);
         QueueRender();
     }
 
@@ -226,6 +229,11 @@ public sealed partial class VideoSurface : IDisposable
         try
         {
             if (renderContext == null || surface == null)
+            {
+                return;
+            }
+            // Skip until mpv has real content. Other QueueRender callers (TryCreateRenderContext kickoff, OnAreaGeometryChanged) can fire arbitrarily early, and an eglSwapBuffers before mpv has rendered anything commits undefined alpha to the subsurface — the SDR regression behind this gate. surface.SetGeometry already ran synchronously in OnAreaGeometryChanged, so skipping the render here doesn't lose the resize.
+            if (Volatile.Read(ref mpvUpdateSignaled) == 0)
             {
                 return;
             }
