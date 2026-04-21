@@ -1,19 +1,20 @@
-// Wayland helper — exposes three capabilities:
+// Wayland ABI-interop shim. All policy, algorithms, and stateful decision-making live in C#; this layer exists only because the protocol's inline stubs and listener function-pointer structs aren't directly callable via P/Invoke. See CLAUDE.md: "Native code is for ABI interop only."
+//
+// Entry points:
 //
 // 1. hdr_helper_apply_pq(display, surface)
-//    One-shot attach of a PQ/BT.2020 image description to an arbitrary wl_surface. Used by the GLArea fallback path (Linux X11/Xwayland) where we have no subsurface. Known issue: makes GTK's UI look blown out because the compositor reinterprets sRGB widget output as PQ. Kept for compat.
+//    One-shot PQ/BT.2020 attach to an arbitrary wl_surface. GLArea fallback path (X11/Xwayland/non-Wayland). Known issue: makes GTK's UI look blown out because the compositor reinterprets sRGB widget output as PQ. Kept for the non-subsurface path.
 //
 // 2. vom_video_surface_* API
-//    Creates a wl_subsurface child of a given parent wl_surface, places it ABOVE the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window, and (optionally) tags that child surface PQ/BT.2020. Used by the Wayland path: main surface stays sRGB (UI looks normal), subsurface is HDR-only. Caller drives rendering: make_current → (caller's render) → swap.
+//    Creates a wl_subsurface child of a given parent wl_surface, places it BELOW the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window, and (optionally) tags that child surface PQ/BT.2020. The caller drives rendering: make_current → (caller's render) → swap.
 //
-// 3. VRR classifier
-//    Per-surface behavioral classifier for whether the compositor is scanning frames out on a fixed vsync grid or at variable intervals. Inputs: per-frame presentation timestamps (wp_presentation_feedback) + the panel's nominal mode rate (wl_output.mode). Output: one of UNKNOWN/VRR/FIXED/CAN'T-TELL. Called from inside the presentation-feedback listener (for the per-N-frames stats log) and exposed to the client via vom_video_surface_get_vrr_classification.
+// 3. Output + presentation-feedback trampolines
+//    Process-global output events (added / mode / removed) forward to callbacks registered via vom_set_output_callbacks. Per-surface wl_surface.enter/leave and wp_presentation_feedback.presented/discarded events forward to callbacks registered via vom_video_surface_set_callbacks. The consumer (C# FrameTimingBridge + WaylandOutputRegistry) owns all state derived from these events.
 //
-// The wp_color_manager_v1 + wp_presentation + wl_output globals are bound once per process (via a retained wl_registry on first use) and cached across all entry points.
+// The wp_color_manager_v1 + wp_presentation + wl_output globals are bound once per process (via a retained wl_registry on first use).
 //
-// Build: gcc -shared -fPIC -o libhdr_helper.so hdr_helper.c color-management-v1-protocol.c presentation-time-protocol.c -lwayland-client -lwayland-egl -lEGL -lm
+// Build: gcc -shared -fPIC -o libhdr_helper.so hdr_helper.c color-management-v1-protocol.c presentation-time-protocol.c -lwayland-client -lwayland-egl -lEGL
 
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,15 +27,30 @@
 #include "presentation-time-client-protocol.h"
 
 //---------------------------------------------------------------
+// Callback function-pointer types forwarded up to the C# layer.
+//---------------------------------------------------------------
+
+typedef void (*vom_output_mode_fn)(uint32_t registry_name, int32_t refresh_mhz);
+typedef void (*vom_output_removed_fn)(uint32_t registry_name);
+
+typedef void (*vom_surface_enter_fn)(void *data, uint32_t registry_name);
+typedef void (*vom_surface_leave_fn)(void *data, uint32_t registry_name);
+typedef void (*vom_feedback_presented_fn)(void *data, uint64_t tv_ns, uint32_t refresh_ns);
+typedef void (*vom_feedback_discarded_fn)(void *data);
+
+static vom_output_mode_fn g_output_mode_cb;
+static vom_output_removed_fn g_output_removed_cb;
+
+//---------------------------------------------------------------
 // Process-global Wayland globals, resolved lazily on first use.
 //---------------------------------------------------------------
 
-// Per-output record. Populated when the compositor advertises a wl_output in the registry; mode updates via wl_output.mode (MODE_CURRENT flag). Tracked process-wide so the VRR classifier can look up the panel's nominal refresh for whichever output the video subsurface currently lives on.
+// Per-output record. The current-mode refresh rate is kept here purely for replay: if vom_set_output_callbacks is called after the initial wl_output enumeration has already fired, we re-deliver the cached mode values so the consumer doesn't miss them. Under steady-state, the consumer (C#) is the authoritative store.
 struct output_info
 {
     struct wl_output *output;
     uint32_t registry_name;
-    int32_t current_mode_mhz;
+    int32_t cached_mode_mhz;
     struct output_info *next;
 };
 
@@ -45,8 +61,33 @@ static struct wl_subcompositor *g_subcompositor;
 static struct wp_color_manager_v1 *g_color_manager;
 static struct wp_presentation *g_presentation;
 static struct output_info *g_outputs;
-// Toggles per-frame wp_presentation_feedback logging. Set VOM_WAYLAND_LOG_PRESENTATION=1 in the environment to enable; off by default so normal runs don't spam stderr. Evaluated once per process on first ensure_globals call.
-static int g_presentation_log_enabled = -1;
+
+// Looks up the registry name for a wl_output proxy in the process-global list. Returns 0 if not found (registry names start at 1 per the Wayland spec, so 0 is unambiguous here).
+static uint32_t lookup_output_registry_name(struct wl_output *o)
+{
+    for (struct output_info *it = g_outputs; it; it = it->next)
+    {
+        if (it->output == o)
+        {
+            return it->registry_name;
+        }
+    }
+    return 0;
+}
+
+// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes so consumer state catches up). The replay decouples ordering between vom_set_output_callbacks and whatever triggers ensure_globals.
+void vom_set_output_callbacks(vom_output_mode_fn mode, vom_output_removed_fn removed)
+{
+    g_output_mode_cb = mode;
+    g_output_removed_cb = removed;
+    for (struct output_info *it = g_outputs; it; it = it->next)
+    {
+        if (it->cached_mode_mhz != 0 && g_output_mode_cb)
+        {
+            g_output_mode_cb(it->registry_name, it->cached_mode_mhz);
+        }
+    }
+}
 
 static void output_handle_geometry(void *data, struct wl_output *o,
     int32_t x, int32_t y, int32_t phys_w, int32_t phys_h,
@@ -56,15 +97,20 @@ static void output_handle_geometry(void *data, struct wl_output *o,
     (void)subpixel; (void)make; (void)model; (void)transform;
 }
 
-// Panels advertise their full mode list; only the entry flagged MODE_CURRENT reflects the currently-selected timing (and therefore the panel's actual vsync period). refresh is in millihertz — 60 Hz = 60000 mHz = 16.666 ms period.
+// Panels advertise their full mode list; only the entry flagged MODE_CURRENT reflects the currently-selected timing. refresh is in millihertz — 60 Hz = 60000 mHz.
 static void output_handle_mode(void *data, struct wl_output *o,
     uint32_t flags, int32_t width, int32_t height, int32_t refresh)
 {
     (void)o; (void)width; (void)height;
     struct output_info *info = data;
-    if (flags & WL_OUTPUT_MODE_CURRENT)
+    if (!(flags & WL_OUTPUT_MODE_CURRENT))
     {
-        info->current_mode_mhz = refresh;
+        return;
+    }
+    info->cached_mode_mhz = refresh;
+    if (g_output_mode_cb)
+    {
+        g_output_mode_cb(info->registry_name, refresh);
     }
 }
 
@@ -82,7 +128,6 @@ static const struct wl_output_listener output_listener_impl = {
     .description = output_handle_description,
 };
 
-// Writes directly to file-scope globals rather than collecting into a local struct. The registry is kept alive for the process lifetime so we also receive global_remove events on hot-plug, which need the list to be accessible from here.
 static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version)
 {
     (void)data;
@@ -105,20 +150,20 @@ static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t nam
     }
     else if (strcmp(iface, "wl_output") == 0)
     {
-        // v2 suffices for geometry/mode/done/scale; bump to 4 where available to also receive name/description (diagnostic only — classifier only needs mode).
+        // v2 suffices for geometry/mode/done/scale; bump to 4 where available to also receive name/description (diagnostic only).
         uint32_t v = version < 4 ? version : 4;
         struct output_info *info = calloc(1, sizeof(*info));
         if (!info) { return; }
         info->output = wl_registry_bind(reg, name, &wl_output_interface, v);
         info->registry_name = name;
-        info->current_mode_mhz = 0;
+        info->cached_mode_mhz = 0;
         info->next = g_outputs;
         g_outputs = info;
         wl_output_add_listener(info->output, &output_listener_impl, info);
     }
 }
 
-// Monitor hot-plug removal: the compositor tells us a global has vanished by its registry name. Unlink and free the matching output_info so the classifier's active_output-membership check later surfaces the removal. Note that any vom_video_surface currently holding a pointer to the freed output will have a dangling active_output until the classifier's next pass — the classifier validates membership and nulls it out before dereferencing.
+// Monitor hot-plug removal. Unlink and free the matching output_info, then fire the removed callback so the C# registry can drop its entry. Listener remains attached to the wl_output proxy until wl_output_destroy — safe because the listener handlers are all stateless forwarders.
 static void globals_reg_global_remove(void *data, struct wl_registry *reg, uint32_t name)
 {
     (void)data; (void)reg;
@@ -129,6 +174,7 @@ static void globals_reg_global_remove(void *data, struct wl_registry *reg, uint3
         {
             struct output_info *dead = *pp;
             *pp = dead->next;
+            if (g_output_removed_cb) { g_output_removed_cb(name); }
             wl_output_destroy(dead->output);
             free(dead);
             return;
@@ -167,7 +213,7 @@ static int ensure_globals(struct wl_display *display)
         return -3;
     }
 
-    // Second roundtrip: globals bound above (wl_output in particular) send their initial events in response to binding, which only arrive AFTER the first sync_done. Without this second round we'd see the outputs themselves but no mode events, leaving current_mode_mhz=0.
+    // Second roundtrip: globals bound above (wl_output in particular) send their initial events in response to binding, which only arrive AFTER the first sync_done. Without this second round we'd see the outputs themselves but no mode events.
     if (wl_display_roundtrip(display) < 0)
     {
         wl_registry_destroy(reg);
@@ -183,11 +229,6 @@ static int ensure_globals(struct wl_display *display)
 
     g_cached_display = display;
     g_registry = reg;
-    if (g_presentation_log_enabled < 0)
-    {
-        const char *e = getenv("VOM_WAYLAND_LOG_PRESENTATION");
-        g_presentation_log_enabled = (e && e[0] == '1') ? 1 : 0;
-    }
     return 0;
 }
 
@@ -221,7 +262,7 @@ static const struct wp_image_description_v1_listener desc_listener = {
     .ready = desc_ready,
 };
 
-// Builds a PQ/BT.2020 parametric image description and waits for ready. Returns NULL on failure. Caller owns the returned proxy (but in our current callers we leak it for process lifetime).
+// Builds a PQ/BT.2020 parametric image description and waits for ready. Returns NULL on failure. The ready/failed roundtrip is a one-shot protocol handshake (not ongoing logic), so it stays here rather than getting split across the ABI.
 static struct wp_image_description_v1 *build_pq_description(struct wl_display *display)
 {
     if (!g_color_manager)
@@ -314,33 +355,14 @@ int hdr_helper_apply_pq(struct wl_display *display, struct wl_surface *surface)
 // Entry point 2: subsurface + EGL surface + HDR (used by the Wayland path).
 //---------------------------------------------------------------
 
-// Rolling presentation-timing stats, populated from wp_presentation_feedback.presented events. Logged every STATS_WINDOW frames when VOM_WAYLAND_LOG_PRESENTATION=1. `refresh_ns` is the compositor's expected next-frame interval at time of presentation; on VRR-active outputs it varies frame-to-frame or is reported as 0 (aperiodic).
-struct presentation_stats
+// In-flight wp_presentation_feedback record. The compositor sends `presented` or `discarded` asynchronously; without tracking, a feedback delivered after vom_video_surface_destroy has freed `vs` would UAF the listener data (and, on the C# side, a freed-then-recycled GCHandle). By keeping a per-vs list of outstanding proxies, destroy() can wp_presentation_feedback_destroy all of them synchronously and nuke their listeners before freeing vs.
+struct fb_node
 {
-    int frames;
-    uint64_t last_ns;
-    double delta_sum_ms;
-    double delta_min_ms;
-    double delta_max_ms;
-    uint32_t refresh_min_ns;
-    uint32_t refresh_max_ns;
-    int discarded;
+    struct wp_presentation_feedback *fb;
+    struct fb_node *next;
+    struct fb_node *prev;
+    struct vom_video_surface *vs;
 };
-
-// Rolling window of inter-frame delta samples in microseconds (uint32 fits ~4295 s). Populated in refresh_ring_push on every wp_presentation_feedback.presented event. Consumed by vom_video_surface_get_vrr_classification to decide VRR vs FIXED.
-#define VOM_REFRESH_RING_SIZE 60
-struct refresh_ring
-{
-    uint32_t delta_us[VOM_REFRESH_RING_SIZE];
-    int count;
-    int head;
-    int has_prev;
-    uint64_t prev_ns;
-};
-
-#define VOM_PRESENTATION_STATS_WINDOW 120
-// The stats log calls the classifier (and the classifier expects a full ring); require the ring to fill at least once before we emit a log line. Tripping this means someone lowered the log window below the ring size, which would make every log entry say UNKNOWN.
-_Static_assert(VOM_PRESENTATION_STATS_WINDOW >= VOM_REFRESH_RING_SIZE, "log window must be large enough for the classifier's ring to fill at least once");
 
 struct vom_video_surface
 {
@@ -354,30 +376,28 @@ struct vom_video_surface
     EGLSurface egl_surface;
     struct wp_color_management_surface_v1 *cm_surface;
     struct wp_image_description_v1 *image_desc;
-    int buffer_scale;
     int buffer_w;
     int buffer_h;
-    struct presentation_stats pstats;
-    struct refresh_ring refresh;
-    // Set by the wl_surface.enter handler the first time the compositor tells us our subsurface has landed on a specific output; cleared in wl_surface.leave when that output is the one we leave. Classifier uses this output's current_mode_mhz as T_nominal; when NULL, classifier returns UNKNOWN rather than guessing from g_outputs — on a multi-monitor host, picking the wrong panel rate would silently mis-classify.
-    struct output_info *active_output;
+
+    // Callback trampoline targets. Populated by vom_video_surface_set_callbacks.
+    void *cb_data;
+    vom_surface_enter_fn enter_cb;
+    vom_surface_leave_fn leave_cb;
+    vom_feedback_presented_fn presented_cb;
+    vom_feedback_discarded_fn discarded_cb;
+
+    // Doubly-linked list of in-flight feedback proxies; head only. Listener receives fb_node* as user data, so unlink on terminal event is O(1).
+    struct fb_node *fb_head;
 };
 
 static void vs_surface_handle_enter(void *data, struct wl_surface *s, struct wl_output *o)
 {
     (void)s;
     struct vom_video_surface *vs = data;
-    for (struct output_info *it = g_outputs; it; it = it->next)
+    uint32_t name = lookup_output_registry_name(o);
+    if (name != 0 && vs->enter_cb)
     {
-        if (it->output == o)
-        {
-            vs->active_output = it;
-            if (g_presentation_log_enabled)
-            {
-                fprintf(stderr, "[vom_wayland] subsurface entered output (nominal=%d mHz)\n", it->current_mode_mhz);
-            }
-            return;
-        }
+        vs->enter_cb(vs->cb_data, name);
     }
 }
 
@@ -385,15 +405,10 @@ static void vs_surface_handle_leave(void *data, struct wl_surface *s, struct wl_
 {
     (void)s;
     struct vom_video_surface *vs = data;
-    // Walk g_outputs to find the matching output and (if it matches active) clear it. Cannot compare vs->active_output->output directly — if global_remove freed active_output between the enter and this leave, the deref would UAF.
-    if (!vs->active_output) { return; }
-    for (struct output_info *it = g_outputs; it; it = it->next)
+    uint32_t name = lookup_output_registry_name(o);
+    if (name != 0 && vs->leave_cb)
     {
-        if (it == vs->active_output && it->output == o)
-        {
-            vs->active_output = NULL;
-            return;
-        }
+        vs->leave_cb(vs->cb_data, name);
     }
 }
 
@@ -402,118 +417,11 @@ static const struct wl_surface_listener vs_surface_listener = {
     .leave = vs_surface_handle_leave,
 };
 
-
-static void pstats_reset(struct presentation_stats *ps)
+static void fb_unlink(struct fb_node *n)
 {
-    ps->frames = 0;
-    ps->delta_sum_ms = 0;
-    ps->delta_min_ms = 0;
-    ps->delta_max_ms = 0;
-    ps->refresh_min_ns = 0;
-    ps->refresh_max_ns = 0;
-    ps->discarded = 0;
-}
-
-// Behavioral classifier: is the compositor scanning our frames out on a fixed vsync grid, or at variable intervals?
-//
-// Reference period T_nominal comes from wl_output.mode (current mode's refresh in mHz). This is "system status" — the panel's configured mode, which KWin/wlroots/Mutter all report even while they VRR-engage within the mode. NOT the wp_presentation refresh field: KWin sets refresh=0 on VRR-capable outputs in many cases where VRR isn't actually engaged for this surface (windowed subsurfaces on a VRR-capable output), so refresh=0 is an unreliable engagement signal and the stats log keeps it only as a diagnostic field.
-//
-// For each observed delta D_i, residual R_i = D_i - round(D_i/T) * T measures how far off the nearest integer-multiple of T the delta sits. On a fixed-refresh panel, scanout can only happen on T-boundaries — every delta MUST be K*T + small jitter. On VRR, deltas take arbitrary values in the panel's VRR range and typically miss the K*T grid.
-//
-// Thresholds (named below): RMS_OFF_GRID and RMS_ON_GRID are expressed as fractions of T. A warm-system compositor on idle produces per-frame jitter on the order of 100-300 µs — ~1-2% of a 60 Hz period — so ON_GRID at 2% sits right at the jitter ceiling, and OFF_GRID at 5% (~830 µs on 60 Hz) is comfortably past it. MIN_VARIATION is the σ/μ floor: below it, the stream is so steady we can't tell fixed-rate-at-panel-Hz from VRR-locked-to-content-rate apart — return CAN'T-TELL rather than guess. These numbers were chosen by observing traces on KWin/AMDGPU; retune if future traces misclassify.
-//
-// Order of checks matters: a constant-rate stream at a non-grid rate (e.g. 50 fps on a VRR 60 Hz panel) has σ/μ tiny but RMS/T large — VRR check first catches it correctly.
-//
-// Thread safety: called from (a) the Wayland main-thread dispatcher (via the presentation-feedback listener) and (b) the C# caller on the GTK main thread. Both are the same thread in production — no cross-thread contention on vs->refresh or vs->active_output.
-//
-// Returns:
-//   0 = UNKNOWN   (ring not full, or no wl_output mode available yet)
-//   1 = VRR       (deltas don't fit the nominal T grid)
-//   2 = FIXED     (deltas fit the grid with sufficient variance)
-//   3 = CAN'T-TELL (ambiguous: either stream too stable, or metrics in middle band)
-// out_hz_centi carries the panel's nominal mode rate × 100 whenever it's known (any result except UNKNOWN).
-#define VOM_VRR_RMS_OFF_GRID 0.05
-#define VOM_VRR_RMS_ON_GRID 0.02
-#define VOM_VRR_MIN_VARIATION 0.05
-int vom_video_surface_get_vrr_classification(struct vom_video_surface *vs, int *out_hz_centi)
-{
-    if (out_hz_centi) { *out_hz_centi = 0; }
-    if (!vs) { return 0; }
-    struct refresh_ring *r = &vs->refresh;
-    if (r->count < VOM_REFRESH_RING_SIZE) { return 0; }
-
-    // Refuse to guess when we haven't been told which output we're on — on multi-monitor, silently picking the wrong panel rate would silently mis-classify. The caller's UX will show UNKNOWN briefly at startup until wl_surface.enter fires. Also validate that the output hasn't been hot-unplugged since we were told about it — dereferencing a freed output_info would be UB.
-    struct output_info *info = vs->active_output;
-    if (info)
-    {
-        int found = 0;
-        for (struct output_info *it = g_outputs; it; it = it->next)
-        {
-            if (it == info) { found = 1; break; }
-        }
-        if (!found)
-        {
-            vs->active_output = NULL;
-            info = NULL;
-        }
-    }
-    if (!info || info->current_mode_mhz <= 0) { return 0; }
-
-    // wl_output.mode.refresh is in millihertz. T_us = 1e6 µs/s / (mHz/1000) Hz = 1e9 / mHz. delta_us is uint32 µs, so all math is in µs.
-    double T_us = 1e9 / (double)info->current_mode_mhz;
-
-    if (out_hz_centi)
-    {
-        *out_hz_centi = (int)((info->current_mode_mhz + 5) / 10);
-    }
-
-    double sum = 0;
-    for (int i = 0; i < r->count; i++) { sum += (double)r->delta_us[i]; }
-    double mean = sum / r->count;
-    if (mean <= 0) { return 0; }
-
-    double sumsq = 0;
-    for (int i = 0; i < r->count; i++)
-    {
-        double d = (double)r->delta_us[i] - mean;
-        sumsq += d * d;
-    }
-    double stddev = sqrt(sumsq / r->count);
-    double sigma_over_mu = stddev / mean;
-
-    double rms_sq = 0;
-    for (int i = 0; i < r->count; i++)
-    {
-        double d = (double)r->delta_us[i];
-        double ratio = d / T_us;
-        long K = (long)(ratio + 0.5);
-        if (K < 1) { K = 1; }
-        double residual = d - (double)K * T_us;
-        rms_sq += residual * residual;
-    }
-    double rms_over_t = sqrt(rms_sq / r->count) / T_us;
-
-    if (rms_over_t > VOM_VRR_RMS_OFF_GRID) { return 1; }
-    if (sigma_over_mu < VOM_VRR_MIN_VARIATION) { return 3; }
-    if (rms_over_t < VOM_VRR_RMS_ON_GRID) { return 2; }
-    return 3;
-}
-
-static void refresh_ring_push(struct refresh_ring *r, uint64_t now_ns)
-{
-    uint32_t delta_us = 0;
-    if (r->has_prev && now_ns > r->prev_ns)
-    {
-        uint64_t d = (now_ns - r->prev_ns) / 1000;
-        delta_us = d > UINT32_MAX ? UINT32_MAX : (uint32_t)d;
-    }
-    r->prev_ns = now_ns;
-    r->has_prev = 1;
-    // Skip the push when no valid delta is available — the first presented event has no predecessor, and (rarely) an out-of-order presented timestamp against prev_ns produces delta=0. prev_ns is still updated so subsequent deltas compute against the newest timestamp rather than staying anchored to a stale one.
-    if (delta_us == 0) { return; }
-    r->delta_us[r->head] = delta_us;
-    r->head = (r->head + 1) % VOM_REFRESH_RING_SIZE;
-    if (r->count < VOM_REFRESH_RING_SIZE) { r->count++; }
+    if (n->prev) { n->prev->next = n->next; }
+    else { n->vs->fb_head = n->next; }
+    if (n->next) { n->next->prev = n->prev; }
 }
 
 static void feedback_sync_output(void *data, struct wp_presentation_feedback *fb, struct wl_output *out)
@@ -526,62 +434,29 @@ static void feedback_presented(void *data, struct wp_presentation_feedback *fb,
     uint32_t refresh, uint32_t seq_hi, uint32_t seq_lo, uint32_t flags)
 {
     (void)seq_hi; (void)seq_lo; (void)flags;
-    struct vom_video_surface *vs = data;
-    struct presentation_stats *ps = &vs->pstats;
-    struct refresh_ring *ring = &vs->refresh;
-
+    struct fb_node *n = data;
+    struct vom_video_surface *vs = n->vs;
     uint64_t now_ns = (((uint64_t)tv_sec_hi << 32) | tv_sec_lo) * 1000000000ULL + tv_nsec;
-    refresh_ring_push(ring, now_ns);
-    if (ps->last_ns != 0)
+    if (vs->presented_cb)
     {
-        double delta_ms = (double)(now_ns - ps->last_ns) / 1e6;
-        ps->delta_sum_ms += delta_ms;
-        if (ps->frames == 0 || delta_ms < ps->delta_min_ms) { ps->delta_min_ms = delta_ms; }
-        if (ps->frames == 0 || delta_ms > ps->delta_max_ms) { ps->delta_max_ms = delta_ms; }
-        ps->frames++;
+        vs->presented_cb(vs->cb_data, now_ns, refresh);
     }
-    ps->last_ns = now_ns;
-    if (refresh != 0)
-    {
-        if (ps->refresh_min_ns == 0 || refresh < ps->refresh_min_ns) { ps->refresh_min_ns = refresh; }
-        if (refresh > ps->refresh_max_ns) { ps->refresh_max_ns = refresh; }
-    }
-    if (g_presentation_log_enabled && ps->frames >= VOM_PRESENTATION_STATS_WINDOW)
-    {
-        double avg_ms = ps->delta_sum_ms / ps->frames;
-        double avg_hz = avg_ms > 0 ? 1000.0 / avg_ms : 0;
-        double min_hz = ps->delta_max_ms > 0 ? 1000.0 / ps->delta_max_ms : 0;
-        double max_hz = ps->delta_min_ms > 0 ? 1000.0 / ps->delta_min_ms : 0;
-        double refresh_min_hz = ps->refresh_max_ns > 0 ? 1e9 / ps->refresh_max_ns : 0;
-        double refresh_max_hz = ps->refresh_min_ns > 0 ? 1e9 / ps->refresh_min_ns : 0;
-        // Get T_nominal via the classifier so we go through its output-membership validation — reading vs->active_output->current_mode_mhz directly would UAF after a global_remove freed the struct.
-        int cls_hz_centi = 0;
-        int cls = vom_video_surface_get_vrr_classification(vs, &cls_hz_centi);
-        const char *cls_name = cls == 1 ? "VRR" : cls == 2 ? "FIXED" : cls == 3 ? "CANT-TELL" : "UNKNOWN";
-        double nominal_hz = cls_hz_centi > 0 ? (double)cls_hz_centi / 100.0 : 0;
-        fprintf(stderr,
-            "[vom_wayland] presentation %d frames: delta avg=%.2fms (%.1fHz) range=[%.2f..%.2f]ms ([%.1f..%.1f]Hz) refresh=[%.1f..%.1f]Hz nominal=%.2fHz classification=%s discarded=%d\n",
-            ps->frames, avg_ms, avg_hz,
-            ps->delta_min_ms, ps->delta_max_ms, min_hz, max_hz,
-            refresh_min_hz, refresh_max_hz, nominal_hz, cls_name, ps->discarded);
-        pstats_reset(ps);
-        ps->last_ns = now_ns;
-    }
-    else if (!g_presentation_log_enabled && ps->frames >= VOM_PRESENTATION_STATS_WINDOW)
-    {
-        pstats_reset(ps);
-        ps->last_ns = now_ns;
-    }
+    fb_unlink(n);
     wp_presentation_feedback_destroy(fb);
+    free(n);
 }
 
 static void feedback_discarded(void *data, struct wp_presentation_feedback *fb)
 {
-    struct vom_video_surface *vs = data;
-    vs->pstats.discarded++;
-    // Don't let the next presented frame compute its delta against the prev_ns from before the discard — that would produce a spuriously-large delta reflecting the gap the discarded frame(s) would have filled. Clearing has_prev causes refresh_ring_push to skip the first post-discard sample; we pick up clean deltas from the one after.
-    vs->refresh.has_prev = 0;
+    struct fb_node *n = data;
+    struct vom_video_surface *vs = n->vs;
+    if (vs->discarded_cb)
+    {
+        vs->discarded_cb(vs->cb_data);
+    }
+    fb_unlink(n);
     wp_presentation_feedback_destroy(fb);
+    free(n);
 }
 
 static const struct wp_presentation_feedback_listener feedback_listener = {
@@ -619,9 +494,6 @@ struct vom_video_surface *vom_video_surface_create(
         fprintf(stderr, "[vom_wayland] create: null display or parent\n");
         return NULL;
     }
-    if (initial_w < 1) { initial_w = 1; }
-    if (initial_h < 1) { initial_h = 1; }
-    if (initial_buffer_scale < 1) { initial_buffer_scale = 1; }
 
     if (ensure_globals(display) < 0)
     {
@@ -635,7 +507,6 @@ struct vom_video_surface *vom_video_surface_create(
     }
     vs->display = display;
     vs->parent = parent;
-    vs->buffer_scale = initial_buffer_scale;
     vs->buffer_w = initial_w * initial_buffer_scale;
     vs->buffer_h = initial_h * initial_buffer_scale;
 
@@ -752,8 +623,8 @@ struct vom_video_surface *vom_video_surface_create(
     wl_surface_commit(parent);
     wl_display_flush(display);
 
-    fprintf(stderr, "[vom_wayland] subsurface created (w=%d h=%d scale=%d hdr=%d)\n",
-            vs->buffer_w, vs->buffer_h, vs->buffer_scale, hdr && vs->image_desc != NULL);
+    fprintf(stderr, "[vom_wayland] subsurface created (w=%d h=%d hdr=%d)\n",
+            vs->buffer_w, vs->buffer_h, hdr && vs->image_desc != NULL);
     return vs;
 
 fail:
@@ -769,26 +640,32 @@ fail:
     return NULL;
 }
 
+void vom_video_surface_set_callbacks(struct vom_video_surface *vs, void *data,
+    vom_surface_enter_fn enter, vom_surface_leave_fn leave,
+    vom_feedback_presented_fn presented, vom_feedback_discarded_fn discarded)
+{
+    if (!vs) { return; }
+    vs->cb_data = data;
+    vs->enter_cb = enter;
+    vs->leave_cb = leave;
+    vs->presented_cb = presented;
+    vs->discarded_cb = discarded;
+}
+
+// Caller (C# wrapper) is responsible for clamping inputs and deciding when geometry actually changed; this entry point just executes the protocol sequence unconditionally.
 void vom_video_surface_set_geometry(struct vom_video_surface *vs, int x, int y, int w, int h, int buffer_scale)
 {
     if (!vs) { return; }
-    if (w < 1) { w = 1; }
-    if (h < 1) { h = 1; }
-    if (buffer_scale < 1) { buffer_scale = 1; }
 
     int new_buffer_w = w * buffer_scale;
     int new_buffer_h = h * buffer_scale;
 
     wl_subsurface_set_position(vs->wl_subsurface, x, y);
+    wl_egl_window_resize(vs->egl_window, new_buffer_w, new_buffer_h, 0, 0);
+    wl_surface_set_buffer_scale(vs->wl_surface, buffer_scale);
+    vs->buffer_w = new_buffer_w;
+    vs->buffer_h = new_buffer_h;
 
-    if (new_buffer_w != vs->buffer_w || new_buffer_h != vs->buffer_h || buffer_scale != vs->buffer_scale)
-    {
-        wl_egl_window_resize(vs->egl_window, new_buffer_w, new_buffer_h, 0, 0);
-        wl_surface_set_buffer_scale(vs->wl_surface, buffer_scale);
-        vs->buffer_w = new_buffer_w;
-        vs->buffer_h = new_buffer_h;
-        vs->buffer_scale = buffer_scale;
-    }
     // Parent commit applies the position change. Child commit happens on the next swap.
     wl_surface_commit(vs->parent);
     wl_display_flush(vs->display);
@@ -808,13 +685,27 @@ int vom_video_surface_make_current(struct vom_video_surface *vs)
 void vom_video_surface_swap(struct vom_video_surface *vs)
 {
     if (!vs) { return; }
-    // wp_presentation_feedback must be requested BEFORE the commit it pertains to. eglSwapBuffers internally commits, so we request here. The feedback events fire asynchronously once the compositor actually presents the frame — GTK's main-loop dispatch on the shared wl_display delivers them to our listener. Always requested (cheap: one proxy + one event per frame) so vom_video_surface_get_vrr_classification has samples to work with; the per-120-frames stats line is gated by VOM_WAYLAND_LOG_PRESENTATION inside the listener.
+    // wp_presentation_feedback must be requested BEFORE the commit it pertains to. eglSwapBuffers internally commits, so we request here. The feedback events fire asynchronously once the compositor actually presents the frame — GTK's main-loop dispatch on the shared wl_display delivers them to our listener, which trampolines up to FrameTimingBridge in C#.
     if (g_presentation)
     {
         struct wp_presentation_feedback *fb = wp_presentation_feedback(g_presentation, vs->wl_surface);
         if (fb)
         {
-            wp_presentation_feedback_add_listener(fb, &feedback_listener, vs);
+            struct fb_node *n = calloc(1, sizeof(*n));
+            if (!n)
+            {
+                wp_presentation_feedback_destroy(fb);
+            }
+            else
+            {
+                n->fb = fb;
+                n->vs = vs;
+                n->prev = NULL;
+                n->next = vs->fb_head;
+                if (vs->fb_head) { vs->fb_head->prev = n; }
+                vs->fb_head = n;
+                wp_presentation_feedback_add_listener(fb, &feedback_listener, n);
+            }
         }
     }
     if (!eglSwapBuffers(vs->egl_display, vs->egl_surface))
@@ -840,6 +731,19 @@ int vom_video_surface_hdr_active(struct vom_video_surface *vs)
 void vom_video_surface_destroy(struct vom_video_surface *vs)
 {
     if (!vs) { return; }
+    // Null the callbacks first so any listener that fires between now and actual proxy destruction becomes a no-op. Then destroy all in-flight feedback proxies synchronously — post-destroy, no late feedback can deliver against a freed vs or a recycled GCHandle on the C# side.
+    vs->cb_data = NULL;
+    vs->enter_cb = NULL;
+    vs->leave_cb = NULL;
+    vs->presented_cb = NULL;
+    vs->discarded_cb = NULL;
+    while (vs->fb_head)
+    {
+        struct fb_node *n = vs->fb_head;
+        vs->fb_head = n->next;
+        wp_presentation_feedback_destroy(n->fb);
+        free(n);
+    }
     if (vs->egl_display != EGL_NO_DISPLAY)
     {
         eglMakeCurrent(vs->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

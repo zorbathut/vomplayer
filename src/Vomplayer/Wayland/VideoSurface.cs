@@ -123,6 +123,8 @@ public sealed partial class VideoSurface : IDisposable
 
         try
         {
+            // Must register output callbacks before the shim's first ensure_globals call (triggered by Create below). The initial wl_output + mode events arrive during its two roundtrips; without the callbacks wired, WaylandOutputRegistry would miss them and the VRR classifier would stay Unknown.
+            VomOutputCallbacks.EnsureRegistered();
             surface = new VomVideoSurface(wlDisplay, wlSurface, initialW, initialH, initialScale, hdrRequested);
         }
         catch (Exception ex)

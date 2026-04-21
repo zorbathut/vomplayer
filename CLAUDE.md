@@ -40,6 +40,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **No backwards compatibility**: Remove stubs and dead code completely. Don't preserve backwards compatibility for its own sake—if something is unused or being replaced, delete it outright.
 
+**Native code is for ABI interop only**: Native-language source (e.g. `native/*.c`) holds only what the protocol's C ABI forces — inline stubs that aren't directly P/Invoke-able, listener function-pointer structs, the per-handle state those listeners need to identify their target, one-shot handshake loops that dispatch those listeners (protocol completion, not policy), and lookups from ABI-exposed handles to stable opaque IDs. Everything else — algorithms, thresholds, accumulation, classification, formatting, logging, multi-call decision trees — lives in C# behind trampoline callbacks. Keep identifiers crossing the ABI as stable opaque values (e.g. wire-level names) rather than raw pointers, so consumer lifetime is decoupled from proxy lifetime.
+
 **Avoid default parameters**: Prefer explicit overloads or requiring all parameters. Default parameters hide complexity and make call sites harder to understand.
 
 **Always use braces**: Always include `{}` for `if`, `else`, `for`, `foreach`, `while`, etc., even for single-line bodies.
