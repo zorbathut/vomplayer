@@ -31,10 +31,12 @@ public sealed class FrameTimingBridge
     private uint statsRefreshMinNs;
     private uint statsRefreshMaxNs;
     private int statsDiscarded;
+    private readonly double[] statsDeltasMs = new double[StatsWindow];
 
     // Ordered list of currently-entered wl_outputs (earliest first). wl_surface.enter/leave are symmetric per output, so the list is the set of outputs the subsurface is on *right now*. ActiveOutput returns the earliest-still-entered so behavior matches the prior single-monitor first-wins semantics, but a cross-monitor drag (enter B → leave A) now correctly reports B rather than latching null forever.
     private readonly List<uint> enteredOutputs = new();
     private readonly bool logEnabled;
+    private readonly bool logDeltas;
     private readonly TextWriter logSink;
 
     // Fires after a real mutation to the entered-outputs list (a new enter, or a leave that actually removed something). A duplicate enter or a leave-of-absent is a no-op and does not fire. Consumers that care which output is currently "the" output should re-read ActiveOutput on each fire.
@@ -42,15 +44,35 @@ public sealed class FrameTimingBridge
 
     public FrameTimingBridge()
         : this(
-            logEnabled: Environment.GetEnvironmentVariable("VOMPL_LOG_PRESENTATION") == "1",
+            // VOMPL_LOG_PRESENTATION: "1" = summary line per window, "2" = summary + per-delta dump. Level 2 is a diagnostic aid for classifier-tuning work; the deltas line is meaningless without the summary's nominal-rate / classification context, so they share the var.
+            ParseLogLevel(Environment.GetEnvironmentVariable("VOMPL_LOG_PRESENTATION")),
             logSink: Console.Error)
     {
     }
 
+    private static (bool logEnabled, bool logDeltas) ParseLogLevel(string? v)
+    {
+        if (v == "2")
+        {
+            return (true, true);
+        }
+        if (v == "1")
+        {
+            return (true, false);
+        }
+        return (false, false);
+    }
+
+    private FrameTimingBridge((bool logEnabled, bool logDeltas) level, TextWriter logSink)
+        : this(level.logEnabled, level.logDeltas, logSink)
+    {
+    }
+
     // Internal-only ctor so tests can inject a StringWriter and flip log mode without mutating process env.
-    internal FrameTimingBridge(bool logEnabled, TextWriter logSink)
+    internal FrameTimingBridge(bool logEnabled, bool logDeltas, TextWriter logSink)
     {
         this.logEnabled = logEnabled;
+        this.logDeltas = logDeltas;
         this.logSink = logSink;
     }
 
@@ -161,6 +183,8 @@ public sealed class FrameTimingBridge
             {
                 statsDeltaMaxMs = deltaMs;
             }
+            // Written here for the VOMPL_LOG_PRESENTATION=2 diagnostic. statsFrames is always in [0, StatsWindow) at this point — the emit+reset below fires the moment it hits StatsWindow — so no bounds guard needed.
+            statsDeltasMs[statsFrames] = deltaMs;
             statsFrames++;
         }
         statsLastNs = nowNs;
@@ -210,6 +234,16 @@ public sealed class FrameTimingBridge
             statsFrames, avgMs, avgHz,
             statsDeltaMinMs, statsDeltaMaxMs, minHz, maxHz,
             refreshMinHz, refreshMaxHz, nominalHz, clsName, statsDiscarded));
+
+        if (logDeltas)
+        {
+            var parts = new string[statsFrames];
+            for (int i = 0; i < statsFrames; i++)
+            {
+                parts[i] = statsDeltasMs[i].ToString("F2", CultureInfo.InvariantCulture);
+            }
+            logSink.WriteLine("[vompl] deltas (ms): " + string.Join(' ', parts));
+        }
     }
 
     private void ResetStats()
