@@ -4,7 +4,13 @@ Living notes on the structure of the codebase. Keep this short and current; code
 
 ## What it is
 
-Cross-platform video player, C# + GTK4 (via GirCore) + libmpv (P/Invoke). Target: smplayer-parity feature set with a permissive-license front-end. Primary dev platform is Linux/Wayland/KWin; X11, Windows, macOS are fallback paths that degrade the HDR story but keep playback working.
+Cross-platform video player, C# + GTK4 (via GirCore) + libmpv (P/Invoke). Target: smplayer-parity feature set with a permissive-license front-end. Primary dev platform is Linux/Wayland/KWin; X11, Windows, macOS are fallback paths that degrade the HDR story but keep playback working. Windows and macOS haven't been exercised ever — GTK4 is cross-platform and the HDR path is gated on `OperatingSystem.IsLinux()`, so they *should* work, but no active QA.
+
+## Licensing
+
+App code is MIT. libmpv is LGPLv2.1+ (dynamic linking keeps us permissive). This is a hard constraint:
+- No GPL / LGPL-static / LGPL-adjacent runtime dependencies in the app tree. LibVLCSharp was rejected for this reason.
+- Feature work toward smplayer parity (playlists, subtitles, filters, shaders, stream selection) goes through libmpv properties/commands via the P/Invoke surface — we do not shell out to an `mpv` binary.
 
 ## Module layout
 
@@ -21,6 +27,7 @@ src/
   Mpv/
     LibMpv.cs            # P/Invoke surface for libmpv (client + render_context)
     MpvClient.cs         # thin C# wrapper: events, observed properties, commands
+    MpvDispatcher.cs     # worker thread that serializes client-API calls; hands out ref-struct MpvHandle inside Post callbacks
     MpvRenderContext.cs  # mpv_render_context_* wrapper, ADVANCED_CONTROL contract
   Playback/
     IPlayback.cs         # interface the VM depends on
@@ -37,6 +44,7 @@ src/
     VideoSurface.cs      # Wayland-path orchestrator: window lifecycle, render loop, HDR/VRR exposure
     FrameTimingBridge.cs # per-surface presentation-feedback accumulator, VRR ring, stats log
     VrrClassifier.cs     # pure function: residual-against-T-grid classifier
+    HdrClassifier.cs     # pure function: wp_color_management_output_v1 tf_named -> HDR y/n
     WaylandOutputRegistry.cs # process-global wl_output mode table (keyed by registry name)
   Native/
     hdr_helper.c                                # Wayland ABI shim, see "ABI boundary" below
@@ -133,4 +141,8 @@ UI (MainWindow / VideoView / VideoSurface at runtime) is not unit-tested; change
 
 ## Known blockers / tracked issues
 
-- HDR on KWin requires bypassing GDK's color management (GDK opts out when the compositor doesn't advertise SRGB transfer via `wp_color_manager_v1`). Clean `Avalonia.GraphicsOffload`-style migration is blocked on this; kept in memory.
+- **HDR on KWin requires bypassing GDK's color management.** GTK 4.20's GDK *does* bind `wp_color_manager_v1` but aborts with `"Not using color management: Can't create srgb image description"` because KWin doesn't advertise `TRANSFER_FUNCTION_SRGB` (value 9 — it exposes gamma22/bt1886/PQ/etc. instead) and GDK's sanity check requires TF_SRGB specifically. `native/hdr_helper.c` binds the protocol directly via `gdk_wayland_surface_get_wl_surface`; GDK has already bailed at that point, so there's no conflict. When either side relaxes (KWin advertises TF_SRGB, or GDK drops the requirement), the shim can be retired. To check: `grep -R TRANSFER_FUNCTION_SRGB /usr/include/gtk-4.0/` and KDE release notes.
+- **`Gtk.GraphicsOffload` migration is blocked on the same HDR gap.** Would be architecturally nicer (GTK would manage the subsurface internally and dissolve the `.vom-main-window` transparent-bg + `.vom-chrome` opt-in-opaque CSS dance), but `Gdk.ColorState.SetColorState(Rec2100Pq)` on a `Gdk.GLTextureBuilder` is a no-op against KWin for the reason above. Rejected alternatives: runtime-patching GDK (fragile); reaching into GTK internals for the offload subsurface's `wl_surface` (not exposed, races GTK's per-frame offload decisions); plain `Gtk.Picture` (loses the transparency-hack benefit, inherits the X11-path UI-blowout bug); bifurcating SDR-on-GraphicsOffload / HDR-on-shim (keeps the CSS dance for HDR users, doesn't achieve the goal). Don't re-pitch until the upstream HDR blocker above clears.
+- **Fractional scale.** The subsurface uses GTK's integer `GetScaleFactor()` with `wl_surface.set_buffer_scale`; KWin downscales, wasting GPU on 1.25/1.5/1.75 HiDPI displays. Follow-up: bind `wp_fractional_scale_v1` + `wp_viewporter` in the shim.
+- **In-widget overlays over video are not possible** on the Wayland path: the subsurface is opaque and stacks above the main surface in composite order. Any future OSD / chapter markers / time-preview tooltips must be `Gtk.Popover` anchored to `VideoArea`, not painted into a widget — popovers use their own `xdg_popup` surfaces and stack above the window correctly.
+- **No `ReportSwap` on the GLArea path.** mpv's display-sync accounting wants a post-swap hook and `Gtk.GLArea`'s render cycle doesn't expose one. Wayland path reports correctly via `eglSwapBuffers`.
