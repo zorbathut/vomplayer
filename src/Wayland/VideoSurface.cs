@@ -33,6 +33,10 @@ public sealed partial class VideoSurface : IDisposable
     public event Action<int>? RenderFailed;
     // Fires exactly once, on the main thread, after mpv has signaled content AND the first render+swap of that content completes. Deliberately NOT fired on pre-content renders (initial kickoff, geometry-change renders before any file is loaded) — those are gated out of DoRender so the subsurface stays unmapped. Consumers can use this to remove any "placeholder" they drew on the GTK side while the subsurface was empty.
     public event Action? FirstFrameRendered;
+    // Fires when CurrentOutputIsHdr's observable value changes (null ↔ true, null ↔ false, true ↔ false). Deduped internally against a cached last-published value so a same-value re-notify (e.g. registry event for an output that's already known-SDR) does not fire. Sources: wl_surface.enter/leave mutating the active-output set, and wp_color_management_output_v1.image_description_changed propagating through WaylandOutputRegistry.
+    public event Action? CurrentOutputHdrChanged;
+
+    private bool? lastPublishedOutputIsHdr;
 
     // Stages a PQ/BT.2020 image description (enable=true) or stages removal (enable=false) on the subsurface. The shim does NOT commit — the next mpv-driven Swap flushes it alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor. Returns 0 on success; -1 if the compositor does not advertise wp_color_manager_v1 or the subsurface is not yet realized. Caller must only enable mpv PQ targeting when this returns 0, else PQ-encoded output would hit an untagged surface.
     public int SetHdr(bool enable)
@@ -55,6 +59,30 @@ public sealed partial class VideoSurface : IDisposable
         return surface.GetVrrClassification(out hzCenti);
     }
 
+    // Whether the output the subsurface is currently on advertises an HDR (PQ/HLG) preferred image description. null means unknown — either the surface has no active wl_output yet (pre-first-enter), the shim's HDR probe hasn't completed, or the compositor doesn't advertise wp_color_manager_v1. Callers should treat null as SDR for conservative defaults.
+    //
+    // Reuses FrameTimingBridge.ActiveOutput's first-wins convention: on a subsurface spanning multiple outputs, this reflects whichever output the compositor reported first in wl_surface.enter. TODO: on a span that covers an HDR panel + an SDR panel simultaneously, first-wins can report HDR while pixels on the SDR side receive a PQ-tagged surface (imperfect compositor tonemap-down). Safer future policy: return false if ANY entered output is SDR, true only when all entered outputs are HDR.
+    public bool? CurrentOutputIsHdr
+    {
+        get
+        {
+            if (surface == null)
+            {
+                return null;
+            }
+            uint? active = surface.Bridge.ActiveOutput;
+            if (!active.HasValue)
+            {
+                return null;
+            }
+            if (WaylandOutputRegistry.TryGetIsHdr(active.Value, out var isHdr))
+            {
+                return isHdr;
+            }
+            return null;
+        }
+    }
+
     public VideoSurface(Gtk.Window window, VideoArea area)
     {
         if (window == null)
@@ -71,6 +99,9 @@ public sealed partial class VideoSurface : IDisposable
         window.OnRealize += OnWindowRealize;
         window.OnUnrealize += OnWindowUnrealize;
         area.GeometryChanged += OnAreaGeometryChanged;
+
+        // Static-event subscription — must be unhooked in Dispose or we'd leak this VideoSurface for the process lifetime. The Bridge-side subscription is hooked/unhooked with the VomVideoSurface lifetime in TryCreateRenderContext / TearDown.
+        WaylandOutputRegistry.IsHdrChanged += OnRegistryIsHdrChanged;
     }
 
     // Called by MainWindow via playback.AttachRenderSurface(client => videoSurface.SetMpvClient(client)). If the window is already realized, the render context is built now; otherwise the client is stashed and the render context is built on OnRealize.
@@ -134,6 +165,8 @@ public sealed partial class VideoSurface : IDisposable
             RenderFailed?.Invoke(-1);
             return;
         }
+        // Note the ordering: ensure_globals (inside the VomVideoSurface constructor above) synchronously pumps roundtrips. If the compositor fires wl_surface.enter during those roundtrips, it lands on the bridge BEFORE this subscription, so the first ActiveOutputsChanged that fires through us is for a later mutation. That's acceptable because CurrentOutputIsHdr.get reads bridge+registry state directly — ApplyHdrPolicy will see the correct combined value whenever it next runs (from SourceHdrChanged or a real output change).
+        surface.Bridge.ActiveOutputsChanged += OnBridgeActiveOutputsChanged;
 
         if (pendingGeometry.HasValue)
         {
@@ -266,6 +299,7 @@ public sealed partial class VideoSurface : IDisposable
     {
         if (surface != null)
         {
+            surface.Bridge.ActiveOutputsChanged -= OnBridgeActiveOutputsChanged;
             // mpv_render_context_free needs the GL context current.
             surface.MakeCurrent();
         }
@@ -285,6 +319,41 @@ public sealed partial class VideoSurface : IDisposable
         window.OnRealize -= OnWindowRealize;
         window.OnUnrealize -= OnWindowUnrealize;
         area.GeometryChanged -= OnAreaGeometryChanged;
+        WaylandOutputRegistry.IsHdrChanged -= OnRegistryIsHdrChanged;
         TearDown();
+    }
+
+    private void OnRegistryIsHdrChanged(uint registryName)
+    {
+        // The registry fires for every output. Filter to the current active output before publishing, else a distant monitor's probe update would spuriously re-fire our event.
+        uint? active = surface?.Bridge.ActiveOutput;
+        if (!active.HasValue || active.Value != registryName)
+        {
+            return;
+        }
+        PublishOutputHdrIfChanged();
+    }
+
+    private void OnBridgeActiveOutputsChanged()
+    {
+        PublishOutputHdrIfChanged();
+    }
+
+    private void PublishOutputHdrIfChanged()
+    {
+        bool? current = CurrentOutputIsHdr;
+        if (current == lastPublishedOutputIsHdr)
+        {
+            return;
+        }
+        lastPublishedOutputIsHdr = current;
+        // Defer the invoke: this fires from Wayland dispatch on the main thread, and consumers (MainWindow.ApplyHdrPolicy) call mpv.SetProperty which synchronously waits on mpv's core thread. The core then waits on the render thread — which is *this* main thread. Synchronous invocation would deadlock the main loop. Punting to a fresh GMainContext iteration breaks the cycle, matching Playback.UpdateSourceHdr's postToMainThread pattern for SourceHdrChanged.
+        GLib.Functions.IdleAdd(
+            (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
+            () =>
+            {
+                CurrentOutputHdrChanged?.Invoke();
+                return false;
+            });
     }
 }

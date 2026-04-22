@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
 #include <EGL/egl.h>
@@ -29,6 +30,8 @@
 
 typedef void (*vom_output_mode_fn)(uint32_t registry_name, int32_t refresh_mhz);
 typedef void (*vom_output_removed_fn)(uint32_t registry_name);
+// Forwards the raw tf_named observation for an output's preferred image description. has_tf_named is 0 if no tf_named event arrived before the info `done` (compositor described the TF some other way, or the description failed). Classification into HDR/SDR lives in C# (HdrClassifier).
+typedef void (*vom_output_image_info_fn)(uint32_t registry_name, int has_tf_named, uint32_t tf_named);
 
 typedef void (*vom_surface_enter_fn)(void *data, uint32_t registry_name);
 typedef void (*vom_surface_leave_fn)(void *data, uint32_t registry_name);
@@ -37,19 +40,33 @@ typedef void (*vom_feedback_discarded_fn)(void *data);
 
 static vom_output_mode_fn g_output_mode_cb;
 static vom_output_removed_fn g_output_removed_cb;
+static vom_output_image_info_fn g_output_image_info_cb;
 
 //---------------------------------------------------------------
 // Process-global Wayland globals, resolved lazily on first use.
 //---------------------------------------------------------------
 
-// Per-output record. The current-mode refresh rate is kept here purely for replay: if vom_set_output_callbacks is called after the initial wl_output enumeration has already fired, we re-deliver the cached mode values so the consumer doesn't miss them. Under steady-state, the consumer (C#) is the authoritative store.
+// Per-output record. The cached mode+image-info fields exist purely for replay: if vom_set_output_callbacks is called after the initial wl_output enumeration has already fired, we re-deliver the cached values so the consumer doesn't miss them. Under steady-state, the consumer (C#) is the authoritative store.
+//
+// HDR probe state (cm_output, pending_desc, pending_info, pending_tf_*) drives a single-shot ready→get_information→tf_named→done handshake per probe. A fresh probe starts on initial output bind and on every wp_color_management_output_v1.image_description_changed event; any in-flight proxies are destroyed before restarting so at most one chain is live per output at a time.
 struct output_info
 {
     struct wl_output *output;
     uint32_t registry_name;
     int32_t cached_mode_mhz;
+    int cached_image_info_valid;
+    int cached_has_tf_named;
+    uint32_t cached_tf_named;
+    struct wp_color_management_output_v1 *cm_output;
+    struct wp_image_description_v1 *pending_desc;
+    struct wp_image_description_info_v1 *pending_info;
+    int pending_tf_named_seen;
+    uint32_t pending_tf_named;
     struct output_info *next;
 };
+
+// Count of image-description handshakes in flight (across all outputs). Bumped when a probe starts, decremented when a probe terminates (ready→done, failed, or teardown). ensure_globals pumps roundtrips until this reaches zero so initial outputs have their HDR bit populated before the first subsurface is created.
+static int g_hdr_probes_inflight;
 
 static struct wl_display *g_cached_display;
 static struct wl_registry *g_registry;
@@ -72,16 +89,21 @@ static uint32_t lookup_output_registry_name(struct wl_output *o)
     return 0;
 }
 
-// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes so consumer state catches up). The replay decouples ordering between vom_set_output_callbacks and whatever triggers ensure_globals.
-void vom_set_output_callbacks(vom_output_mode_fn mode, vom_output_removed_fn removed)
+// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes + image info so consumer state catches up). The replay decouples ordering between vom_set_output_callbacks and whatever triggers ensure_globals.
+void vom_set_output_callbacks(vom_output_mode_fn mode, vom_output_removed_fn removed, vom_output_image_info_fn image_info)
 {
     g_output_mode_cb = mode;
     g_output_removed_cb = removed;
+    g_output_image_info_cb = image_info;
     for (struct output_info *it = g_outputs; it; it = it->next)
     {
         if (it->cached_mode_mhz != 0 && g_output_mode_cb)
         {
             g_output_mode_cb(it->registry_name, it->cached_mode_mhz);
+        }
+        if (it->cached_image_info_valid && g_output_image_info_cb)
+        {
+            g_output_image_info_cb(it->registry_name, it->cached_has_tf_named, it->cached_tf_named);
         }
     }
 }
@@ -125,6 +147,199 @@ static const struct wl_output_listener output_listener_impl = {
     .description = output_handle_description,
 };
 
+//---------------------------------------------------------------
+// Per-output HDR-capability probe: introspect the output's preferred image description and classify the panel as HDR iff its transfer function is PQ or HLG. Flow (driven by the compositor's event loop):
+//
+//   get_image_description
+//     └─ ready    → get_information
+//                     └─ tf_named (captured)
+//                     └─ done     → classify + fire callback, destroy info
+//     └─ failed   → leave is_hdr_valid as-is (unknown or last known), destroy desc
+//
+// image_description_changed restarts the flow; old in-flight state is torn down first.
+//---------------------------------------------------------------
+
+static void start_output_hdr_probe(struct output_info *info);
+
+static void teardown_pending_probe(struct output_info *info)
+{
+    int had = (info->pending_desc != NULL) || (info->pending_info != NULL);
+    if (info->pending_info)
+    {
+        wp_image_description_info_v1_destroy(info->pending_info);
+        info->pending_info = NULL;
+    }
+    if (info->pending_desc)
+    {
+        wp_image_description_v1_destroy(info->pending_desc);
+        info->pending_desc = NULL;
+    }
+    info->pending_tf_named_seen = 0;
+    info->pending_tf_named = 0;
+    if (had)
+    {
+        g_hdr_probes_inflight--;
+        if (g_hdr_probes_inflight < 0)
+        {
+            fprintf(stderr, "[hdr_helper] probe counter underflow — teardown without matching start\n");
+        }
+    }
+}
+
+static void oi_desc_failed(void *data, struct wp_image_description_v1 *desc, uint32_t cause, const char *msg)
+{
+    (void)desc;
+    struct output_info *info = data;
+    fprintf(stderr, "[hdr_helper] output %u image description failed: cause=%u msg=%s\n",
+            info->registry_name, cause, msg ? msg : "");
+    teardown_pending_probe(info);
+}
+
+// Only tf_named and done are load-bearing; every other event is accepted and discarded. Listener slots can't be NULL (libwayland dispatches via the vtable unconditionally) so each slot points at an ignore-shaped stub with the correct signature.
+//
+// icc_file carries a file descriptor transferred over the socket. We don't use ICC profiles, but we must still close the fd or it leaks — one per probe per output with an ICC-described profile, plus one per image_description_changed restart.
+static void oi_info_icc_file(void *data, struct wp_image_description_info_v1 *i, int32_t icc, uint32_t icc_size)
+{
+    (void)data; (void)i; (void)icc_size;
+    if (icc >= 0)
+    {
+        close(icc);
+    }
+}
+static void oi_info_primaries(void *data, struct wp_image_description_info_v1 *i, int32_t rx, int32_t ry, int32_t gx, int32_t gy, int32_t bx, int32_t by, int32_t wx, int32_t wy)
+{
+    (void)data; (void)i; (void)rx; (void)ry; (void)gx; (void)gy; (void)bx; (void)by; (void)wx; (void)wy;
+}
+static void oi_info_primaries_named(void *data, struct wp_image_description_info_v1 *i, uint32_t p)
+{
+    (void)data; (void)i; (void)p;
+}
+static void oi_info_tf_power(void *data, struct wp_image_description_info_v1 *i, uint32_t eexp)
+{
+    (void)data; (void)i; (void)eexp;
+}
+static void oi_info_luminances(void *data, struct wp_image_description_info_v1 *i, uint32_t mn, uint32_t mx, uint32_t ref)
+{
+    (void)data; (void)i; (void)mn; (void)mx; (void)ref;
+}
+static void oi_info_target_primaries(void *data, struct wp_image_description_info_v1 *i, int32_t rx, int32_t ry, int32_t gx, int32_t gy, int32_t bx, int32_t by, int32_t wx, int32_t wy)
+{
+    (void)data; (void)i; (void)rx; (void)ry; (void)gx; (void)gy; (void)bx; (void)by; (void)wx; (void)wy;
+}
+static void oi_info_target_luminance(void *data, struct wp_image_description_info_v1 *i, uint32_t mn, uint32_t mx)
+{
+    (void)data; (void)i; (void)mn; (void)mx;
+}
+static void oi_info_target_max_cll(void *data, struct wp_image_description_info_v1 *i, uint32_t v)
+{
+    (void)data; (void)i; (void)v;
+}
+static void oi_info_target_max_fall(void *data, struct wp_image_description_info_v1 *i, uint32_t v)
+{
+    (void)data; (void)i; (void)v;
+}
+
+static void oi_info_tf_named(void *data, struct wp_image_description_info_v1 *i, uint32_t tf)
+{
+    (void)i;
+    struct output_info *info = data;
+    info->pending_tf_named = tf;
+    info->pending_tf_named_seen = 1;
+}
+
+static void oi_info_done(void *data, struct wp_image_description_info_v1 *i)
+{
+    (void)i;
+    struct output_info *info = data;
+    info->cached_has_tf_named = info->pending_tf_named_seen;
+    info->cached_tf_named = info->pending_tf_named;
+    info->cached_image_info_valid = 1;
+    if (g_output_image_info_cb)
+    {
+        g_output_image_info_cb(info->registry_name, info->pending_tf_named_seen, info->pending_tf_named);
+    }
+    // done is terminal — conventional client pattern is wl_proxy_destroy after receiving it. The info proxy has no destroy request (there's nothing to tell the server), so wp_image_description_info_v1_destroy is purely client-side. teardown_pending_probe handles that.
+    teardown_pending_probe(info);
+}
+
+static const struct wp_image_description_info_v1_listener oi_info_listener = {
+    .done = oi_info_done,
+    .icc_file = oi_info_icc_file,
+    .primaries = oi_info_primaries,
+    .primaries_named = oi_info_primaries_named,
+    .tf_power = oi_info_tf_power,
+    .tf_named = oi_info_tf_named,
+    .luminances = oi_info_luminances,
+    .target_primaries = oi_info_target_primaries,
+    .target_luminance = oi_info_target_luminance,
+    .target_max_cll = oi_info_target_max_cll,
+    .target_max_fall = oi_info_target_max_fall,
+};
+
+static void oi_desc_ready(void *data, struct wp_image_description_v1 *desc, uint32_t identity)
+{
+    (void)desc; (void)identity;
+    struct output_info *info = data;
+    info->pending_info = wp_image_description_v1_get_information(info->pending_desc);
+    if (!info->pending_info)
+    {
+        fprintf(stderr, "[hdr_helper] output %u: get_information failed\n", info->registry_name);
+        teardown_pending_probe(info);
+        return;
+    }
+    wp_image_description_info_v1_add_listener(info->pending_info, &oi_info_listener, info);
+}
+
+static const struct wp_image_description_v1_listener oi_desc_listener = {
+    .failed = oi_desc_failed,
+    .ready = oi_desc_ready,
+};
+
+static void oi_cm_output_image_description_changed(void *data, struct wp_color_management_output_v1 *cmo)
+{
+    (void)cmo;
+    struct output_info *info = data;
+    teardown_pending_probe(info);
+    start_output_hdr_probe(info);
+}
+
+static const struct wp_color_management_output_v1_listener oi_cm_output_listener = {
+    .image_description_changed = oi_cm_output_image_description_changed,
+};
+
+static void start_output_hdr_probe(struct output_info *info)
+{
+    if (!g_color_manager || !info->cm_output)
+    {
+        return;
+    }
+    info->pending_desc = wp_color_management_output_v1_get_image_description(info->cm_output);
+    if (!info->pending_desc)
+    {
+        fprintf(stderr, "[hdr_helper] output %u: get_image_description returned NULL\n", info->registry_name);
+        return;
+    }
+    g_hdr_probes_inflight++;
+    wp_image_description_v1_add_listener(info->pending_desc, &oi_desc_listener, info);
+}
+
+// Attach CM-output proxy to an output that doesn't yet have one, and start the initial probe. Called when wp_color_manager_v1 binds (scanning existing outputs) and when a wl_output binds (if CM is already known).
+static void attach_cm_output_and_probe(struct output_info *info)
+{
+    if (info->cm_output || !g_color_manager)
+    {
+        return;
+    }
+    info->cm_output = wp_color_manager_v1_get_output(g_color_manager, info->output);
+    if (!info->cm_output)
+    {
+        fprintf(stderr, "[hdr_helper] output %u: wp_color_manager_v1.get_output returned NULL\n", info->registry_name);
+        return;
+    }
+    wp_color_management_output_v1_add_listener(info->cm_output, &oi_cm_output_listener, info);
+    start_output_hdr_probe(info);
+}
+
 static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version)
 {
     (void)data;
@@ -140,6 +355,11 @@ static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t nam
     else if (strcmp(iface, "wp_color_manager_v1") == 0 && !g_color_manager)
     {
         g_color_manager = wl_registry_bind(reg, name, &wp_color_manager_v1_interface, version < 1 ? version : 1);
+        // Any wl_outputs that bound before us don't yet have a CM-output proxy; attach one and kick off their HDR probes now.
+        for (struct output_info *it = g_outputs; it; it = it->next)
+        {
+            attach_cm_output_and_probe(it);
+        }
     }
     else if (strcmp(iface, "wp_presentation") == 0 && !g_presentation)
     {
@@ -157,10 +377,12 @@ static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t nam
         info->next = g_outputs;
         g_outputs = info;
         wl_output_add_listener(info->output, &output_listener_impl, info);
+        // If CM is already bound, start the HDR probe immediately; otherwise it starts when CM binds (see above).
+        attach_cm_output_and_probe(info);
     }
 }
 
-// Monitor hot-plug removal. Unlink and free the matching output_info, then fire the removed callback so the C# registry can drop its entry. Listener remains attached to the wl_output proxy until wl_output_destroy — safe because the listener handlers are all stateless forwarders.
+// Monitor hot-plug removal. Unlink and free the matching output_info, then fire the removed callback so the C# registry can drop its entry. Any in-flight HDR probe is torn down before freeing: a pending info/desc delivered after free would dispatch against a stale output_info* and corrupt memory.
 static void globals_reg_global_remove(void *data, struct wl_registry *reg, uint32_t name)
 {
     (void)data; (void)reg;
@@ -172,6 +394,12 @@ static void globals_reg_global_remove(void *data, struct wl_registry *reg, uint3
             struct output_info *dead = *pp;
             *pp = dead->next;
             if (g_output_removed_cb) { g_output_removed_cb(name); }
+            teardown_pending_probe(dead);
+            if (dead->cm_output)
+            {
+                wp_color_management_output_v1_destroy(dead->cm_output);
+                dead->cm_output = NULL;
+            }
             wl_output_destroy(dead->output);
             free(dead);
             return;
@@ -222,6 +450,19 @@ static int ensure_globals(struct wl_display *display)
         fprintf(stderr, "[hdr_helper] compositor/subcompositor globals missing\n");
         wl_registry_destroy(reg);
         return -4;
+    }
+
+    // Pump additional roundtrips so the per-output HDR-capability probe (get_image_description → ready → get_information → tf_named/done) completes before returning. Each full probe needs ~2 roundtrips. Capped so a misbehaving compositor can't wedge init; if the cap is hit the still-pending outputs keep cached_image_info_valid == 0 (consumer treats unknown as SDR), but we log so a surprise "everything probed as SDR" is diagnosable.
+    for (int i = 0; i < 6 && g_hdr_probes_inflight > 0; i++)
+    {
+        if (wl_display_roundtrip(display) < 0)
+        {
+            break;
+        }
+    }
+    if (g_hdr_probes_inflight > 0)
+    {
+        fprintf(stderr, "[hdr_helper] %d output HDR probe(s) still in flight after roundtrip cap; leaving those outputs as unknown\n", g_hdr_probes_inflight);
     }
 
     g_cached_display = display;
@@ -446,7 +687,7 @@ struct vom_video_surface *vom_video_surface_create(
 {
     if (!display || !parent)
     {
-        fprintf(stderr, "[vom_wayland] create: null display or parent\n");
+        fprintf(stderr, "[vompl] create: null display or parent\n");
         return NULL;
     }
 
@@ -468,7 +709,7 @@ struct vom_video_surface *vom_video_surface_create(
     vs->wl_surface = wl_compositor_create_surface(g_compositor);
     if (!vs->wl_surface)
     {
-        fprintf(stderr, "[vom_wayland] create_surface failed\n");
+        fprintf(stderr, "[vompl] create_surface failed\n");
         free(vs);
         return NULL;
     }
@@ -487,7 +728,7 @@ struct vom_video_surface *vom_video_surface_create(
     vs->wl_subsurface = wl_subcompositor_get_subsurface(g_subcompositor, vs->wl_surface, parent);
     if (!vs->wl_subsurface)
     {
-        fprintf(stderr, "[vom_wayland] get_subsurface failed\n");
+        fprintf(stderr, "[vompl] get_subsurface failed\n");
         wl_surface_destroy(vs->wl_surface);
         free(vs);
         return NULL;
@@ -503,18 +744,18 @@ struct vom_video_surface *vom_video_surface_create(
     vs->egl_display = eglGetDisplay((EGLNativeDisplayType)display);
     if (vs->egl_display == EGL_NO_DISPLAY || !eglInitialize(vs->egl_display, NULL, NULL))
     {
-        fprintf(stderr, "[vom_wayland] eglInitialize failed (err=0x%x)\n", eglGetError());
+        fprintf(stderr, "[vompl] eglInitialize failed (err=0x%x)\n", eglGetError());
         goto fail;
     }
     if (!eglBindAPI(EGL_OPENGL_ES_API))
     {
-        fprintf(stderr, "[vom_wayland] eglBindAPI GLES failed (err=0x%x)\n", eglGetError());
+        fprintf(stderr, "[vompl] eglBindAPI GLES failed (err=0x%x)\n", eglGetError());
         goto fail;
     }
     EGLConfig config;
     if (choose_egl_config(vs->egl_display, &config) < 0)
     {
-        fprintf(stderr, "[vom_wayland] no EGL config (err=0x%x)\n", eglGetError());
+        fprintf(stderr, "[vompl] no EGL config (err=0x%x)\n", eglGetError());
         goto fail;
     }
 
@@ -527,7 +768,7 @@ struct vom_video_surface *vom_video_surface_create(
         vs->egl_context = eglCreateContext(vs->egl_display, config, EGL_NO_CONTEXT, ctx_attribs2);
         if (vs->egl_context == EGL_NO_CONTEXT)
         {
-            fprintf(stderr, "[vom_wayland] eglCreateContext failed (err=0x%x)\n", eglGetError());
+            fprintf(stderr, "[vompl] eglCreateContext failed (err=0x%x)\n", eglGetError());
             goto fail;
         }
     }
@@ -535,13 +776,13 @@ struct vom_video_surface *vom_video_surface_create(
     vs->egl_window = wl_egl_window_create(vs->wl_surface, vs->buffer_w, vs->buffer_h);
     if (!vs->egl_window)
     {
-        fprintf(stderr, "[vom_wayland] wl_egl_window_create failed\n");
+        fprintf(stderr, "[vompl] wl_egl_window_create failed\n");
         goto fail;
     }
     vs->egl_surface = eglCreateWindowSurface(vs->egl_display, config, (EGLNativeWindowType)vs->egl_window, NULL);
     if (vs->egl_surface == EGL_NO_SURFACE)
     {
-        fprintf(stderr, "[vom_wayland] eglCreateWindowSurface failed (err=0x%x)\n", eglGetError());
+        fprintf(stderr, "[vompl] eglCreateWindowSurface failed (err=0x%x)\n", eglGetError());
         goto fail;
     }
 
@@ -551,7 +792,7 @@ struct vom_video_surface *vom_video_surface_create(
     wl_surface_commit(parent);
     wl_display_flush(display);
 
-    fprintf(stderr, "[vom_wayland] subsurface created (w=%d h=%d)\n",
+    fprintf(stderr, "[vompl] subsurface created (w=%d h=%d)\n",
             vs->buffer_w, vs->buffer_h);
     return vs;
 
@@ -604,7 +845,7 @@ int vom_video_surface_make_current(struct vom_video_surface *vs)
     if (!vs) { return -1; }
     if (!eglMakeCurrent(vs->egl_display, vs->egl_surface, vs->egl_surface, vs->egl_context))
     {
-        fprintf(stderr, "[vom_wayland] eglMakeCurrent failed (err=0x%x)\n", eglGetError());
+        fprintf(stderr, "[vompl] eglMakeCurrent failed (err=0x%x)\n", eglGetError());
         return -2;
     }
     return 0;
@@ -638,7 +879,7 @@ void vom_video_surface_swap(struct vom_video_surface *vs)
     }
     if (!eglSwapBuffers(vs->egl_display, vs->egl_surface))
     {
-        fprintf(stderr, "[vom_wayland] eglSwapBuffers failed (err=0x%x)\n", eglGetError());
+        fprintf(stderr, "[vompl] eglSwapBuffers failed (err=0x%x)\n", eglGetError());
     }
 }
 
@@ -675,7 +916,7 @@ int vom_video_surface_set_hdr(struct vom_video_surface *vs, int enable)
             vs->cm_surface = wp_color_manager_v1_get_surface(g_color_manager, vs->wl_surface);
             if (!vs->cm_surface)
             {
-                fprintf(stderr, "[vom_wayland] set_hdr: get_surface failed\n");
+                fprintf(stderr, "[vompl] set_hdr: get_surface failed\n");
                 return -1;
             }
         }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 
@@ -31,13 +32,17 @@ public sealed class FrameTimingBridge
     private uint statsRefreshMaxNs;
     private int statsDiscarded;
 
-    private uint? activeOutput;
+    // Ordered list of currently-entered wl_outputs (earliest first). wl_surface.enter/leave are symmetric per output, so the list is the set of outputs the subsurface is on *right now*. ActiveOutput returns the earliest-still-entered so behavior matches the prior single-monitor first-wins semantics, but a cross-monitor drag (enter B → leave A) now correctly reports B rather than latching null forever.
+    private readonly List<uint> enteredOutputs = new();
     private readonly bool logEnabled;
     private readonly TextWriter logSink;
 
+    // Fires after a real mutation to the entered-outputs list (a new enter, or a leave that actually removed something). A duplicate enter or a leave-of-absent is a no-op and does not fire. Consumers that care which output is currently "the" output should re-read ActiveOutput on each fire.
+    public event Action? ActiveOutputsChanged;
+
     public FrameTimingBridge()
         : this(
-            logEnabled: Environment.GetEnvironmentVariable("VOM_WAYLAND_LOG_PRESENTATION") == "1",
+            logEnabled: Environment.GetEnvironmentVariable("VOMPL_LOG_PRESENTATION") == "1",
             logSink: Console.Error)
     {
     }
@@ -49,21 +54,21 @@ public sealed class FrameTimingBridge
         this.logSink = logSink;
     }
 
-    // Set by the wl_surface.enter trampoline. First-wins: on a multi-output subsurface the compositor fires enter once per output, and we keep whichever landed first as the "home" panel. Different policies (max refresh, etc.) are possible but haven't been needed — the primary use case is single-monitor playback.
+    // Set by the wl_surface.enter trampoline. Idempotent: the compositor may repeat an enter for the same output; we dedupe so leave/enter counts don't drift.
     public void OnEnter(uint registryName)
     {
-        if (!activeOutput.HasValue)
+        if (!enteredOutputs.Contains(registryName))
         {
-            activeOutput = registryName;
+            enteredOutputs.Add(registryName);
+            ActiveOutputsChanged?.Invoke();
         }
     }
 
-    // Only clears active if the leaving output matches. wl_surface.leave fires per-output on a multi-output subsurface; we want to keep the primary active until it's the one leaving.
     public void OnLeave(uint registryName)
     {
-        if (activeOutput == registryName)
+        if (enteredOutputs.Remove(registryName))
         {
-            activeOutput = null;
+            ActiveOutputsChanged?.Invoke();
         }
     }
 
@@ -84,11 +89,11 @@ public sealed class FrameTimingBridge
     public VrrClassification GetClassification(out int hzCenti)
     {
         hzCenti = 0;
-        if (!activeOutput.HasValue)
+        if (enteredOutputs.Count == 0)
         {
             return VrrClassification.Unknown;
         }
-        if (!WaylandOutputRegistry.TryGetMode(activeOutput.Value, out var mhz))
+        if (!WaylandOutputRegistry.TryGetMode(enteredOutputs[0], out var mhz))
         {
             return VrrClassification.Unknown;
         }
@@ -179,7 +184,7 @@ public sealed class FrameTimingBridge
         };
         double nominalHz = hzCenti > 0 ? hzCenti / 100.0 : 0;
         logSink.WriteLine(string.Format(CultureInfo.InvariantCulture,
-            "[vom_wayland] presentation {0} frames: delta avg={1:F2}ms ({2:F1}Hz) range=[{3:F2}..{4:F2}]ms ([{5:F1}..{6:F1}]Hz) refresh=[{7:F1}..{8:F1}]Hz nominal={9:F2}Hz classification={10} discarded={11}",
+            "[vompl] presentation {0} frames: delta avg={1:F2}ms ({2:F1}Hz) range=[{3:F2}..{4:F2}]ms ([{5:F1}..{6:F1}]Hz) refresh=[{7:F1}..{8:F1}]Hz nominal={9:F2}Hz classification={10} discarded={11}",
             statsFrames, avgMs, avgHz,
             statsDeltaMinMs, statsDeltaMaxMs, minHz, maxHz,
             refreshMinHz, refreshMaxHz, nominalHz, clsName, statsDiscarded));
@@ -225,7 +230,11 @@ public sealed class FrameTimingBridge
     {
         get
         {
-            return activeOutput;
+            if (enteredOutputs.Count == 0)
+            {
+                return null;
+            }
+            return enteredOutputs[0];
         }
     }
 }

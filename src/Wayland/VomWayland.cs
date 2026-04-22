@@ -219,13 +219,15 @@ internal sealed partial class VomVideoSurface : IDisposable
     private static partial void DestroyNative(IntPtr vs);
 }
 
-// Process-global output-event trampolines. Forwards straight into WaylandOutputRegistry. Delegates are static-rooted so they're pinned for the process lifetime. The native shim buffers cached modes and replays them when callbacks register, so ordering vs. ensure_globals is not load-bearing.
+// Process-global output-event trampolines. Forwards straight into WaylandOutputRegistry. Delegates are static-rooted so they're pinned for the process lifetime. The native shim buffers cached mode + HDR bits and replays them when callbacks register, so ordering vs. ensure_globals is not load-bearing.
 internal static partial class VomOutputCallbacks
 {
     private const string Lib = "hdr_helper";
 
     private static readonly OutputModeCallback modeDelegate = OnMode;
     private static readonly OutputRemovedCallback removedDelegate = OnRemoved;
+    private static readonly OutputImageInfoCallback imageInfoDelegate = OnImageInfo;
+    private static readonly bool logHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
     private static bool registered;
 
     public static void EnsureRegistered()
@@ -234,7 +236,7 @@ internal static partial class VomOutputCallbacks
         {
             return;
         }
-        SetOutputCallbacks(modeDelegate, removedDelegate);
+        SetOutputCallbacks(modeDelegate, removedDelegate, imageInfoDelegate);
         registered = true;
     }
 
@@ -262,12 +264,33 @@ internal static partial class VomOutputCallbacks
         }
     }
 
+    private static void OnImageInfo(uint registryName, int hasTfNamed, uint tfNamed)
+    {
+        try
+        {
+            bool isHdr = HdrClassifier.IsHdr(hasTfNamed != 0, tfNamed);
+            WaylandOutputRegistry.OnOutputHdr(registryName, isHdr);
+            if (logHdr)
+            {
+                string tfStr = hasTfNamed != 0 ? tfNamed.ToString() : "absent";
+                Console.Error.WriteLine($"[vompl] output {registryName} tf_named={tfStr} isHdr={isHdr}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[vomplayer] WaylandOutputRegistry.OnOutputHdr threw: {ex}");
+        }
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void OutputModeCallback(uint registryName, int refreshMhz);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void OutputRemovedCallback(uint registryName);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void OutputImageInfoCallback(uint registryName, int hasTfNamed, uint tfNamed);
+
     [LibraryImport(Lib, EntryPoint = "vom_set_output_callbacks")]
-    private static partial void SetOutputCallbacks(OutputModeCallback mode, OutputRemovedCallback removed);
+    private static partial void SetOutputCallbacks(OutputModeCallback mode, OutputRemovedCallback removed, OutputImageInfoCallback imageInfo);
 }

@@ -141,11 +141,47 @@ public class FrameTimingBridgeTests
     [Test]
     public void EnterIsFirstWinsOnMultiOutput()
     {
-        // Multi-monitor subsurface straddling two panels: compositor fires enter per-output. We keep the first so the classifier has a stable "home" reference until the subsurface actually leaves the primary.
+        // Multi-monitor subsurface straddling two panels: compositor fires enter per-output. We keep the earliest-still-entered so the classifier has a stable "home" reference until the subsurface actually leaves the primary.
         var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
         bridge.OnEnter(5);
         bridge.OnEnter(7);
         Assert.That(bridge.ActiveOutput, Is.EqualTo((uint)5));
+    }
+
+    [Test]
+    public void CrossMonitorDragReassignsActiveOutput()
+    {
+        // Drag scenario: window is on A, spans A+B during the drag, then settles on B. wl_surface.enter(B) fires during the span, then wl_surface.leave(A) once the drag completes. ActiveOutput must become B — the old first-wins+clear-on-match policy would have latched null permanently here.
+        var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
+        bridge.OnEnter(1);
+        bridge.OnEnter(2);
+        bridge.OnLeave(1);
+        Assert.That(bridge.ActiveOutput, Is.EqualTo((uint)2));
+    }
+
+    [Test]
+    public void DuplicateEnterIsIdempotent()
+    {
+        var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
+        bridge.OnEnter(3);
+        bridge.OnEnter(3);
+        bridge.OnLeave(3);
+        Assert.That(bridge.ActiveOutput, Is.Null);
+    }
+
+    [Test]
+    public void ActiveOutputsChangedFiresOnRealMutationsOnly()
+    {
+        var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
+        int fires = 0;
+        bridge.ActiveOutputsChanged += () => fires++;
+        bridge.OnEnter(1);     // fires
+        bridge.OnEnter(1);     // no-op duplicate
+        bridge.OnEnter(2);     // fires
+        bridge.OnLeave(99);    // no-op (not present)
+        bridge.OnLeave(1);     // fires
+        bridge.OnLeave(2);     // fires
+        Assert.That(fires, Is.EqualTo(4));
     }
 
     [Test]
@@ -164,7 +200,7 @@ public class FrameTimingBridgeTests
         }
 
         var output = sink.ToString();
-        Assert.That(output, Does.Contain($"[vom_wayland] presentation {FrameTimingBridge.StatsWindow} frames"));
+        Assert.That(output, Does.Contain($"[vompl] presentation {FrameTimingBridge.StatsWindow} frames"));
         // Invariant-culture decimals: the log line must use '.' not ',' regardless of host locale.
         Assert.That(output, Does.Contain("nominal=60.00Hz"));
     }

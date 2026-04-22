@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Mpv;
 
@@ -78,19 +79,27 @@ public sealed partial class Playback : ObservableObject, IPlayback
     }
 
     // Called after the Wayland color-management shim attaches a PQ/BT.2020 description to the subsurface — libplacebo must then render to match, or the compositor will misinterpret sRGB-encoded output as PQ. If HDR is never applied (non-Linux, X11, compositor without wp-color-management-v1, or current source is SDR), we never call this and mpv keeps its sRGB-target default.
+    //
+    // Dispatched to the thread pool because mpv_set_property_string for target-* blocks the caller until the render context has acknowledged the change. The acknowledgement comes from mpv_render_context_render, which we call from the main thread via an IdleAdd queue. Calling SetProperty from the main thread would block that IdleAdd from running → deadlock (observed: main thread in pthread_cond_wait inside mpv_set_property_string). The sequence of three sets must be ordered, so they run on a single background task; fire-and-forget is safe because mpv won't render with the new targets until all three land, and the next frame's render is gated on that.
     public void EnableHdrOutput()
     {
-        mpv.SetProperty("target-prim", "bt.2020");
-        mpv.SetProperty("target-trc", "pq");
-        mpv.SetProperty("target-peak", "1000");
+        Task.Run(() =>
+        {
+            mpv.SetProperty("target-prim", "bt.2020");
+            mpv.SetProperty("target-trc", "pq");
+            mpv.SetProperty("target-peak", "1000");
+        });
     }
 
-    // Inverse of EnableHdrOutput: drops the PQ targets so mpv falls back to its sRGB/bt.709 default for SDR output. Called when transitioning from HDR to SDR content (playlist switch) or when the --sdr override wants mpv to tonemap HDR content down to SDR. Reset is symmetric with EnableHdrOutput so the state stays coherent across transitions.
+    // Inverse of EnableHdrOutput: drops the PQ targets so mpv falls back to its sRGB/bt.709 default for SDR output. Called when transitioning from HDR to SDR content (playlist switch) or when the --sdr override wants mpv to tonemap HDR content down to SDR. Reset is symmetric with EnableHdrOutput so the state stays coherent across transitions. Same deadlock-avoidance rationale as EnableHdrOutput — see that comment.
     public void DisableHdrOutput()
     {
-        mpv.SetProperty("target-prim", "auto");
-        mpv.SetProperty("target-trc", "auto");
-        mpv.SetProperty("target-peak", "auto");
+        Task.Run(() =>
+        {
+            mpv.SetProperty("target-prim", "auto");
+            mpv.SetProperty("target-trc", "auto");
+            mpv.SetProperty("target-peak", "auto");
+        });
     }
 
     public void TogglePause()

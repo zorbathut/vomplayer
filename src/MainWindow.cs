@@ -118,10 +118,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             videoArea = area;
             videoSurface = surface;
             videoWidget = area;
-            // Per-video HDR autodetect: Playback observes video-params/gamma and raises SourceHdrChanged on each real transition; we toggle the subsurface's PQ/BT.2020 image description and mpv's target-* targeting in lockstep. --sdr skips the subscription entirely so an explicit "force SDR" request can't be overridden by a PQ/HLG source.
+            // Combined HDR policy: enable HDR viewport only when both the source is PQ/HLG AND the current output advertises HDR. Two signals drive re-evaluation — Playback.SourceHdrChanged (per-video) and VideoSurface.CurrentOutputHdrChanged (output probe completes, user drags window cross-monitor, monitor HDR toggled). --sdr skips the subscriptions entirely so an explicit "force SDR" request can't be overridden by either signal.
             if (!forceSdr)
             {
                 playback.SourceHdrChanged += OnSourceHdrChanged;
+                surface.CurrentOutputHdrChanged += OnCurrentOutputHdrChanged;
             }
         }
         else
@@ -356,16 +357,37 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         viewModel.OnRenderContextReady();
     }
 
-    // Fires on the main thread whenever Playback's observer re-classifies video-params/gamma. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable (no wp_color_manager_v1 ⇒ stay SDR, else mpv's PQ output would overdrive an untagged surface). On disable, mirror in reverse order so the next SDR frame lands on an untagged surface.
+    // Latest value from Playback.SourceHdrChanged. Playback fires on transitions only, not on every frame, so caching here lets ApplyHdrPolicy combine it with the current output bit on output-side changes too.
+    private bool lastSourceHdr;
+    // Last applied HDR state, used to filter the transition log to real changes. null before the first ApplyHdrPolicy call.
+    private bool? lastAppliedHdr;
+    private static readonly bool logHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
+
     private void OnSourceHdrChanged(bool isHdr)
+    {
+        lastSourceHdr = isHdr;
+        ApplyHdrPolicy();
+    }
+
+    private void OnCurrentOutputHdrChanged()
+    {
+        ApplyHdrPolicy();
+    }
+
+    // Single point of decision for the HDR-viewport question. Combined truth table: source HDR × output HDR. Only (true, true) enables HDR; every other combination (including "output unknown" i.e. null) stays SDR. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable. On disable, mirror in reverse order so the next SDR frame lands on an untagged surface.
+    private void ApplyHdrPolicy()
     {
         if (videoSurface == null)
         {
             return;
         }
-        if (isHdr)
+        bool? outputHdr = videoSurface.CurrentOutputIsHdr;
+        bool wantHdr = lastSourceHdr && outputHdr == true;
+        bool applied;
+        if (wantHdr)
         {
-            if (videoSurface.SetHdr(true) == 0)
+            applied = videoSurface.SetHdr(true) == 0;
+            if (applied)
             {
                 playback.EnableHdrOutput();
             }
@@ -374,7 +396,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             videoSurface.SetHdr(false);
             playback.DisableHdrOutput();
+            applied = false;
         }
+        if (logHdr && lastAppliedHdr != applied)
+        {
+            string outStr = outputHdr.HasValue ? (outputHdr.Value ? "HDR" : "SDR") : "unknown";
+            Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} output={outStr} → {(applied ? "HDR" : "SDR")}");
+        }
+        lastAppliedHdr = applied;
     }
 
     private void OnVideoRenderFailed(int code)
@@ -585,6 +614,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         CancelControlsHideTimer();
         playback.PropertyChanged -= OnPlaybackPropertyChangedForSeekSettle;
         playback.SourceHdrChanged -= OnSourceHdrChanged;
+        if (videoSurface != null)
+        {
+            videoSurface.CurrentOutputHdrChanged -= OnCurrentOutputHdrChanged;
+        }
         // Disconnect the raw signal BEFORE releasing our delegate reference. GTK flushes pending events during window destruction, which can happen after this handler returns; if we dropped the delegate root first, a late dispatch would land in freed memory. Disconnect is synchronous — once it returns, the function pointer is unwired.
         if (seekLegacyHandlerId != 0 && seekLegacyControllerHandle != IntPtr.Zero)
         {
