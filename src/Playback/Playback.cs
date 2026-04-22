@@ -23,6 +23,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private bool isSeeking;
 
+    // Decoder mpv actually selected, as reported by the `hwdec-current` property. Authoritative: if a hwdec backend fails to initialize for a given file mpv falls back to software and updates this to "no", so the value reflects the real decode path, not the requested one. Empty string or "no" ⇒ software; names like "vaapi", "nvdec", "videotoolbox", "d3d11va" ⇒ hardware.
+    [ObservableProperty]
+    private string? hwdecCurrent;
+
     // Latest decision derived from `video-params/gamma`. Drives the Wayland subsurface's PQ image-description toggle and mpv's target-* targeting. Kept here as a plain field (no ObservableProperty) because the only consumer is MainWindow, which subscribes to SourceHdrChanged directly — a full ObservableObject property would add IPlayback surface area for a concern that's purely internal to the render path.
     private bool isSourceHdr;
 
@@ -55,6 +59,16 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.SetOption("osc", "no");
             h.SetOption("keep-open", "yes");
             h.SetOption("terminal", "no");
+            // auto-safe is mpv's curated set of hwdec backends that are known to work with GL interop on the current platform/driver combination — includes vaapi, nvdec, videotoolbox, d3d11va, plus their copy-back variants where the zero-copy path is unavailable. Unlike "auto" it excludes blacklisted driver/backend combos; unlike hand-picking a backend it degrades gracefully to software when nothing is available. Must be set before Initialize(); runtime changes also work but the startup path is simpler. Fallback is automatic — if the selected backend fails on a specific file mpv drops to software and updates hwdec-current accordingly.
+            h.SetOption("hwdec", "auto-safe");
+
+            // VOMPL_LOG_MPV=<path> routes mpv's full log to that file at -v level. Needed for debugging hwdec negotiation (which backends were tried, why they were rejected) and anything else mpv normally prints to its terminal — we run with terminal=no, so there's no other way to see this output. Path is taken literally; no ~ expansion. Value must be a writable path; mpv errors out if it isn't.
+            var mpvLogPath = Environment.GetEnvironmentVariable("VOMPL_LOG_MPV");
+            if (!string.IsNullOrEmpty(mpvLogPath))
+            {
+                h.SetOption("log-file", mpvLogPath);
+                h.SetOption("msg-level", "all=v");
+            }
 
             h.Initialize();
 
@@ -64,6 +78,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("seeking", MpvFormat.Flag);
             // Sub-property path observation: video-params is a Node map, but mpv exposes each scalar inside it (primaries, gamma, sig-peak, …) as its own string-typed observable when addressed via the "<parent>/<key>" syntax. This sidesteps MpvClient.ReadPropertyValue not knowing how to unpack node-map payloads. Initial synthesized fire lands with null (no file loaded yet), which IsHdrGamma classifies as SDR — no spurious transition.
             h.ObserveProperty("video-params/gamma", MpvFormat.String);
+            // Observe the actual decoder mpv selected, not the requested one. Fires on FileLoaded (mpv resolves hwdec after probing the file) and again if negotiation falls back mid-playback. The synthesized initial event lands with "no" or empty before any file loads.
+            h.ObserveProperty("hwdec-current", MpvFormat.String);
         });
     }
 
@@ -152,6 +168,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
             case "video-params/gamma":
                 UpdateSourceHdr(change.Value.AsString);
                 break;
+            case "hwdec-current":
+                UpdateHwdecCurrent(change.Value.AsString);
+                break;
             default:
                 // Log-and-skip rather than throw: MpvClient.PropertyChanged is a broadcast and an unrecognized name here would otherwise take down the whole event-drain loop. A future observer on the same client shouldn't be able to ambush us.
                 Console.Error.WriteLine($"[vomplayer] unexpected mpv property change: {change.Name}");
@@ -163,6 +182,18 @@ public sealed partial class Playback : ObservableObject, IPlayback
     internal static bool IsHdrGamma(string? gamma)
     {
         return gamma == "pq" || gamma == "hlg";
+    }
+
+    // Internal so PlaybackTests can drive the state change without spinning up mpv's event pump. Logs only on real transitions so a file-loaded spam doesn't pollute stderr; the log is the current user-visible "did hwaccel work" signal until a UI surface consumes HwdecCurrent. Null and empty are coalesced because mpv reports both forms depending on context (initial synthesized fire vs no-hwdec state).
+    internal void UpdateHwdecCurrent(string? value)
+    {
+        var normalized = string.IsNullOrEmpty(value) ? null : value;
+        if (normalized == HwdecCurrent)
+        {
+            return;
+        }
+        HwdecCurrent = normalized;
+        Console.Error.WriteLine($"[vomplayer] hwdec: {normalized ?? "(none)"}");
     }
 
     // Internal so PlaybackTests can drive transition behavior directly without spinning up mpv's event pump (see test file comment). Keeps the higher-level dispatcher (OnMpvPropertyChanged) private — only the minimum transition surface is exposed.

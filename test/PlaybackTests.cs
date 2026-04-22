@@ -115,6 +115,48 @@ public class PlaybackTests
     }
 
     [Test]
+    public void HwdecCurrentEmptyAndNullCoalesceToNull()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateHwdecCurrent("");
+        Assert.That(pb.HwdecCurrent, Is.Null);
+        pb.UpdateHwdecCurrent(null);
+        Assert.That(pb.HwdecCurrent, Is.Null);
+    }
+
+    [Test]
+    public void HwdecCurrentTracksBackendName()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateHwdecCurrent("vaapi");
+        Assert.That(pb.HwdecCurrent, Is.EqualTo("vaapi"));
+        pb.UpdateHwdecCurrent("no");
+        Assert.That(pb.HwdecCurrent, Is.EqualTo("no"));
+    }
+
+    [Test]
+    public void HwdecCurrentNotifiesOnlyOnTransition()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<string?>();
+        pb.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Playback.Playback.HwdecCurrent))
+            {
+                fires.Add(pb.HwdecCurrent);
+            }
+        };
+
+        pb.UpdateHwdecCurrent(null);      // null -> null, no fire
+        pb.UpdateHwdecCurrent("vaapi");   // null -> vaapi
+        pb.UpdateHwdecCurrent("vaapi");   // dedup
+        pb.UpdateHwdecCurrent("no");      // vaapi -> no
+        pb.UpdateHwdecCurrent("");        // no -> null (empty coalesces)
+
+        Assert.That(fires, Is.EqualTo(new string?[] { "vaapi", "no", null }));
+    }
+
+    [Test]
     public void SourceHdrChangedFiresFullTransitionCycle()
     {
         using var pb = new Playback.Playback(a => a());
