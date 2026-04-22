@@ -45,7 +45,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Gtk.Overlay videoOverlay;
     private readonly Gtk.Box noVideoBg;
     private readonly Gtk.PopoverMenuBar menuBar;
-    private readonly bool hdrRequested;
+    private readonly bool forceSdr;
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
     private readonly VideoSurface? videoSurface;
@@ -81,9 +81,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private SeekLegacyEventCallback? seekLegacyCallback;
     private ulong seekLegacyHandlerId;
     private IntPtr seekLegacyControllerHandle;
-    private bool hdrAppliedOnMainSurface;
 
-    public MainWindow(Gtk.Application app, Playback.Playback playback, string? initialFile, bool hdrRequested)
+    public MainWindow(Gtk.Application app, Playback.Playback playback, string? initialFile, bool forceSdr)
     {
         if (app == null)
         {
@@ -94,10 +93,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             throw new ArgumentNullException(nameof(playback));
         }
         this.playback = playback;
-        this.hdrRequested = hdrRequested;
+        this.forceSdr = forceSdr;
 
         SetApplication(app);
-        Title = hdrRequested ? "Vomplayer" : "Vomplayer — SDR";
+        Title = forceSdr ? "Vomplayer — SDR" : "Vomplayer";
         SetDefaultSize(1280, 720);
         AddCssClass("vom-main-window");
 
@@ -111,7 +110,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         if (WaylandDetect.IsWaylandBackend(GetDisplay()))
         {
             var area = new VideoArea();
-            var surface = new VideoSurface(this, area, hdrRequested);
+            var surface = new VideoSurface(this, area);
             playback.AttachRenderSurface(client => surface.SetMpvClient(client));
             surface.RenderContextReady += OnVideoRenderContextReadyWayland;
             surface.RenderFailed += OnVideoRenderFailed;
@@ -119,6 +118,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             videoArea = area;
             videoSurface = surface;
             videoWidget = area;
+            // Per-video HDR autodetect: Playback observes video-params/gamma and raises SourceHdrChanged on each real transition; we toggle the subsurface's PQ/BT.2020 image description and mpv's target-* targeting in lockstep. --sdr skips the subscription entirely so an explicit "force SDR" request can't be overridden by a PQ/HLG source.
+            if (!forceSdr)
+            {
+                playback.SourceHdrChanged += OnSourceHdrChanged;
+            }
         }
         else
         {
@@ -335,14 +339,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
     }
 
-    // Wayland path: subsurface is HDR-tagged by the shim if supported. Only tell libplacebo to target PQ if the shim actually attached the description — otherwise mpv would output PQ into a sRGB-interpreted surface and colors would be badly overdriven.
+    // Wayland path: HDR tagging is driven per-video from OnSourceHdrChanged; no HDR work to do at render-context-ready time beyond letting the VM know playback is now alive.
     private void OnVideoRenderContextReadyWayland()
     {
         viewModel.OnRenderContextReady();
-        if (hdrRequested && videoSurface != null && videoSurface.HdrActive)
-        {
-            playback.EnableHdrOutput();
-        }
     }
 
     private void OnVideoFirstFrameRendered()
@@ -350,18 +350,30 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         noVideoBg.SetVisible(false);
     }
 
-    // GLArea path: HDR has to be attached to the main surface (no subsurface). UI will look blown out because GTK widgets render sRGB values into a surface KWin interprets as PQ. Documented fallback behavior.
+    // GLArea path: always SDR. The old main-surface HDR attach produced a blown-out UI (GTK widgets render sRGB values into a surface KWin interprets as PQ) and can't be toggled per-file without destroying the GTK surface, so this path is SDR-only; HDR content is tonemapped by mpv's auto targeting.
     private void OnVideoRenderContextReadyGLArea()
     {
         viewModel.OnRenderContextReady();
-        if (hdrRequested && !hdrAppliedOnMainSurface)
+    }
+
+    // Fires on the main thread whenever Playback's observer re-classifies video-params/gamma. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable (no wp_color_manager_v1 ⇒ stay SDR, else mpv's PQ output would overdrive an untagged surface). On disable, mirror in reverse order so the next SDR frame lands on an untagged surface.
+    private void OnSourceHdrChanged(bool isHdr)
+    {
+        if (videoSurface == null)
         {
-            int rc = HdrHelper.ApplyPqToGtkWindow(this);
-            if (rc == 0)
+            return;
+        }
+        if (isHdr)
+        {
+            if (videoSurface.SetHdr(true) == 0)
             {
                 playback.EnableHdrOutput();
             }
-            hdrAppliedOnMainSurface = true;
+        }
+        else
+        {
+            videoSurface.SetHdr(false);
+            playback.DisableHdrOutput();
         }
     }
 
@@ -572,6 +584,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         isClosing = true;
         CancelControlsHideTimer();
         playback.PropertyChanged -= OnPlaybackPropertyChangedForSeekSettle;
+        playback.SourceHdrChanged -= OnSourceHdrChanged;
         // Disconnect the raw signal BEFORE releasing our delegate reference. GTK flushes pending events during window destruction, which can happen after this handler returns; if we dropped the delegate root first, a late dispatch would land in freed memory. Disconnect is synchronous — once it returns, the function pointer is unwired.
         if (seekLegacyHandlerId != 0 && seekLegacyControllerHandle != IntPtr.Zero)
         {

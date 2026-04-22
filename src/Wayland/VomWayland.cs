@@ -21,7 +21,7 @@ internal sealed partial class VomVideoSurface : IDisposable
 
     internal FrameTimingBridge Bridge { get; }
 
-    public VomVideoSurface(IntPtr wlDisplay, IntPtr wlParentSurface, int initialW, int initialH, int initialBufferScale, bool hdr)
+    public VomVideoSurface(IntPtr wlDisplay, IntPtr wlParentSurface, int initialW, int initialH, int initialBufferScale)
     {
         Bridge = new FrameTimingBridge();
         bridgeHandle = GCHandle.Alloc(Bridge);
@@ -30,7 +30,7 @@ internal sealed partial class VomVideoSurface : IDisposable
         int clampedH = initialH < 1 ? 1 : initialH;
         int clampedScale = initialBufferScale < 1 ? 1 : initialBufferScale;
 
-        handle = Create(wlDisplay, wlParentSurface, clampedW, clampedH, clampedScale, hdr ? 1 : 0);
+        handle = Create(wlDisplay, wlParentSurface, clampedW, clampedH, clampedScale);
         if (handle == IntPtr.Zero)
         {
             bridgeHandle.Free();
@@ -85,17 +85,14 @@ internal sealed partial class VomVideoSurface : IDisposable
         return (w, h);
     }
 
-    // True iff the shim successfully attached a PQ/BT.2020 image description. False when hdr was requested but the compositor didn't honor it (no wp_color_manager_v1, no PQ transfer, etc).
-    public bool HdrActive
+    // Stages a PQ/BT.2020 image description on the subsurface's wp_color_management_v1 surface (enable=true) or stages removal (enable=false). Does NOT issue a wl_surface_commit — the next Swap flushes it atomically with the first new-content buffer, avoiding a one-frame flash of mis-tagged content. Returns 0 on success, -1 if the compositor does not advertise wp_color_manager_v1 or the description build failed; caller must only advance mpv to PQ targets when this returns 0.
+    public int SetHdr(bool enable)
     {
-        get
+        if (handle == IntPtr.Zero)
         {
-            if (handle == IntPtr.Zero)
-            {
-                return false;
-            }
-            return HdrActiveNative(handle) != 0;
+            return -1;
         }
+        return SetHdrNative(handle, enable ? 1 : 0);
     }
 
     // Classifies the compositor's recent refresh-period stream. When Fixed, hzCenti is the detected rate × 100 (e.g. 6000 = 60.00Hz). Unknown means the sample window hasn't filled yet; wait a second and re-poll.
@@ -196,7 +193,7 @@ internal sealed partial class VomVideoSurface : IDisposable
     private delegate void FeedbackDiscardedCallback(IntPtr data);
 
     [LibraryImport(Lib, EntryPoint = "vom_video_surface_create")]
-    private static partial IntPtr Create(IntPtr wlDisplay, IntPtr wlParentSurface, int initialW, int initialH, int initialBufferScale, int hdr);
+    private static partial IntPtr Create(IntPtr wlDisplay, IntPtr wlParentSurface, int initialW, int initialH, int initialBufferScale);
 
     [LibraryImport(Lib, EntryPoint = "vom_video_surface_set_callbacks")]
     private static partial void SetCallbacks(IntPtr vs, IntPtr data,
@@ -215,8 +212,8 @@ internal sealed partial class VomVideoSurface : IDisposable
     [LibraryImport(Lib, EntryPoint = "vom_video_surface_get_buffer_size")]
     private static partial void GetBufferSizeNative(IntPtr vs, out int w, out int h);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_hdr_active")]
-    private static partial int HdrActiveNative(IntPtr vs);
+    [LibraryImport(Lib, EntryPoint = "vom_video_surface_set_hdr")]
+    private static partial int SetHdrNative(IntPtr vs, int enable);
 
     [LibraryImport(Lib, EntryPoint = "vom_video_surface_destroy")]
     private static partial void DestroyNative(IntPtr vs);

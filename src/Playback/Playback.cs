@@ -23,8 +23,13 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private bool isSeeking;
 
+    // Latest decision derived from `video-params/gamma`. Drives the Wayland subsurface's PQ image-description toggle and mpv's target-* targeting. Kept here as a plain field (no ObservableProperty) because the only consumer is MainWindow, which subscribes to SourceHdrChanged directly — a full ObservableObject property would add IPlayback surface area for a concern that's purely internal to the render path.
+    private bool isSourceHdr;
+
     public event Action? FileLoaded;
     public event Action<int>? FileEnded;
+    // Fires on the main thread (via the same postToMainThread pump as other mpv property changes) whenever the source's HDR status flips. Reset to false on LoadFile and FileEnded so every file starts in a known SDR-safe state; the observer upgrades to true once mpv reports a `pq` or `hlg` gamma.
+    public event Action<bool>? SourceHdrChanged;
 
     public Playback(Action<Action> postToMainThread)
     {
@@ -56,6 +61,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         mpv.ObserveProperty("duration", MpvFormat.Double);
         mpv.ObserveProperty("pause", MpvFormat.Flag);
         mpv.ObserveProperty("seeking", MpvFormat.Flag);
+        // Sub-property path observation: video-params is a Node map, but mpv exposes each scalar inside it (primaries, gamma, sig-peak, …) as its own string-typed observable when addressed via the "<parent>/<key>" syntax. This sidesteps MpvClient.ReadPropertyValue not knowing how to unpack node-map payloads. Initial synthesized fire lands with null (no file loaded yet), which IsHdrGamma classifies as SDR — no spurious transition.
+        mpv.ObserveProperty("video-params/gamma", MpvFormat.String);
     }
 
     public void LoadFile(string path)
@@ -64,16 +71,26 @@ public sealed partial class Playback : ObservableObject, IPlayback
         {
             throw new ArgumentNullException(nameof(path));
         }
+        // Preemptive SDR reset: if the previous file was HDR, snap the surface and mpv targeting back to sRGB before the new file's params land. The observer upgrades to HDR again if the new file is PQ/HLG. Without this, an HDR→SDR playlist swap would leave the subsurface PQ-tagged while mpv decodes SDR content, producing the exact overdrive we're avoiding.
+        UpdateSourceHdr(null);
         mpv.Command("loadfile", path);
         mpv.SetProperty("pause", "no");
     }
 
-    // Called after the Wayland color-management shim attaches a PQ/BT.2020 description to the window surface — libplacebo must then render to match, or the compositor will misinterpret sRGB-encoded output as PQ. If HDR is never applied (non-Linux, X11, compositor without wp-color-management-v1), we never call this and mpv keeps its sRGB-target default.
+    // Called after the Wayland color-management shim attaches a PQ/BT.2020 description to the subsurface — libplacebo must then render to match, or the compositor will misinterpret sRGB-encoded output as PQ. If HDR is never applied (non-Linux, X11, compositor without wp-color-management-v1, or current source is SDR), we never call this and mpv keeps its sRGB-target default.
     public void EnableHdrOutput()
     {
         mpv.SetProperty("target-prim", "bt.2020");
         mpv.SetProperty("target-trc", "pq");
         mpv.SetProperty("target-peak", "1000");
+    }
+
+    // Inverse of EnableHdrOutput: drops the PQ targets so mpv falls back to its sRGB/bt.709 default for SDR output. Called when transitioning from HDR to SDR content (playlist switch) or when the --sdr override wants mpv to tonemap HDR content down to SDR. Reset is symmetric with EnableHdrOutput so the state stays coherent across transitions.
+    public void DisableHdrOutput()
+    {
+        mpv.SetProperty("target-prim", "auto");
+        mpv.SetProperty("target-trc", "auto");
+        mpv.SetProperty("target-peak", "auto");
     }
 
     public void TogglePause()
@@ -129,11 +146,33 @@ public sealed partial class Playback : ObservableObject, IPlayback
             case "seeking":
                 IsSeeking = change.Value.AsFlag ?? false;
                 break;
+            case "video-params/gamma":
+                UpdateSourceHdr(change.Value.AsString);
+                break;
             default:
                 // Log-and-skip rather than throw: MpvClient.PropertyChanged is a broadcast and an unrecognized name here would otherwise take down the whole event-drain loop. A future observer on the same client shouldn't be able to ambush us.
                 Console.Error.WriteLine($"[vomplayer] unexpected mpv property change: {change.Name}");
                 break;
         }
+    }
+
+    // Pure predicate: mpv normalizes all container-level HDR transfer-function tags to one of these two canonical names before exposing them through the `gamma` property. Camera-log variants (v-log, s-log*) and cinema formats (st428) are intentionally excluded — they are high-dynamic-range in a different sense (log encoding, not display-referred PQ/HLG) and tagging them as PQ would display them as absolute-luminance nonsense.
+    internal static bool IsHdrGamma(string? gamma)
+    {
+        return gamma == "pq" || gamma == "hlg";
+    }
+
+    // Internal so PlaybackTests can drive transition behavior directly without spinning up mpv's event pump (see test file comment). Keeps the higher-level dispatcher (OnMpvPropertyChanged) private — only the minimum transition surface is exposed.
+    internal void UpdateSourceHdr(string? gamma)
+    {
+        bool newValue = IsHdrGamma(gamma);
+        if (newValue == isSourceHdr)
+        {
+            return;
+        }
+        isSourceHdr = newValue;
+        // Defer the event via postToMainThread so the handler doesn't run inside mpv_wait_event's DrainEvents loop. MainWindow.OnSourceHdrChanged calls mpv.SetProperty("target-prim"/...) which synchronously waits for mpv's core thread; the core thread is waiting for the render thread to process an update-request; the render thread is the same main thread still trapped in DrainEvents. Punting the event to a fresh main-loop iteration breaks that cycle. In tests postToMainThread is a => a(), so the fire stays synchronous and assertions still see it.
+        postToMainThread(() => SourceHdrChanged?.Invoke(newValue));
     }
 
     private void OnMpvFileLoaded()
@@ -143,6 +182,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     private void OnMpvFileEnded(int reason)
     {
+        // Reset HDR state back to SDR on every file-end, including error-path ends where no new file will follow. Keeps the subsurface from lingering in a PQ-tagged state after playback stops.
+        UpdateSourceHdr(null);
         FileEnded?.Invoke(reason);
     }
 
@@ -161,6 +202,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         mpv.Shutdown -= OnMpvShutdown;
         FileLoaded = null;
         FileEnded = null;
+        SourceHdrChanged = null;
         mpv.Dispose();
     }
 }

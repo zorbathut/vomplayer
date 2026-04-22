@@ -2,13 +2,10 @@
 //
 // Entry points:
 //
-// 1. hdr_helper_apply_pq(display, surface)
-//    One-shot PQ/BT.2020 attach to an arbitrary wl_surface. GLArea fallback path (X11/Xwayland/non-Wayland). Known issue: makes GTK's UI look blown out because the compositor reinterprets sRGB widget output as PQ. Kept for the non-subsurface path.
+// 1. vom_video_surface_* API
+//    Creates a wl_subsurface child of a given parent wl_surface, places it BELOW the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window. Subsurface starts untagged (compositor treats as sRGB); vom_video_surface_set_hdr toggles a PQ/BT.2020 image description at runtime, staged for flush on the next eglSwapBuffers. The caller drives rendering: make_current → (caller's render) → swap.
 //
-// 2. vom_video_surface_* API
-//    Creates a wl_subsurface child of a given parent wl_surface, places it BELOW the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window, and (optionally) tags that child surface PQ/BT.2020. The caller drives rendering: make_current → (caller's render) → swap.
-//
-// 3. Output + presentation-feedback trampolines
+// 2. Output + presentation-feedback trampolines
 //    Process-global output events (added / mode / removed) forward to callbacks registered via vom_set_output_callbacks. Per-surface wl_surface.enter/leave and wp_presentation_feedback.presented/discarded events forward to callbacks registered via vom_video_surface_set_callbacks. The consumer (C# FrameTimingBridge + WaylandOutputRegistry) owns all state derived from these events.
 //
 // The wp_color_manager_v1 + wp_presentation + wl_output globals are bound once per process (via a retained wl_registry on first use).
@@ -310,49 +307,7 @@ static struct wp_image_description_v1 *build_pq_description(struct wl_display *d
 }
 
 //---------------------------------------------------------------
-// Entry point 1: one-shot PQ attach to an existing wl_surface.
-//---------------------------------------------------------------
-
-int hdr_helper_apply_pq(struct wl_display *display, struct wl_surface *surface)
-{
-    if (!display || !surface)
-    {
-        return -1;
-    }
-    if (ensure_globals(display) < 0)
-    {
-        return -2;
-    }
-    if (!g_color_manager)
-    {
-        fprintf(stderr, "[hdr_helper] compositor does not advertise wp_color_manager_v1\n");
-        return -4;
-    }
-    fprintf(stderr, "[hdr_helper] bound wp_color_manager_v1\n");
-
-    struct wp_image_description_v1 *desc = build_pq_description(display);
-    if (!desc)
-    {
-        return -5;
-    }
-
-    struct wp_color_management_surface_v1 *cm_surf = wp_color_manager_v1_get_surface(g_color_manager, surface);
-    if (!cm_surf)
-    {
-        wp_image_description_v1_destroy(desc);
-        return -6;
-    }
-    wp_color_management_surface_v1_set_image_description(cm_surf, desc, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
-    wl_surface_commit(surface);
-    wl_display_flush(display);
-
-    fprintf(stderr, "[hdr_helper] PQ/BT.2020 description attached to surface\n");
-    // Intentionally leak cm_surf + desc (process-lifetime attachment).
-    return 0;
-}
-
-//---------------------------------------------------------------
-// Entry point 2: subsurface + EGL surface + HDR (used by the Wayland path).
+// Entry point 1: subsurface + EGL surface + HDR (used by the Wayland path).
 //---------------------------------------------------------------
 
 // In-flight wp_presentation_feedback record. The compositor sends `presented` or `discarded` asynchronously; without tracking, a feedback delivered after vom_video_surface_destroy has freed `vs` would UAF the listener data (and, on the C# side, a freed-then-recycled GCHandle). By keeping a per-vs list of outstanding proxies, destroy() can wp_presentation_feedback_destroy all of them synchronously and nuke their listeners before freeing vs.
@@ -487,7 +442,7 @@ static int choose_egl_config(EGLDisplay egl_display, EGLConfig *out)
 
 struct vom_video_surface *vom_video_surface_create(
     struct wl_display *display, struct wl_surface *parent,
-    int initial_w, int initial_h, int initial_buffer_scale, int hdr)
+    int initial_w, int initial_h, int initial_buffer_scale)
 {
     if (!display || !parent)
     {
@@ -542,34 +497,7 @@ struct vom_video_surface *vom_video_surface_create(
     wl_subsurface_set_position(vs->wl_subsurface, 0, 0);
     wl_subsurface_set_desync(vs->wl_subsurface);
 
-    // HDR attach happens before first commit so the very first frame the compositor sees is already tagged PQ.
-    if (hdr)
-    {
-        if (!g_color_manager)
-        {
-            fprintf(stderr, "[vom_wayland] HDR requested but compositor does not advertise wp_color_manager_v1; proceeding SDR\n");
-        }
-        else
-        {
-            vs->image_desc = build_pq_description(display);
-            if (vs->image_desc)
-            {
-                vs->cm_surface = wp_color_manager_v1_get_surface(g_color_manager, vs->wl_surface);
-                if (vs->cm_surface)
-                {
-                    wp_color_management_surface_v1_set_image_description(
-                        vs->cm_surface, vs->image_desc, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
-                    fprintf(stderr, "[vom_wayland] PQ/BT.2020 description attached to subsurface\n");
-                }
-                else
-                {
-                    fprintf(stderr, "[vom_wayland] get_surface for cm failed; proceeding SDR\n");
-                    wp_image_description_v1_destroy(vs->image_desc);
-                    vs->image_desc = NULL;
-                }
-            }
-        }
-    }
+    // The subsurface starts with no wp_color_management_v1 image description attached — the compositor treats it as sRGB by default. vom_video_surface_set_hdr later toggles a PQ/BT.2020 description in response to per-video source-colorspace detection; the toggle's commit is piggy-backed on the next eglSwapBuffers so the CM state and the first new-content buffer land atomically.
 
     // EGL setup.
     vs->egl_display = eglGetDisplay((EGLNativeDisplayType)display);
@@ -623,8 +551,8 @@ struct vom_video_surface *vom_video_surface_create(
     wl_surface_commit(parent);
     wl_display_flush(display);
 
-    fprintf(stderr, "[vom_wayland] subsurface created (w=%d h=%d hdr=%d)\n",
-            vs->buffer_w, vs->buffer_h, hdr && vs->image_desc != NULL);
+    fprintf(stderr, "[vom_wayland] subsurface created (w=%d h=%d)\n",
+            vs->buffer_w, vs->buffer_h);
     return vs;
 
 fail:
@@ -721,11 +649,45 @@ void vom_video_surface_get_buffer_size(struct vom_video_surface *vs, int *out_w,
     if (out_h) { *out_h = vs->buffer_h; }
 }
 
-// Reflects whether the PQ/BT.2020 image description was actually attached (1) or silently dropped (0). Dropped happens when hdr=1 was requested but the compositor doesn't advertise wp_color_manager_v1 or the parametric creator failed. Callers use this to decide whether to tell mpv to target PQ — if HDR isn't active on the surface, PQ-targeting mpv would overdrive SDR output.
-int vom_video_surface_hdr_active(struct vom_video_surface *vs)
+// Toggles a PQ/BT.2020 image description on the subsurface's wp_color_management_v1 surface. Intentionally does NOT call wl_surface_commit — the next eglSwapBuffers flushes the CM state double-buffered alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor (no one-frame flash of mis-tagged content). Caller (C#) must only call EnableHdrOutput on mpv if this returns 0; returning -1 means the compositor didn't advertise wp_color_manager_v1 (or description build failed) and mpv must stay on default-auto targets, else PQ-encoded output would hit an untagged surface.
+int vom_video_surface_set_hdr(struct vom_video_surface *vs, int enable)
 {
-    if (!vs) { return 0; }
-    return vs->image_desc != NULL ? 1 : 0;
+    if (!vs)
+    {
+        return -1;
+    }
+    if (!g_color_manager)
+    {
+        return -1;
+    }
+    if (enable)
+    {
+        if (!vs->image_desc)
+        {
+            vs->image_desc = build_pq_description(vs->display);
+            if (!vs->image_desc)
+            {
+                return -1;
+            }
+        }
+        if (!vs->cm_surface)
+        {
+            vs->cm_surface = wp_color_manager_v1_get_surface(g_color_manager, vs->wl_surface);
+            if (!vs->cm_surface)
+            {
+                fprintf(stderr, "[vom_wayland] set_hdr: get_surface failed\n");
+                return -1;
+            }
+        }
+        wp_color_management_surface_v1_set_image_description(
+            vs->cm_surface, vs->image_desc, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
+        return 0;
+    }
+    if (vs->cm_surface)
+    {
+        wp_color_management_surface_v1_unset_image_description(vs->cm_surface);
+    }
+    return 0;
 }
 
 void vom_video_surface_destroy(struct vom_video_surface *vs)

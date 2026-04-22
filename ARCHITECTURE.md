@@ -13,7 +13,6 @@ src/
   Program.cs             # entry, arg parsing, Gtk.Application wiring, Playback construction
   MainWindow.cs          # code-only GTK4 window: widgets, input controllers, VM <-> view glue
   MainWindow.Menu.cs     # menu bar + Gio.SimpleAction registration + accelerators
-  HdrHelper.cs           # GLArea-fallback PQ attach to main wl_surface (bypasses GDK CM)
   Epoxy.cs               # eglGetProcAddress + glGetIntegerv for FBO binding
   LibC.cs                # setlocale(LC_NUMERIC,"C") — mpv refuses non-C LC_NUMERIC
   Controls/
@@ -55,13 +54,13 @@ Two runtime-selected paths, chosen by `WaylandDetect.IsWaylandBackend` in `MainW
 
 **Wayland subsurface path (preferred on Linux/Wayland).**
 `VideoArea` (paints nothing) reserves layout space. `VideoSurface` creates a `wl_subsurface` of the GTK main `wl_surface` via `libhdr_helper.so` and places it *below* the parent. GTK's main window is CSS-transparent (`.vom-main-window { background: transparent; }`) so the subsurface shows through in the video region; opaque chrome widgets (`.vom-chrome`) sit on top. This means:
-- HDR PQ/BT.2020 tagging lives only on the subsurface; the GTK UI surface stays sRGB and renders correctly.
+- HDR PQ/BT.2020 tagging lives only on the subsurface; the GTK UI surface stays sRGB and renders correctly. Tagging is toggled per video: `Playback` observes `video-params/gamma` and fires `SourceHdrChanged`; `MainWindow` forwards that to `VideoSurface.SetHdr` (stages a `set_image_description` / `unset_image_description` that the next `eglSwapBuffers` flushes atomically with the first new-content buffer) and to `Playback.EnableHdrOutput` / `DisableHdrOutput` for mpv's `target-*` targeting. `--sdr` forces SDR for the whole session and skips the subscription.
 - Controls overlaid in fullscreen (via `Gtk.Overlay` reparent) draw on top of the video with correct alpha.
 - Pointer input falls through to the parent (empty input region on the subsurface) so motion-driven auto-hide works.
 - `wp_presentation_feedback` per swap drives the `FrameTimingBridge` ring; VRR/fixed is classified against `wl_output.mode` refresh.
 
 **Gtk.GLArea fallback path (X11 / other backends).**
-`VideoView` is a `Gtk.GLArea`; mpv renders into GTK's owned FBO. HDR is attached to the *main* surface via `HdrHelper.ApplyPqToGtkWindow`. Known issue: GTK widgets render sRGB values into a surface KWin interprets as PQ, so UI chrome looks blown out. Documented, accepted on the fallback path only.
+`VideoView` is a `Gtk.GLArea`; mpv renders into GTK's owned FBO. HDR is not supported on this path — mpv tonemaps HDR source content down to SDR via its default `auto` targeting. Main-surface PQ tagging was tried and reverted: it produced a blown-out GTK UI (widgets render sRGB values into a surface KWin interprets as PQ) and couldn't be toggled per-file without tearing down the GTK surface.
 
 ## Playback data flow
 

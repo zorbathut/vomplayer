@@ -41,4 +41,93 @@ public class PlaybackTests
         Assert.Throws<ArgumentNullException>(() => pb.LoadFile(null!));
     }
 
+    [TestCase(null, false)]
+    [TestCase("", false)]
+    [TestCase("bt.1886", false)]
+    [TestCase("srgb", false)]
+    [TestCase("gamma2.2", false)]
+    [TestCase("st428", false)]
+    [TestCase("v-log", false)]
+    [TestCase("s-log1", false)]
+    [TestCase("pq", true)]
+    [TestCase("hlg", true)]
+    public void IsHdrGammaClassifiesTransferFunctions(string? gamma, bool expected)
+    {
+        Assert.That(Playback.Playback.IsHdrGamma(gamma), Is.EqualTo(expected));
+    }
+
+    // HDR-transition tests drive UpdateSourceHdr directly on an uninitialized Playback. Skipping Initialize() avoids mpv's event-pump thread, which would concurrently dispatch observed properties onto the same object. Exercising UpdateSourceHdr (internal) rather than the private OnMpvPropertyChanged dispatcher keeps the test seam narrow — dispatch routing itself is a one-line case in OnMpvPropertyChanged.
+    [Test]
+    public void SourceHdrChangedFiresOnSdrToHdrTransition()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<bool>();
+        pb.SourceHdrChanged += v => fires.Add(v);
+
+        pb.UpdateSourceHdr("pq");
+
+        Assert.That(fires, Is.EqualTo(new[] { true }));
+    }
+
+    [Test]
+    public void SourceHdrChangedDoesNotFireOnSdrRepeats()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<bool>();
+        pb.SourceHdrChanged += v => fires.Add(v);
+
+        pb.UpdateSourceHdr(null);
+        pb.UpdateSourceHdr("bt.1886");
+        pb.UpdateSourceHdr("srgb");
+
+        Assert.That(fires, Is.Empty);
+    }
+
+    [Test]
+    public void SourceHdrChangedDoesNotFireOnHdrRepeats()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<bool>();
+
+        pb.UpdateSourceHdr("pq");
+        pb.SourceHdrChanged += v => fires.Add(v);
+
+        // Both pq and hlg are HDR — switching between them is not a state transition.
+        pb.UpdateSourceHdr("pq");
+        pb.UpdateSourceHdr("hlg");
+        pb.UpdateSourceHdr("pq");
+
+        Assert.That(fires, Is.Empty);
+    }
+
+    [Test]
+    public void SourceHdrChangedFiresOnHdrToSdrTransition()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateSourceHdr("pq");
+
+        var fires = new System.Collections.Generic.List<bool>();
+        pb.SourceHdrChanged += v => fires.Add(v);
+
+        pb.UpdateSourceHdr("bt.1886");
+
+        Assert.That(fires, Is.EqualTo(new[] { false }));
+    }
+
+    [Test]
+    public void SourceHdrChangedFiresFullTransitionCycle()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<bool>();
+        pb.SourceHdrChanged += v => fires.Add(v);
+
+        pb.UpdateSourceHdr("bt.1886"); // SDR -> SDR (no fire)
+        pb.UpdateSourceHdr("pq");      // SDR -> HDR (true)
+        pb.UpdateSourceHdr("hlg");     // HDR -> HDR (no fire)
+        pb.UpdateSourceHdr("srgb");    // HDR -> SDR (false)
+        pb.UpdateSourceHdr("pq");      // SDR -> HDR (true)
+
+        Assert.That(fires, Is.EqualTo(new[] { true, false, true }));
+    }
+
 }

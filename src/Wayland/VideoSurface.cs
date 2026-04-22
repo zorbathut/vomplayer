@@ -20,7 +20,6 @@ public sealed partial class VideoSurface : IDisposable
 
     private readonly Gtk.Window window;
     private readonly VideoArea area;
-    private readonly bool hdrRequested;
     private VomVideoSurface? surface;
     private MpvRenderContext? renderContext;
     private MpvClient? client;
@@ -35,13 +34,14 @@ public sealed partial class VideoSurface : IDisposable
     // Fires exactly once, on the main thread, after mpv has signaled content AND the first render+swap of that content completes. Deliberately NOT fired on pre-content renders (initial kickoff, geometry-change renders before any file is loaded) — those are gated out of DoRender so the subsurface stays unmapped. Consumers can use this to remove any "placeholder" they drew on the GTK side while the subsurface was empty.
     public event Action? FirstFrameRendered;
 
-    // True iff the subsurface has a PQ/BT.2020 image description successfully attached. Valid only after RenderContextReady fires.
-    public bool HdrActive
+    // Stages a PQ/BT.2020 image description (enable=true) or stages removal (enable=false) on the subsurface. The shim does NOT commit — the next mpv-driven Swap flushes it alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor. Returns 0 on success; -1 if the compositor does not advertise wp_color_manager_v1 or the subsurface is not yet realized. Caller must only enable mpv PQ targeting when this returns 0, else PQ-encoded output would hit an untagged surface.
+    public int SetHdr(bool enable)
     {
-        get
+        if (surface == null)
         {
-            return surface != null && surface.HdrActive;
+            return -1;
         }
+        return surface.SetHdr(enable);
     }
 
     // Read the current VRR classification from the shim's refresh-sample ring. Returns Unknown if the subsurface isn't ready yet.
@@ -55,7 +55,7 @@ public sealed partial class VideoSurface : IDisposable
         return surface.GetVrrClassification(out hzCenti);
     }
 
-    public VideoSurface(Gtk.Window window, VideoArea area, bool hdrRequested)
+    public VideoSurface(Gtk.Window window, VideoArea area)
     {
         if (window == null)
         {
@@ -67,7 +67,6 @@ public sealed partial class VideoSurface : IDisposable
         }
         this.window = window;
         this.area = area;
-        this.hdrRequested = hdrRequested;
 
         window.OnRealize += OnWindowRealize;
         window.OnUnrealize += OnWindowUnrealize;
@@ -127,7 +126,7 @@ public sealed partial class VideoSurface : IDisposable
         {
             // Must register output callbacks before the shim's first ensure_globals call (triggered by Create below). The initial wl_output + mode events arrive during its two roundtrips; without the callbacks wired, WaylandOutputRegistry would miss them and the VRR classifier would stay Unknown.
             VomOutputCallbacks.EnsureRegistered();
-            surface = new VomVideoSurface(wlDisplay, wlSurface, initialW, initialH, initialScale, hdrRequested);
+            surface = new VomVideoSurface(wlDisplay, wlSurface, initialW, initialH, initialScale);
         }
         catch (Exception ex)
         {
