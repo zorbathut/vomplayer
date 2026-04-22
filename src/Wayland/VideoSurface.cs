@@ -51,18 +51,17 @@ public sealed partial class VideoSurface : IDisposable
     }
 
     // Read the current VRR classification from the shim's refresh-sample ring. Returns Unknown if the subsurface isn't ready yet.
-    public VrrClassification GetVrrClassification(out int hzCenti)
+    public VrrClassification GetVrrClassification()
     {
-        hzCenti = 0;
         if (surface == null)
         {
             return VrrClassification.Unknown;
         }
-        return surface.GetVrrClassification(out hzCenti);
+        return surface.GetVrrClassification();
     }
 
-    // Number of valid samples in the VRR classifier's backing ring, 0..FrameTimingBridge.RingSize. Used by the diagnostic overlay; "60/60" = ring full. Writer and reader are both on the GTK main thread (Wayland events pump through GTK's main loop), so no memory barrier is needed.
-    public int VrrSampleCount
+    // Measured mean presentation rate over the classifier's ring, expressed as centi-Hz (5000 = 50.00 Hz). 0 when the ring is empty / pre-warmup. Distinct from the panel's nominal mode rate; see FrameTimingBridge.MeasuredHzCenti for the rationale. Writer and reader are both on the GTK main thread (Wayland events pump through GTK's main loop), so no memory barrier is needed.
+    public int VrrMeasuredHzCenti
     {
         get
         {
@@ -70,7 +69,7 @@ public sealed partial class VideoSurface : IDisposable
             {
                 return 0;
             }
-            return surface.Bridge.RingCount;
+            return surface.VrrMeasuredHzCenti;
         }
     }
 

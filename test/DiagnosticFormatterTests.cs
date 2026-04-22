@@ -13,8 +13,7 @@ public class DiagnosticFormatterTests
             IsSourceHdr: false,
             OutputIsHdr: false,
             VrrClass: VrrClassification.Fixed,
-            VrrHzCenti: 6000,
-            VrrSampleCount: 60,
+            VrrMeasuredHzCenti: 6000,
             IsWaylandPath: true);
     }
 
@@ -92,43 +91,53 @@ public class DiagnosticFormatterTests
     [Test]
     public void VrrOnGlareaRendersNA()
     {
-        var s = Baseline() with { IsWaylandPath = false, VrrClass = VrrClassification.Unknown, VrrHzCenti = 0, VrrSampleCount = 0 };
+        var s = Baseline() with { IsWaylandPath = false, VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 0 };
         Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    N/A (GLArea)"));
     }
 
     [Test]
-    public void VrrUnknownOnWaylandZeroSamples()
+    public void VrrUnknownRendersLabelOnly()
     {
-        var s = Baseline() with { VrrClass = VrrClassification.Unknown, VrrHzCenti = 0, VrrSampleCount = 0 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    UNKNOWN @ 0.00 Hz (0/60)"));
+        // Pre-warmup: ring not yet full → classifier returns Unknown. We deliberately omit the Hz reading because a partial-ring measurement would be misleading; "UNKNOWN" alone is enough to communicate "still warming up."
+        var s = Baseline() with { VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 0 };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    UNKNOWN"));
+    }
+
+    [Test]
+    public void VrrUnknownSuppressesNonZeroMeasured()
+    {
+        // Defensive: the formatter must not leak measured Hz when classification is Unknown, even if the bridge happens to have a partial-ring measurement. Whether the bridge ever does this is implementation detail of the bridge — the formatter contract is "Unknown ⇒ no Hz."
+        var s = Baseline() with { VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 5000 };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    UNKNOWN"));
     }
 
     [Test]
     public void VrrFixedAt60Hz()
     {
-        var s = Baseline() with { VrrClass = VrrClassification.Fixed, VrrHzCenti = 6000, VrrSampleCount = 60 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    FIXED @ 60.00 Hz (60/60)"));
+        var s = Baseline() with { VrrClass = VrrClassification.Fixed, VrrMeasuredHzCenti = 6000 };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    FIXED @ 60.00 Hz"));
+    }
+
+    [Test]
+    public void VrrVrrAt50Hz()
+    {
+        // Canonical bug case: 50 fps content scanned out via VRR. Measured rate (50.00) is the useful number; the panel's 60Hz nominal mode is irrelevant to what the player is presenting.
+        var s = Baseline() with { VrrClass = VrrClassification.Vrr, VrrMeasuredHzCenti = 5000 };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    VRR @ 50.00 Hz"));
     }
 
     [Test]
     public void VrrVrrAt144Hz()
     {
-        var s = Baseline() with { VrrClass = VrrClassification.Vrr, VrrHzCenti = 14400, VrrSampleCount = 60 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    VRR @ 144.00 Hz (60/60)"));
+        var s = Baseline() with { VrrClass = VrrClassification.Vrr, VrrMeasuredHzCenti = 14400 };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    VRR @ 144.00 Hz"));
     }
 
     [Test]
     public void VrrCantTellRenders()
     {
-        var s = Baseline() with { VrrClass = VrrClassification.CantTell, VrrHzCenti = 6000, VrrSampleCount = 60 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    CANT-TELL @ 60.00 Hz (60/60)"));
-    }
-
-    [Test]
-    public void VrrSamplePartiallyFilled()
-    {
-        var s = Baseline() with { VrrClass = VrrClassification.Unknown, VrrHzCenti = 0, VrrSampleCount = 37 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    UNKNOWN @ 0.00 Hz (37/60)"));
+        var s = Baseline() with { VrrClass = VrrClassification.CantTell, VrrMeasuredHzCenti = 6000 };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    CANT-TELL @ 60.00 Hz"));
     }
 
     [Test]
@@ -139,15 +148,14 @@ public class DiagnosticFormatterTests
             IsSourceHdr: true,
             OutputIsHdr: true,
             VrrClass: VrrClassification.Fixed,
-            VrrHzCenti: 6000,
-            VrrSampleCount: 60,
+            VrrMeasuredHzCenti: 6000,
             IsWaylandPath: true);
         Assert.That(DiagnosticFormatter.FormatLines(s), Is.EqualTo(new[]
         {
             "hwdec:  vaapi",
             "source: HDR (PQ/HLG)",
             "output: HDR",
-            "VRR:    FIXED @ 60.00 Hz (60/60)",
+            "VRR:    FIXED @ 60.00 Hz",
         }));
     }
 }

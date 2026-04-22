@@ -9,8 +9,7 @@ public readonly record struct DiagnosticSnapshot(
     bool IsSourceHdr,
     bool? OutputIsHdr,
     VrrClassification VrrClass,
-    int VrrHzCenti,
-    int VrrSampleCount,
+    int VrrMeasuredHzCenti,
     bool IsWaylandPath);
 
 public static class DiagnosticFormatter
@@ -22,7 +21,7 @@ public static class DiagnosticFormatter
             "hwdec:  " + FormatHwdec(s.Hwdec),
             "source: " + (s.IsSourceHdr ? "HDR (PQ/HLG)" : "SDR"),
             "output: " + FormatOutputHdr(s.IsWaylandPath, s.OutputIsHdr),
-            "VRR:    " + FormatVrr(s.IsWaylandPath, s.VrrClass, s.VrrHzCenti, s.VrrSampleCount),
+            "VRR:    " + FormatVrr(s.IsWaylandPath, s.VrrClass, s.VrrMeasuredHzCenti),
         };
     }
 
@@ -49,7 +48,7 @@ public static class DiagnosticFormatter
         return outputIsHdr.Value ? "HDR" : "SDR";
     }
 
-    private static string FormatVrr(bool isWaylandPath, VrrClassification cls, int hzCenti, int sampleCount)
+    private static string FormatVrr(bool isWaylandPath, VrrClassification cls, int measuredHzCenti)
     {
         if (!isWaylandPath)
         {
@@ -62,7 +61,12 @@ public static class DiagnosticFormatter
             VrrClassification.CantTell => "CANT-TELL",
             _ => "UNKNOWN",
         };
-        string hz = (hzCenti / 100.0).ToString("F2", CultureInfo.InvariantCulture);
-        return label + " @ " + hz + " Hz (" + sampleCount + "/" + FrameTimingBridge.RingSize + ")";
+        // Unknown can mean ring not yet full, no active wl_output, or no mode known for the active output — the bridge collapses all three into Unknown. In every case the Hz number we have is meaningless, so just show the label.
+        if (cls == VrrClassification.Unknown)
+        {
+            return label;
+        }
+        string hz = (measuredHzCenti / 100.0).ToString("F2", CultureInfo.InvariantCulture);
+        return label + " @ " + hz + " Hz";
     }
 }

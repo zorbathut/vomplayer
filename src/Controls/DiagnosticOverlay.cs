@@ -109,14 +109,13 @@ public sealed class DiagnosticOverlay : IDisposable
     private DiagnosticSnapshot Snapshot()
     {
         VrrClassification vrrClass = VrrClassification.Unknown;
-        int hzCenti = 0;
-        int sampleCount = 0;
+        int measuredHzCenti = 0;
         bool? outputHdr = null;
         bool isWaylandPath = videoSurface != null;
         if (videoSurface != null)
         {
-            vrrClass = videoSurface.GetVrrClassification(out hzCenti);
-            sampleCount = videoSurface.VrrSampleCount;
+            vrrClass = videoSurface.GetVrrClassification();
+            measuredHzCenti = videoSurface.VrrMeasuredHzCenti;
             outputHdr = videoSurface.CurrentOutputIsHdr;
         }
         return new DiagnosticSnapshot(
@@ -124,8 +123,7 @@ public sealed class DiagnosticOverlay : IDisposable
             IsSourceHdr: playback.IsSourceHdr,
             OutputIsHdr: outputHdr,
             VrrClass: vrrClass,
-            VrrHzCenti: hzCenti,
-            VrrSampleCount: sampleCount,
+            VrrMeasuredHzCenti: measuredHzCenti,
             IsWaylandPath: isWaylandPath);
     }
 

@@ -128,6 +128,57 @@ public class FrameTimingBridgeTests
     }
 
     [Test]
+    public void MeasuredHzCentiZeroOnEmptyRing()
+    {
+        var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
+        Assert.That(bridge.MeasuredHzCenti, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void MeasuredHzCentiTracksDeltaMean()
+    {
+        // 50 fps stream → 20000 µs deltas → 5000 centi-Hz. This is the case that exposes the "panel mode != actual rate" overlay bug — the diagnostic overlay reads MeasuredHzCenti so it reports 50.00 Hz instead of the panel's 60.00 Hz nominal mode.
+        var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
+        const ulong NsPer50Hz = 20_000_000;
+        ulong t = 1_000_000_000;
+        bridge.OnPresented(t, 0);
+        for (int i = 1; i <= 60; i++)
+        {
+            bridge.OnPresented(t + (ulong)i * NsPer50Hz, 0);
+        }
+        Assert.That(bridge.MeasuredHzCenti, Is.EqualTo(5000));
+    }
+
+    [Test]
+    public void MeasuredHzCentiAvailableOnPartialRing()
+    {
+        // The classifier requires a full ring before it'll return non-Unknown, but MeasuredHzCenti has no such gate — it's a pure mean over whatever's in the ring. The diagnostic overlay short-circuits via classification; this pins the bridge contract independently so a future overlay change doesn't get blindsided.
+        var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
+        const ulong NsPer50Hz = 20_000_000;
+        ulong t = 1_000_000_000;
+        bridge.OnPresented(t, 0);
+        for (int i = 1; i <= 10; i++)
+        {
+            bridge.OnPresented(t + (ulong)i * NsPer50Hz, 0);
+        }
+        Assert.That(bridge.MeasuredHzCenti, Is.EqualTo(5000));
+    }
+
+    [Test]
+    public void MeasuredHzCentiRoundsCorrectlyForSixtyHz()
+    {
+        // 60 Hz frames are 16667 µs (the rounded representation of 16666.67). 60 of those sum to 1,000,020 µs; mean 16667; 1e6/16667 = 59.998800... Hz → rounds to 6000 centi-Hz, not 5999. Pins the rounding policy at the boundary case that would otherwise off-by-one to "59.99 Hz" in the overlay.
+        var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);
+        ulong t = 1_000_000_000;
+        bridge.OnPresented(t, 0);
+        for (int i = 1; i <= 60; i++)
+        {
+            bridge.OnPresented(t + (ulong)i * NsPerFrame60Hz, 0);
+        }
+        Assert.That(bridge.MeasuredHzCenti, Is.EqualTo(6000));
+    }
+
+    [Test]
     public void LeaveClearsActiveOutputOnlyIfMatching()
     {
         var bridge = new FrameTimingBridge(logEnabled: false, logSink: TextWriter.Null);

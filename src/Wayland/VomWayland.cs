@@ -95,10 +95,19 @@ internal sealed partial class VomVideoSurface : IDisposable
         return SetHdrNative(handle, enable ? 1 : 0);
     }
 
-    // Classifies the compositor's recent refresh-period stream. When Fixed, hzCenti is the detected rate × 100 (e.g. 6000 = 60.00Hz). Unknown means the sample window hasn't filled yet; wait a second and re-poll.
-    public VrrClassification GetVrrClassification(out int hzCenti)
+    // Classifies the compositor's recent refresh-period stream. Unknown means the sample window hasn't filled yet; wait a second and re-poll.
+    public VrrClassification GetVrrClassification()
     {
-        return Bridge.GetClassification(out hzCenti);
+        return Bridge.GetClassification(out _);
+    }
+
+    // Measured mean presentation rate from the ring deltas, expressed as centi-Hz. See FrameTimingBridge.MeasuredHzCenti for the rationale (vs. nominal panel-mode Hz).
+    public int VrrMeasuredHzCenti
+    {
+        get
+        {
+            return Bridge.MeasuredHzCenti;
+        }
     }
 
     public void Dispose()

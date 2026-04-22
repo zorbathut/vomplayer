@@ -13,9 +13,9 @@ namespace Vomplayer.Wayland;
 // All entry points are called on whichever thread drives the Wayland event queue. In this app that's always the GTK main thread — either the GMainContext dispatcher or the main thread running wl_display_roundtrip synchronously during init. No locking.
 public sealed class FrameTimingBridge
 {
-    public const int RingSize = 60;
+    internal const int RingSize = 60;
     // The log line calls the classifier (which requires a full ring). StatsWindow must be >= RingSize so every log emission has something meaningful to classify. Verified by a compile-time-ish assert in FrameTimingBridgeTests.StatsWindowCoversRing.
-    public const int StatsWindow = 120;
+    internal const int StatsWindow = 120;
 
     private readonly uint[] ringDeltaUs = new uint[RingSize];
     private int ringCount;
@@ -100,6 +100,28 @@ public sealed class FrameTimingBridge
         var (cls, hz) = VrrClassifier.Classify(ringDeltaUs.AsSpan(0, ringCount), mhz);
         hzCenti = hz;
         return cls;
+    }
+
+    // Mean of the ring's inter-frame deltas, expressed as centi-Hz (e.g. 5000 = 50.00 Hz). Distinct from GetClassification's hzCenti, which is the panel's nominal mode rate from wl_output.mode — useful for the log line's "nominal=" field, but misleading in the user-facing overlay when VRR is engaged at a non-mode rate (e.g. 50 fps content scanned out at ~50Hz on a 60Hz panel). Returns 0 when the ring is empty or sums to zero.
+    public int MeasuredHzCenti
+    {
+        get
+        {
+            if (ringCount == 0)
+            {
+                return 0;
+            }
+            ulong sum = 0;
+            for (int i = 0; i < ringCount; i++)
+            {
+                sum += ringDeltaUs[i];
+            }
+            if (sum == 0)
+            {
+                return 0;
+            }
+            return (int)Math.Round(100_000_000.0 * ringCount / sum);
+        }
     }
 
     private void PushRing(ulong nowNs)
