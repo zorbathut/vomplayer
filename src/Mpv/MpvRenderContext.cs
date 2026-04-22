@@ -21,7 +21,9 @@ public sealed class MpvRenderContext : IDisposable
     public event Action<int>? RenderFailed;
 
     // Constructed exclusively via MpvDispatcher.CreateRenderContext (or from tests with InternalsVisibleTo). Callers get access to MpvClient only via MpvDispatcher's internal wiring; the ctor is internal because MpvClient is internal.
-    internal MpvRenderContext(MpvClient client, Func<string, IntPtr> getProcAddress)
+    //
+    // wlDisplay / x11Display: raw native display handles for hwdec interop. mpv's vaapi hwdec driver (and similar) calls vaGetDisplayWl / vaGetDisplayXlib with these to open a VADisplay. Without them the driver iterates its fallbacks (x11 → wayland → drm) and fails — the eglGetCurrentDisplay trick applies to the EGL-interop path, NOT to VA-API native display creation, which needs the actual wl_display / X Display pointer. Pass IntPtr.Zero when unavailable (e.g. non-Wayland surface has no wl_display). Handles must stay valid for the lifetime of this render context; on our path the wl_display is GDK-owned and outlives us.
+    internal MpvRenderContext(MpvClient client, Func<string, IntPtr> getProcAddress, IntPtr wlDisplay, IntPtr x11Display)
     {
         if (client == null)
         {
@@ -47,11 +49,21 @@ public sealed class MpvRenderContext : IDisposable
 
         unsafe
         {
-            Span<MpvRenderParam> parameters = stackalloc MpvRenderParam[4];
-            parameters[0] = new MpvRenderParam { Type = MpvRenderParamType.ApiType, Data = openGlApiTypePtr };
-            parameters[1] = new MpvRenderParam { Type = MpvRenderParamType.OpenglInitParams, Data = (IntPtr)(&initParams) };
-            parameters[2] = new MpvRenderParam { Type = MpvRenderParamType.AdvancedControl, Data = (IntPtr)(&advancedControl) };
-            parameters[3] = new MpvRenderParam { Type = MpvRenderParamType.Invalid, Data = IntPtr.Zero };
+            // Max 6 slots: ApiType, OpenglInitParams, AdvancedControl, optional WlDisplay, optional X11Display, Invalid terminator.
+            Span<MpvRenderParam> parameters = stackalloc MpvRenderParam[6];
+            int i = 0;
+            parameters[i++] = new MpvRenderParam { Type = MpvRenderParamType.ApiType, Data = openGlApiTypePtr };
+            parameters[i++] = new MpvRenderParam { Type = MpvRenderParamType.OpenglInitParams, Data = (IntPtr)(&initParams) };
+            parameters[i++] = new MpvRenderParam { Type = MpvRenderParamType.AdvancedControl, Data = (IntPtr)(&advancedControl) };
+            if (wlDisplay != IntPtr.Zero)
+            {
+                parameters[i++] = new MpvRenderParam { Type = MpvRenderParamType.WlDisplay, Data = wlDisplay };
+            }
+            if (x11Display != IntPtr.Zero)
+            {
+                parameters[i++] = new MpvRenderParam { Type = MpvRenderParamType.X11Display, Data = x11Display };
+            }
+            parameters[i] = new MpvRenderParam { Type = MpvRenderParamType.Invalid, Data = IntPtr.Zero };
 
             var rc = LibMpv.RenderContextCreate(out ctx, client.Handle, ref parameters[0]);
             if (rc < 0)

@@ -21,13 +21,13 @@ public class MpvRenderContextContractTests
     [Test]
     public void NullClientThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new MpvRenderContext(null!, _ => IntPtr.Zero));
+        Assert.Throws<ArgumentNullException>(() => new MpvRenderContext(null!, _ => IntPtr.Zero, IntPtr.Zero, IntPtr.Zero));
     }
 
     [Test]
     public void NullGetProcAddressThrows()
     {
         using var mpv = NewHeadlessInitialized();
-        Assert.Throws<ArgumentNullException>(() => new MpvRenderContext(mpv, null!));
+        Assert.Throws<ArgumentNullException>(() => new MpvRenderContext(mpv, null!, IntPtr.Zero, IntPtr.Zero));
     }
 }

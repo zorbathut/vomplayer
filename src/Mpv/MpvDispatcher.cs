@@ -65,13 +65,15 @@ internal sealed class MpvDispatcher : IDisposable
     }
 
     // Runs on the caller's thread — expected to be the GL-owning main thread. Does NOT go through the worker queue because mpv_render_context_create requires a current GL context and the get_proc_address callback it invokes must resolve against that context. Render-context calls don't deadlock the way client-API calls do, so bypassing the dispatcher for construction is safe.
-    public MpvRenderContext CreateRenderContext(Func<string, IntPtr> getProcAddress)
+    //
+    // wlDisplay / x11Display: native display handles for hwdec interop (vaapi, vdpau). Pass IntPtr.Zero when unavailable. See MpvRenderContext ctor doc for lifetime and fallback details.
+    public MpvRenderContext CreateRenderContext(Func<string, IntPtr> getProcAddress, IntPtr wlDisplay, IntPtr x11Display)
     {
         if (getProcAddress == null)
         {
             throw new ArgumentNullException(nameof(getProcAddress));
         }
-        return new MpvRenderContext(client, getProcAddress);
+        return new MpvRenderContext(client, getProcAddress, wlDisplay, x11Display);
     }
 
     private void OnClientEventAvailable()

@@ -23,6 +23,8 @@ public sealed partial class VideoSurface : IDisposable
     private VomVideoSurface? surface;
     private MpvRenderContext? renderContext;
     private MpvDispatcher? dispatcher;
+    // Cached for TryCreateRenderContext, which is also reachable via SetMpvDispatcher (post-realize). The wl_display is GDK-app-scope and remains valid across the render-context lifetime.
+    private IntPtr wlDisplay;
     private int renderQueued;
     // Latched (via Interlocked) the first time mpv's update callback fires. Gates DoRender: before mpv has signaled any content, a render+swap commits the EGL back buffer's undefined contents to the subsurface — under KWin + SDR the compositor honors the back buffer's alpha and the (transparent) parent region shows the desktop through the video area. With this latch, the subsurface stays unmapped (no buffer ever attached) until mpv has real content, and the GTK placeholder overlay on the parent keeps the region opaque-black in the meantime. HDR masked this historically: the PQ image description on the subsurface changes the compositor's alpha handling so an undefined swap didn't punch through.
     private int mpvUpdateSignaled;
@@ -133,7 +135,7 @@ public sealed partial class VideoSurface : IDisposable
             RenderFailed?.Invoke(-1);
             return;
         }
-        IntPtr wlDisplay = GdkWaylandDisplayGetWlDisplay(gdkDisplay.Handle.DangerousGetHandle());
+        wlDisplay = GdkWaylandDisplayGetWlDisplay(gdkDisplay.Handle.DangerousGetHandle());
         IntPtr wlSurface = GdkWaylandSurfaceGetWlSurface(gdkSurface.Handle.DangerousGetHandle());
         if (wlDisplay == IntPtr.Zero || wlSurface == IntPtr.Zero)
         {
@@ -194,7 +196,8 @@ public sealed partial class VideoSurface : IDisposable
         }
         try
         {
-            renderContext = dispatcher.CreateRenderContext(name => Epoxy.GetProcAddress(name));
+            // Pass the wl_display so mpv's vaapi hwdec driver can open a VADisplay via vaGetDisplayWl. Without it the driver's native-display probe fails across all fallbacks (x11 → wayland → drm) and mpv drops to vulkan-copy, costing a full GPU→RAM→GPU round-trip per frame.
+            renderContext = dispatcher.CreateRenderContext(name => Epoxy.GetProcAddress(name), wlDisplay, IntPtr.Zero);
             renderContext.UpdateRequested += OnMpvUpdateRequested;
             renderContext.RenderFailed += OnMpvRenderFailed;
         }

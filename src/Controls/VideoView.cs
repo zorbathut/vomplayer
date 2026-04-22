@@ -49,7 +49,8 @@ public class VideoView : Gtk.GLArea
 
         try
         {
-            renderContext = dispatcher.CreateRenderContext(name => Epoxy.GetProcAddress(name));
+            // No native display handles plumbed through on the GLArea path — we don't reach into GDK for the underlying wl_display / X11 Display here. Consequence: hwdec backends that need native-display interop (e.g. vaapi's native-display probe) fall back or fail, and mpv may pick a copy-back backend. Acceptable for the fallback path; the Wayland subsurface path is where we care about zero-copy.
+            renderContext = dispatcher.CreateRenderContext(name => Epoxy.GetProcAddress(name), IntPtr.Zero, IntPtr.Zero);
             renderContext.UpdateRequested += OnMpvUpdateRequested;
             renderContext.RenderFailed += OnMpvRenderFailed;
             RenderContextReady?.Invoke();
