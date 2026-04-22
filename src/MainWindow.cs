@@ -49,6 +49,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
     private readonly VideoSurface? videoSurface;
+    private readonly DiagnosticOverlay diagnosticOverlay;
     // Fullscreen state is a mirror of Gtk.Window.Fullscreened — the notify::fullscreened handler is authoritative. This lets compositor/WM-initiated fullscreen exits (Super-key, window menu, tiling WM shortcut) restore the controls even though our own toggles didn't run.
     private bool isFullscreen;
     private uint controlsHideTimeoutId;
@@ -172,6 +173,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         noVideoBg.SetHexpand(true);
         noVideoBg.SetVexpand(true);
         videoOverlay.AddOverlay(noVideoBg);
+
+        // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Constructed before BuildMenuBar to match the file's "assign then build menu" pattern (cf. viewModel at line 106); the menu action closure resolves `this.diagnosticOverlay` lazily at invoke time, so the ordering is stylistic rather than load-bearing.
+        diagnosticOverlay = new DiagnosticOverlay(playback, videoSurface);
+        videoOverlay.AddOverlay(diagnosticOverlay.Widget);
 
         menuBar = BuildMenuBar(app);
 
@@ -415,7 +420,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private static void InstallVomCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vom-main-window { background: transparent; } .vom-chrome { background-color: @theme_bg_color; } .vom-controls-bar { padding: 6px; } .osd { padding: 6px; } .vom-no-video-bg { background-color: black; }");
+        provider.LoadFromString("window.vom-main-window { background: transparent; } .vom-chrome { background-color: @theme_bg_color; } .vom-controls-bar { padding: 6px; } .osd { padding: 6px; } .vom-no-video-bg { background-color: black; } .vom-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
@@ -626,6 +631,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             seekLegacyControllerHandle = IntPtr.Zero;
         }
         seekLegacyCallback = null;
+        // Dispose the overlay before the objects it reads (playback, videoSurface): Dispose cancels its 1 Hz timer, ensuring no post-teardown tick fires into a disposed Playback.
+        diagnosticOverlay.Dispose();
         viewModel.Dispose();
         videoSurface?.Dispose();
         playback.Dispose();

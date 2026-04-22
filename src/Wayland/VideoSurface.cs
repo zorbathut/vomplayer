@@ -61,6 +61,19 @@ public sealed partial class VideoSurface : IDisposable
         return surface.GetVrrClassification(out hzCenti);
     }
 
+    // Number of valid samples in the VRR classifier's backing ring, 0..FrameTimingBridge.RingSize. Used by the diagnostic overlay; "60/60" = ring full. Writer and reader are both on the GTK main thread (Wayland events pump through GTK's main loop), so no memory barrier is needed.
+    public int VrrSampleCount
+    {
+        get
+        {
+            if (surface == null)
+            {
+                return 0;
+            }
+            return surface.Bridge.RingCount;
+        }
+    }
+
     // Whether the output the subsurface is currently on advertises an HDR (PQ/HLG) preferred image description. null means unknown — either the surface has no active wl_output yet (pre-first-enter), the shim's HDR probe hasn't completed, or the compositor doesn't advertise wp_color_manager_v1. Callers should treat null as SDR for conservative defaults.
     //
     // Reuses FrameTimingBridge.ActiveOutput's first-wins convention: on a subsurface spanning multiple outputs, this reflects whichever output the compositor reported first in wl_surface.enter. TODO: on a span that covers an HDR panel + an SDR panel simultaneously, first-wins can report HDR while pixels on the SDR side receive a PQ-tagged surface (imperfect compositor tonemap-down). Safer future policy: return false if ANY entered output is SDR, true only when all entered outputs are HDR.

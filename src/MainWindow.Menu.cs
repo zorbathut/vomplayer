@@ -31,6 +31,31 @@ public sealed partial class MainWindow
         aboutAction.OnActivate += (_, _) => ShowAboutDialog();
         AddAction(aboutAction);
 
+        // Stateful boolean action backing the Diagnostic Overlay checkbox. Gtk.PopoverMenuBar renders a check glyph automatically whenever the action's state is true; no menu-item attribute needed. GirCore's SimpleAction does NOT auto-apply the requested state on change-state — the handler must SetState explicitly, or the check glyph stays stuck on the previous value.
+        var diagnosticAction = Gio.SimpleAction.NewStateful(
+            "toggle-diagnostic",
+            parameterType: null,
+            state: GLib.Variant.NewBoolean(false));
+        diagnosticAction.OnChangeState += (_, args) =>
+        {
+            // args.Value is typed nullable on the GirCore side but the menu system always supplies a boolean GVariant for a stateful boolean action. A null here means GirCore's signal marshalling changed shape under us; fail loud rather than mask the bug.
+            if (args.Value == null)
+            {
+                throw new InvalidOperationException("toggle-diagnostic change-state signal fired with null args.Value");
+            }
+            bool newState = args.Value.GetBoolean();
+            diagnosticAction.SetState(args.Value);
+            if (newState)
+            {
+                diagnosticOverlay.Show();
+            }
+            else
+            {
+                diagnosticOverlay.Hide();
+            }
+        };
+        AddAction(diagnosticAction);
+
         // <Primary> resolves to Ctrl on Linux/Windows, Cmd on macOS — cross-platform correct per the project's stated target platforms.
         app.SetAccelsForAction("win.open", new[] { "<Primary>O" });
         app.SetAccelsForAction("win.quit", new[] { "<Primary>Q" });
@@ -54,6 +79,7 @@ public sealed partial class MainWindow
         viewMenu.InsertItem(-1, Gio.MenuItem.New("Fullscreen", "win.fullscreen"));
 
         var helpMenu = Gio.Menu.New();
+        helpMenu.InsertItem(-1, Gio.MenuItem.New("Diagnostic Overlay", "win.toggle-diagnostic"));
         helpMenu.InsertItem(-1, Gio.MenuItem.New("About", "win.about"));
 
         var root = Gio.Menu.New();
