@@ -8,7 +8,7 @@ public class PlaybackTests
 {
     private static Playback.Playback NewHeadlessInitialized()
     {
-        // Synchronous post — ProcessEvents runs on the test thread when mpv signals.
+        // Synchronous post — dispatcher forwards events via this hook, so event handlers run on the test thread.
         var pb = new Playback.Playback(a => a());
         pb.Initialize();
         return pb;

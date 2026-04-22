@@ -3,10 +3,10 @@ using Vomplayer.Mpv;
 
 namespace Vomplayer.Controls;
 
-// GTK4 GLArea that owns the mpv render context. AttachClient(MpvClient) is one-shot and must be called before the control is first realized. RenderContextReady fires on every successful OnRealize (not just the first) — GLArea cycles unrealize/realize on reparent, and the downstream VM's `OnRenderContextReady` has the one-shot latch for initial-file loading.
+// GTK4 GLArea that owns the mpv render context. AttachDispatcher is one-shot and must be called before the control is first realized. RenderContextReady fires on every successful OnRealize (not just the first) — GLArea cycles unrealize/realize on reparent, and the downstream VM's `OnRenderContextReady` has the one-shot latch for initial-file loading.
 public class VideoView : Gtk.GLArea
 {
-    private MpvClient? client;
+    private MpvDispatcher? dispatcher;
     private MpvRenderContext? renderContext;
 
     public event Action? RenderContextReady;
@@ -22,20 +22,20 @@ public class VideoView : Gtk.GLArea
         OnRender += OnGlRender;
     }
 
-    internal void AttachClient(MpvClient client)
+    internal void AttachDispatcher(MpvDispatcher dispatcher)
     {
-        if (this.client != null)
+        if (this.dispatcher != null)
         {
-            throw new InvalidOperationException("VideoView already has a client attached.");
+            throw new InvalidOperationException("VideoView already has a dispatcher attached.");
         }
-        this.client = client ?? throw new ArgumentNullException(nameof(client));
+        this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
     }
 
     private void OnGlRealize(object? sender, EventArgs e)
     {
-        if (client == null)
+        if (dispatcher == null)
         {
-            throw new InvalidOperationException("VideoView.AttachClient(MpvClient) must be called before the control is realized.");
+            throw new InvalidOperationException("VideoView.AttachDispatcher must be called before the control is realized.");
         }
         MakeCurrent();
         var err = GetError();
@@ -49,7 +49,7 @@ public class VideoView : Gtk.GLArea
 
         try
         {
-            renderContext = new MpvRenderContext(client, name => Epoxy.GetProcAddress(name));
+            renderContext = dispatcher.CreateRenderContext(name => Epoxy.GetProcAddress(name));
             renderContext.UpdateRequested += OnMpvUpdateRequested;
             renderContext.RenderFailed += OnMpvRenderFailed;
             RenderContextReady?.Invoke();

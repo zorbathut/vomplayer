@@ -55,8 +55,10 @@ public readonly record struct MpvPropertyValue(object? Raw)
     }
 }
 
-// Thread model: all methods except the wakeup callback must be called from a single thread (typically the UI/main thread). libmpv fires the wakeup on its own event thread; we only raise EventAvailable from there — no mpv_* calls happen inside the callback. Callers must subscribe to PropertyChanged before calling ObserveProperty, since libmpv synthesizes an initial change event as part of the observe call. MpvRenderContext runs on the same main thread under GTK4 (GLArea's realize/render/unrealize all fire on the main thread with GL context current), so there is no cross-thread coupling between the two.
-public sealed class MpvClient : IDisposable
+// Thread model: no method is thread-safe relative to itself — callers must serialize access to a single owner thread. In production that owner is the MpvDispatcher worker; tests (via InternalsVisibleTo) drive MpvClient directly on the test thread. The wakeup callback is the one exception: it fires on libmpv's event thread and only raises EventAvailable; no mpv_* calls happen inside it. Callers must subscribe to PropertyChanged before calling ObserveProperty, since libmpv synthesizes an initial change event as part of the observe call.
+//
+// Visibility: internal so production consumers are forced through MpvDispatcher + MpvHandle. The only other call path is MpvRenderContext's ctor, which runs on the GL-owning thread and reaches us via MpvDispatcher.CreateRenderContext; it reads the Handle property to hand the raw mpv ctx to mpv_render_context_create.
+internal sealed class MpvClient : IDisposable
 {
     private IntPtr ctx;
     private LibMpv.WakeupCallback? wakeup;

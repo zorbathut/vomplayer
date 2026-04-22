@@ -66,20 +66,22 @@ Two runtime-selected paths, chosen by `WaylandDetect.IsWaylandBackend` in `MainW
 **Gtk.GLArea fallback path (X11 / other backends).**
 `VideoView` is a `Gtk.GLArea`; mpv renders into GTK's owned FBO. HDR is not supported on this path — mpv tonemaps HDR source content down to SDR via its default `auto` targeting. Main-surface PQ tagging was tried and reverted: it produced a blown-out GTK UI (widgets render sRGB values into a surface KWin interprets as PQ) and couldn't be toggled per-file without tearing down the GTK surface.
 
-## Playback data flow
+## Playback data flow and threading
+
+Three distinct threads touch mpv, each with its own role:
+- **mpv's event thread** (libmpv-internal) — fires the wakeup callback.
+- **mpv-dispatcher worker** (`MpvDispatcher`, owned by `Playback`) — the ONLY thread that calls the mpv *client-API* surface (SetProperty, Command, ObserveProperty, DrainEvents, Initialize, etc). Enforced by the ref-struct `MpvHandle`: handles are handed out only inside `MpvDispatcher.Post` callbacks, and a ref struct can't be captured in a closure, stored in a field, awaited across, or otherwise leaked out of the post scope — so it's impossible to call a client-API method from the wrong thread.
+- **GTK main thread** — owns GL context and window lifecycle; calls `mpv_render_context_*` (Update / Render / ReportSwap) via `MpvRenderContext`. Render-context construction also happens here (`mpv_render_context_create` reads the mpv handle but must run on the GL-owning thread); `MpvDispatcher.CreateRenderContext` is the controlled escape hatch that wraps the ctor. Render-context calls don't deadlock the way client-API calls do.
 
 ```
-mpv thread:                  main thread (GTK GMainContext):
-  wakeup callback   -----IdleAdd------>   Playback.ProcessEvents
-                                           -> MpvClient.DrainEvents
-                                             -> Dispatch events
-                                               -> PropertyChanged -> Playback.ObservableProperties
-                                                                  -> ViewModelMain
-                                                                    -> MainWindow widgets
+mpv event thread:                mpv-dispatcher worker:         GTK main thread:
+  wakeup callback   --post--->     DrainEvents
+                                     PropertyChanged  ---postToMainThread--->   Playback.ObservableProperties
+                                     FileLoaded/etc   ---postToMainThread--->   ViewModelMain -> widgets
 ```
 
 ```
-mpv render thread:           main thread:
+mpv render thread:               GTK main thread:
   UpdateRequested   -----IdleAdd------>   DoRender
                                            -> MakeCurrent
                                            -> mpv_render_context_update
@@ -88,9 +90,11 @@ mpv render thread:           main thread:
                                            -> mpv_render_context_report_swap
 ```
 
-Cross-thread coupling is isolated in exactly two places: `Playback` (constructor takes an `Action<Action> postToMainThread` so tests can pass `a => a()`) and the render-queue coalescer in `VideoSurface`/`VideoView`.
+Why the dispatcher matters: `mpv_set_property_string` for VO properties (`target-prim`/`target-trc`/…) synchronously blocks until mpv_render_context_render acknowledges the change. That render call runs on the main thread via `IdleAdd`, so calling SetProperty from main → main blocks in SetProperty → IdleAdd can't fire → mpv core waits for render that can't happen → deadlock. Running SetProperty on the dispatcher worker breaks the cycle: main stays free to service the render IdleAdd while the worker blocks.
 
-`Playback` keeps `MpvClient` behind its boundary. The one exception is `AttachRenderSurface(Action<MpvClient> attach)` — the callback receives the client long enough to build a render context, and nothing outside that scope gets a reference.
+Cross-thread coupling is isolated in exactly three places: `Playback` (constructor takes an `Action<Action> postToMainThread` so tests can pass `a => a()`), `MpvDispatcher` (worker thread + queue), and the render-queue coalescer in `VideoSurface`/`VideoView`.
+
+`Playback` keeps `MpvClient` behind the `MpvDispatcher` boundary — `MpvClient` is `internal` and exposed only via the ref-struct `MpvHandle` inside `Post` callbacks. `AttachRenderSurface(Action<MpvDispatcher> attach)` hands out the dispatcher for render-context construction; consumers call `CreateRenderContext` on it rather than touching an mpv handle directly.
 
 ## MVVM
 

@@ -111,7 +111,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             var area = new VideoArea();
             var surface = new VideoSurface(this, area);
-            playback.AttachRenderSurface(client => surface.SetMpvClient(client));
+            playback.AttachRenderSurface(d => surface.SetMpvDispatcher(d));
             surface.RenderContextReady += OnVideoRenderContextReadyWayland;
             surface.RenderFailed += OnVideoRenderFailed;
             surface.FirstFrameRendered += OnVideoFirstFrameRendered;
@@ -128,7 +128,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         else
         {
             var view = new VideoView();
-            playback.AttachRenderSurface(client => view.AttachClient(client));
+            playback.AttachRenderSurface(d => view.AttachDispatcher(d));
             view.RenderContextReady += OnVideoRenderContextReadyGLArea;
             view.RenderFailed += OnVideoRenderFailed;
             videoView = view;

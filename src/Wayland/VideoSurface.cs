@@ -22,7 +22,7 @@ public sealed partial class VideoSurface : IDisposable
     private readonly VideoArea area;
     private VomVideoSurface? surface;
     private MpvRenderContext? renderContext;
-    private MpvClient? client;
+    private MpvDispatcher? dispatcher;
     private int renderQueued;
     // Latched (via Interlocked) the first time mpv's update callback fires. Gates DoRender: before mpv has signaled any content, a render+swap commits the EGL back buffer's undefined contents to the subsurface — under KWin + SDR the compositor honors the back buffer's alpha and the (transparent) parent region shows the desktop through the video area. With this latch, the subsurface stays unmapped (no buffer ever attached) until mpv has real content, and the GTK placeholder overlay on the parent keeps the region opaque-black in the meantime. HDR masked this historically: the PQ image description on the subsurface changes the compositor's alpha handling so an undefined swap didn't punch through.
     private int mpvUpdateSignaled;
@@ -104,14 +104,14 @@ public sealed partial class VideoSurface : IDisposable
         WaylandOutputRegistry.IsHdrChanged += OnRegistryIsHdrChanged;
     }
 
-    // Called by MainWindow via playback.AttachRenderSurface(client => videoSurface.SetMpvClient(client)). If the window is already realized, the render context is built now; otherwise the client is stashed and the render context is built on OnRealize.
-    public void SetMpvClient(MpvClient c)
+    // Called by MainWindow via playback.AttachRenderSurface(dispatcher => videoSurface.SetMpvDispatcher(dispatcher)). If the window is already realized, the render context is built now; otherwise the dispatcher is stashed and the render context is built on OnRealize. Internal because MpvDispatcher is internal.
+    internal void SetMpvDispatcher(MpvDispatcher d)
     {
-        if (c == null)
+        if (d == null)
         {
-            throw new ArgumentNullException(nameof(c));
+            throw new ArgumentNullException(nameof(d));
         }
-        client = c;
+        dispatcher = d;
         if (surface != null && renderContext == null)
         {
             TryCreateRenderContext();
@@ -183,7 +183,7 @@ public sealed partial class VideoSurface : IDisposable
 
     private void TryCreateRenderContext()
     {
-        if (client == null || surface == null || renderContext != null)
+        if (dispatcher == null || surface == null || renderContext != null)
         {
             return;
         }
@@ -194,7 +194,7 @@ public sealed partial class VideoSurface : IDisposable
         }
         try
         {
-            renderContext = new MpvRenderContext(client, name => Epoxy.GetProcAddress(name));
+            renderContext = dispatcher.CreateRenderContext(name => Epoxy.GetProcAddress(name));
             renderContext.UpdateRequested += OnMpvUpdateRequested;
             renderContext.RenderFailed += OnMpvRenderFailed;
         }

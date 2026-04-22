@@ -20,7 +20,8 @@ public sealed class MpvRenderContext : IDisposable
     public event Action? UpdateRequested;
     public event Action<int>? RenderFailed;
 
-    public MpvRenderContext(MpvClient client, Func<string, IntPtr> getProcAddress)
+    // Constructed exclusively via MpvDispatcher.CreateRenderContext (or from tests with InternalsVisibleTo). Callers get access to MpvClient only via MpvDispatcher's internal wiring; the ctor is internal because MpvClient is internal.
+    internal MpvRenderContext(MpvClient client, Func<string, IntPtr> getProcAddress)
     {
         if (client == null)
         {

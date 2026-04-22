@@ -1,15 +1,14 @@
 using System;
 using System.Globalization;
-using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Mpv;
 
 namespace Vomplayer.Playback;
 
-// Owns MpvClient and the mapping from mpv events to strongly-typed observable state. No UI-framework dependency — the one cross-thread coupling is injected via Action<Action> (pass a GLib.Functions.IdleAdd wrapper in production, a => a() in tests). Never exposes MpvClient past the service boundary; the render surface receives it only inside the AttachRenderSurface callback.
+// Owns MpvDispatcher and the mapping from mpv events to strongly-typed observable state. No UI-framework dependency — the cross-thread coupling to the UI is injected via Action<Action> (pass a GLib.Functions.IdleAdd wrapper in production, a => a() in tests). Mpv client-API calls all route through dispatcher.Post; the ref-struct MpvHandle pattern makes direct mpv access unreachable from outside a Post callback.
 public sealed partial class Playback : ObservableObject, IPlayback
 {
-    private readonly MpvClient mpv;
+    private readonly MpvDispatcher dispatcher;
     private readonly Action<Action> postToMainThread;
 
     [ObservableProperty]
@@ -39,31 +38,33 @@ public sealed partial class Playback : ObservableObject, IPlayback
             throw new ArgumentNullException(nameof(postToMainThread));
         }
         this.postToMainThread = postToMainThread;
-        mpv = new MpvClient();
+        dispatcher = new MpvDispatcher();
+        // Events fire on the dispatcher thread (post-DrainEvents). Marshal onto the UI main thread before touching ObservableObject properties.
+        dispatcher.PropertyChanged += c => postToMainThread(() => OnMpvPropertyChanged(c));
+        dispatcher.FileLoaded += () => postToMainThread(OnMpvFileLoaded);
+        dispatcher.FileEnded += e => postToMainThread(() => OnMpvFileEnded(e));
+        dispatcher.Shutdown += () => postToMainThread(OnMpvShutdown);
     }
 
     public void Initialize()
     {
-        // vo=libmpv defers VO selection until a render context is registered — otherwise mpv picks a default VO (on Wayland that's waylandvk, which ignores our render context and spawns its own window).
-        mpv.SetOption("vo", "libmpv");
-        mpv.SetOption("osc", "no");
-        mpv.SetOption("keep-open", "yes");
-        mpv.SetOption("terminal", "no");
+        dispatcher.Post(h =>
+        {
+            // vo=libmpv defers VO selection until a render context is registered — otherwise mpv picks a default VO (on Wayland that's waylandvk, which ignores our render context and spawns its own window).
+            h.SetOption("vo", "libmpv");
+            h.SetOption("osc", "no");
+            h.SetOption("keep-open", "yes");
+            h.SetOption("terminal", "no");
 
-        mpv.EventAvailable += OnMpvEventAvailable;
-        mpv.PropertyChanged += OnMpvPropertyChanged;
-        mpv.FileLoaded += OnMpvFileLoaded;
-        mpv.FileEnded += OnMpvFileEnded;
-        mpv.Shutdown += OnMpvShutdown;
+            h.Initialize();
 
-        mpv.Initialize();
-
-        mpv.ObserveProperty("time-pos", MpvFormat.Double);
-        mpv.ObserveProperty("duration", MpvFormat.Double);
-        mpv.ObserveProperty("pause", MpvFormat.Flag);
-        mpv.ObserveProperty("seeking", MpvFormat.Flag);
-        // Sub-property path observation: video-params is a Node map, but mpv exposes each scalar inside it (primaries, gamma, sig-peak, …) as its own string-typed observable when addressed via the "<parent>/<key>" syntax. This sidesteps MpvClient.ReadPropertyValue not knowing how to unpack node-map payloads. Initial synthesized fire lands with null (no file loaded yet), which IsHdrGamma classifies as SDR — no spurious transition.
-        mpv.ObserveProperty("video-params/gamma", MpvFormat.String);
+            h.ObserveProperty("time-pos", MpvFormat.Double);
+            h.ObserveProperty("duration", MpvFormat.Double);
+            h.ObserveProperty("pause", MpvFormat.Flag);
+            h.ObserveProperty("seeking", MpvFormat.Flag);
+            // Sub-property path observation: video-params is a Node map, but mpv exposes each scalar inside it (primaries, gamma, sig-peak, …) as its own string-typed observable when addressed via the "<parent>/<key>" syntax. This sidesteps MpvClient.ReadPropertyValue not knowing how to unpack node-map payloads. Initial synthesized fire lands with null (no file loaded yet), which IsHdrGamma classifies as SDR — no spurious transition.
+            h.ObserveProperty("video-params/gamma", MpvFormat.String);
+        });
     }
 
     public void LoadFile(string path)
@@ -74,69 +75,62 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
         // Preemptive SDR reset: if the previous file was HDR, snap the surface and mpv targeting back to sRGB before the new file's params land. The observer upgrades to HDR again if the new file is PQ/HLG. Without this, an HDR→SDR playlist swap would leave the subsurface PQ-tagged while mpv decodes SDR content, producing the exact overdrive we're avoiding.
         UpdateSourceHdr(null);
-        mpv.Command("loadfile", path);
-        mpv.SetProperty("pause", "no");
+        dispatcher.Post(h =>
+        {
+            h.Command("loadfile", path);
+            h.SetProperty("pause", "no");
+        });
     }
 
     // Called after the Wayland color-management shim attaches a PQ/BT.2020 description to the subsurface — libplacebo must then render to match, or the compositor will misinterpret sRGB-encoded output as PQ. If HDR is never applied (non-Linux, X11, compositor without wp-color-management-v1, or current source is SDR), we never call this and mpv keeps its sRGB-target default.
     //
-    // Dispatched to the thread pool because mpv_set_property_string for target-* blocks the caller until the render context has acknowledged the change. The acknowledgement comes from mpv_render_context_render, which we call from the main thread via an IdleAdd queue. Calling SetProperty from the main thread would block that IdleAdd from running → deadlock (observed: main thread in pthread_cond_wait inside mpv_set_property_string). The sequence of three sets must be ordered, so they run on a single background task; fire-and-forget is safe because mpv won't render with the new targets until all three land, and the next frame's render is gated on that.
+    // Goes through dispatcher.Post because mpv_set_property_string for target-* blocks the caller until the render context has acknowledged the change. The ack comes via mpv_render_context_render, which runs on the main thread — so calling SetProperty from main would deadlock. The dispatcher serializes these onto its worker thread, where the block is harmless because the main thread stays free to service the render callback mpv core is waiting on.
     public void EnableHdrOutput()
     {
-        Task.Run(() =>
+        dispatcher.Post(h =>
         {
-            mpv.SetProperty("target-prim", "bt.2020");
-            mpv.SetProperty("target-trc", "pq");
-            mpv.SetProperty("target-peak", "1000");
+            h.SetProperty("target-prim", "bt.2020");
+            h.SetProperty("target-trc", "pq");
+            h.SetProperty("target-peak", "1000");
         });
     }
 
     // Inverse of EnableHdrOutput: drops the PQ targets so mpv falls back to its sRGB/bt.709 default for SDR output. Called when transitioning from HDR to SDR content (playlist switch) or when the --sdr override wants mpv to tonemap HDR content down to SDR. Reset is symmetric with EnableHdrOutput so the state stays coherent across transitions. Same deadlock-avoidance rationale as EnableHdrOutput — see that comment.
     public void DisableHdrOutput()
     {
-        Task.Run(() =>
+        dispatcher.Post(h =>
         {
-            mpv.SetProperty("target-prim", "auto");
-            mpv.SetProperty("target-trc", "auto");
-            mpv.SetProperty("target-peak", "auto");
+            h.SetProperty("target-prim", "auto");
+            h.SetProperty("target-trc", "auto");
+            h.SetProperty("target-peak", "auto");
         });
     }
 
     public void TogglePause()
     {
-        mpv.SetProperty("pause", IsPaused ? "no" : "yes");
+        bool pausedNow = IsPaused;
+        dispatcher.Post(h => h.SetProperty("pause", pausedNow ? "no" : "yes"));
     }
 
     public void Stop()
     {
-        mpv.Command("stop");
+        dispatcher.Post(h => h.Command("stop"));
     }
 
     public void Seek(double seconds)
     {
         var target = seconds.ToString("F3", CultureInfo.InvariantCulture);
-        mpv.Command("seek", target, "absolute");
+        dispatcher.Post(h => h.Command("seek", target, "absolute"));
     }
 
-    // Hands the MpvClient to a render-surface attacher. Keeps MpvClient behind the service boundary — the caller receives the client only inside the callback scope. Used by both the GLArea path (client => videoView.AttachClient(client)) and the Wayland subsurface path (client => videoSurface.SetMpvClient(client)).
-    public void AttachRenderSurface(Action<MpvClient> attach)
+    // Hands the MpvDispatcher to a render-surface attacher. Consumers call CreateRenderContext on it (which runs on the caller's GL-owning thread) rather than accessing an MpvClient directly. Internal because MpvDispatcher is internal — this seam is for same-assembly render surfaces only.
+    internal void AttachRenderSurface(Action<MpvDispatcher> attach)
     {
         if (attach == null)
         {
             throw new ArgumentNullException(nameof(attach));
         }
-        attach(mpv);
-    }
-
-    // Callable for tests. In production it's invoked indirectly via postToMainThread.
-    public void ProcessEvents()
-    {
-        mpv.DrainEvents();
-    }
-
-    private void OnMpvEventAvailable()
-    {
-        postToMainThread(ProcessEvents);
+        attach(dispatcher);
     }
 
     private void OnMpvPropertyChanged(PropertyChange change)
@@ -203,15 +197,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     public void Dispose()
     {
-        // Unsubscribe from mpv before disposing it so any late dispatch can't land on this object's handlers. Then null our own event invocation lists so a subscriber we forward to can't fire into a torn-down state. Finally dispose mpv.
-        mpv.EventAvailable -= OnMpvEventAvailable;
-        mpv.PropertyChanged -= OnMpvPropertyChanged;
-        mpv.FileLoaded -= OnMpvFileLoaded;
-        mpv.FileEnded -= OnMpvFileEnded;
-        mpv.Shutdown -= OnMpvShutdown;
+        // Null our own event invocation lists so a subscriber we forward to can't fire into a torn-down state. Dispose of the dispatcher — its Dispose drops subscriptions to the underlying MpvClient, drains the queue, joins the worker, and tears down mpv.
         FileLoaded = null;
         FileEnded = null;
         SourceHdrChanged = null;
-        mpv.Dispose();
+        dispatcher.Dispose();
     }
 }
