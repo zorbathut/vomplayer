@@ -3,11 +3,14 @@ using Vomplayer.Wayland;
 
 namespace Vomplayer.Controls;
 
-// Pure-data snapshot consumed by the diagnostic overlay. Kept intentionally flat so the formatter has no GTK/mpv dependencies and is unit-testable without a runtime. IsWaylandPath is explicit rather than derived from OutputIsHdr==null + VrrClass==Unknown, because those combinations are also valid pre-warmup states on the Wayland path.
+// Pure-data snapshot consumed by the diagnostic overlay. Kept intentionally flat so the formatter has no GTK/mpv dependencies and is unit-testable without a runtime. IsWaylandPath is explicit rather than derived from DisplayIsHdr==null + VrrClass==Unknown, because those combinations are also valid pre-warmup states on the Wayland path.
+//
+// DisplayIsHdr vs HdrActive: DisplayIsHdr is the physical monitor's HDR capability (what the current wl_output's preferred image description advertises). HdrActive is whether the player has actually HDR-tagged the subsurface (the Hdr outcome of MainWindow.ApplyHdrPolicy — source PQ/HLG × display HDR × shim succeeded). HdrActive=true is rendered as "HDR (intended)" rather than "HDR" because the Wayland color-management protocol has no feedback channel: we can only claim we set the tag, not prove the compositor honors it at scan-out.
 public readonly record struct DiagnosticSnapshot(
     string? Hwdec,
     bool IsSourceHdr,
-    bool? OutputIsHdr,
+    bool? DisplayIsHdr,
+    bool HdrActive,
     VrrClassification VrrClass,
     int VrrMeasuredHzCenti,
     bool IsWaylandPath);
@@ -18,10 +21,11 @@ public static class DiagnosticFormatter
     {
         return new[]
         {
-            "hwdec:  " + FormatHwdec(s.Hwdec),
-            "source: " + (s.IsSourceHdr ? "HDR (PQ/HLG)" : "SDR"),
-            "output: " + FormatOutputHdr(s.IsWaylandPath, s.OutputIsHdr),
-            "VRR:    " + FormatVrr(s.IsWaylandPath, s.VrrClass, s.VrrMeasuredHzCenti),
+            "hwdec:   " + FormatHwdec(s.Hwdec),
+            "source:  " + (s.IsSourceHdr ? "HDR (PQ/HLG)" : "SDR"),
+            "display: " + FormatDisplayHdr(s.IsWaylandPath, s.DisplayIsHdr),
+            "active:  " + FormatHdrActive(s.IsWaylandPath, s.HdrActive),
+            "VRR:     " + FormatVrr(s.IsWaylandPath, s.VrrClass, s.VrrMeasuredHzCenti),
         };
     }
 
@@ -35,17 +39,27 @@ public static class DiagnosticFormatter
         return hwdec;
     }
 
-    private static string FormatOutputHdr(bool isWaylandPath, bool? outputIsHdr)
+    private static string FormatDisplayHdr(bool isWaylandPath, bool? displayIsHdr)
     {
         if (!isWaylandPath)
         {
             return "N/A (GLArea)";
         }
-        if (outputIsHdr == null)
+        if (displayIsHdr == null)
         {
             return "unknown";
         }
-        return outputIsHdr.Value ? "HDR" : "SDR";
+        return displayIsHdr.Value ? "HDR" : "SDR";
+    }
+
+    private static string FormatHdrActive(bool isWaylandPath, bool hdrActive)
+    {
+        if (!isWaylandPath)
+        {
+            return "N/A (GLArea)";
+        }
+        // "(intended)" hedges honestly: we've set the Wayland image description and mpv target-trc, but the protocol has no feedback channel that would let us prove the compositor is actually scanning out in HDR. If the user hits this line reading HDR and their eyes disagree, the culprit is somewhere past our last observable hop.
+        return hdrActive ? "HDR (intended)" : "SDR";
     }
 
     private static string FormatVrr(bool isWaylandPath, VrrClassification cls, int measuredHzCenti)

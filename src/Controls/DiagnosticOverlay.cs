@@ -12,6 +12,7 @@ public sealed class DiagnosticOverlay : IDisposable
 
     private readonly Vomplayer.Playback.Playback playback;
     private readonly VideoSurface? videoSurface;
+    private readonly Func<bool> getHdrActive;
     private readonly Gtk.Box box;
     private readonly Gtk.Label[] labels;
 
@@ -26,14 +27,22 @@ public sealed class DiagnosticOverlay : IDisposable
         }
     }
 
-    public DiagnosticOverlay(Vomplayer.Playback.Playback playback, VideoSurface? videoSurface)
+    // getHdrActive: returns true iff the player has actually HDR-tagged the subsurface (MainWindow.ApplyHdrPolicy's Hdr outcome). Every other state — intentional SDR, --sdr override, shim refusal, pre-first-apply default — collapses to false and renders as "SDR"; the Failed-specific distinction is kept internal to ApplyHdrPolicy for the stderr log. Shaped as a callback rather than a concrete MainWindow reference because the HDR policy isn't conceptually owned by MainWindow — it's currently housed there but belongs on a dedicated HdrPolicy object whenever that refactor lands.
+    //
+    // Called on the main thread from the 1 Hz OnTick. ApplyHdrPolicy also runs on the main thread (both OnSourceHdrChanged and OnCurrentOutputHdrChanged are posted there), so there's no cross-thread concern with the current caller. If a future producer writes the backing field from off-main, that invariant breaks and the read needs hardening.
+    public DiagnosticOverlay(Vomplayer.Playback.Playback playback, VideoSurface? videoSurface, Func<bool> getHdrActive)
     {
         if (playback == null)
         {
             throw new ArgumentNullException(nameof(playback));
         }
+        if (getHdrActive == null)
+        {
+            throw new ArgumentNullException(nameof(getHdrActive));
+        }
         this.playback = playback;
         this.videoSurface = videoSurface;
+        this.getHdrActive = getHdrActive;
 
         box = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         box.SetHalign(Gtk.Align.End);
@@ -44,7 +53,7 @@ public sealed class DiagnosticOverlay : IDisposable
         box.SetCanTarget(false);
         box.AddCssClass("vom-diagnostic");
 
-        labels = new Gtk.Label[4];
+        labels = new Gtk.Label[5];
         for (int i = 0; i < labels.Length; i++)
         {
             var label = Gtk.Label.New("");
@@ -110,18 +119,19 @@ public sealed class DiagnosticOverlay : IDisposable
     {
         VrrClassification vrrClass = VrrClassification.Unknown;
         int measuredHzCenti = 0;
-        bool? outputHdr = null;
+        bool? displayHdr = null;
         bool isWaylandPath = videoSurface != null;
         if (videoSurface != null)
         {
             vrrClass = videoSurface.GetVrrClassification();
             measuredHzCenti = videoSurface.VrrMeasuredHzCenti;
-            outputHdr = videoSurface.CurrentOutputIsHdr;
+            displayHdr = videoSurface.CurrentOutputIsHdr;
         }
         return new DiagnosticSnapshot(
             Hwdec: playback.HwdecCurrent,
             IsSourceHdr: playback.IsSourceHdr,
-            OutputIsHdr: outputHdr,
+            DisplayIsHdr: displayHdr,
+            HdrActive: getHdrActive(),
             VrrClass: vrrClass,
             VrrMeasuredHzCenti: measuredHzCenti,
             IsWaylandPath: isWaylandPath);

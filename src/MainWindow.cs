@@ -119,11 +119,15 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             videoArea = area;
             videoSurface = surface;
             videoWidget = area;
-            // Combined HDR policy: enable HDR viewport only when both the source is PQ/HLG AND the current output advertises HDR. Two signals drive re-evaluation — Playback.SourceHdrChanged (per-video) and VideoSurface.CurrentOutputHdrChanged (output probe completes, user drags window cross-monitor, monitor HDR toggled). --sdr skips the subscriptions entirely so an explicit "force SDR" request can't be overridden by either signal.
+            // Combined HDR policy: enable HDR viewport only when both the source is PQ/HLG AND the current output advertises HDR. Two signals drive re-evaluation — Playback.SourceHdrChanged (per-video) and VideoSurface.CurrentOutputHdrChanged (output probe completes, user drags window cross-monitor, monitor HDR toggled). --sdr skips the subscriptions entirely so an explicit "force SDR" request can't be overridden by either signal; hdrActiveState is stamped Forced here so the diagnostic overlay renders "SDR (--sdr)" instead of plain "SDR" and the override is visible at a glance.
             if (!forceSdr)
             {
                 playback.SourceHdrChanged += OnSourceHdrChanged;
                 surface.CurrentOutputHdrChanged += OnCurrentOutputHdrChanged;
+            }
+            else
+            {
+                hdrActiveState = HdrActiveState.Forced;
             }
         }
         else
@@ -175,7 +179,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         videoOverlay.AddOverlay(noVideoBg);
 
         // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Constructed before BuildMenuBar to match the file's "assign then build menu" pattern (cf. viewModel at line 106); the menu action closure resolves `this.diagnosticOverlay` lazily at invoke time, so the ordering is stylistic rather than load-bearing.
-        diagnosticOverlay = new DiagnosticOverlay(playback, videoSurface);
+        diagnosticOverlay = new DiagnosticOverlay(playback, videoSurface, () => hdrActiveState == HdrActiveState.Hdr);
         videoOverlay.AddOverlay(diagnosticOverlay.Widget);
 
         menuBar = BuildMenuBar(app);
@@ -362,10 +366,23 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         viewModel.OnRenderContextReady();
     }
 
+    // Outcome of the most recent ApplyHdrPolicy. Kept as a four-state enum (rather than a bool) so the stderr log on transition into Failed can distinguish "compositor refused" from "intentional SDR" — the diagnostic overlay collapses every non-Hdr state to "SDR" and doesn't care about the internal distinction, but ApplyHdrPolicy does.
+    private enum HdrActiveState
+    {
+        // Subsurface untagged. Default pre-first-apply, or the explicit outcome when source or display is SDR.
+        Sdr,
+        // HDR tagging applied to the subsurface and mpv advanced to PQ targets.
+        Hdr,
+        // HDR was requested (source PQ/HLG + display HDR-capable) but VideoSurface.SetHdr(true) returned non-zero. Pixels scan out as SDR.
+        Failed,
+        // --sdr command-line override in effect. ApplyHdrPolicy never runs; state stays here for the process lifetime.
+        Forced,
+    }
+
     // Latest value from Playback.SourceHdrChanged. Playback fires on transitions only, not on every frame, so caching here lets ApplyHdrPolicy combine it with the current output bit on output-side changes too.
     private bool lastSourceHdr;
-    // Last applied HDR state, used to filter the transition log to real changes. null before the first ApplyHdrPolicy call.
-    private bool? lastAppliedHdr;
+    // Initialized in the constructor: Forced when --sdr is in effect (policy never runs), Sdr otherwise (default pre-first-apply — subsurface untagged, equivalent at the pixel level to an explicit SDR policy).
+    private HdrActiveState hdrActiveState;
     private static readonly bool logHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
 
     private void OnSourceHdrChanged(bool isHdr)
@@ -388,27 +405,41 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
         bool? outputHdr = videoSurface.CurrentOutputIsHdr;
         bool wantHdr = lastSourceHdr && outputHdr == true;
-        bool applied;
+        HdrActiveState newState;
         if (wantHdr)
         {
-            applied = videoSurface.SetHdr(true) == 0;
+            bool applied = videoSurface.SetHdr(true) == 0;
             if (applied)
             {
                 playback.EnableHdrOutput();
+                newState = HdrActiveState.Hdr;
+            }
+            else
+            {
+                // Shim refused (no wp_color_manager_v1 advertised, description build failed, etc). Do NOT advance mpv to PQ targets — that would leave mpv rendering PQ-encoded pixels into an untagged surface, which the compositor would interpret as sRGB and display as blown-out whites. Staying SDR on both halves is safe.
+                newState = HdrActiveState.Failed;
             }
         }
         else
         {
             videoSurface.SetHdr(false);
             playback.DisableHdrOutput();
-            applied = false;
+            newState = HdrActiveState.Sdr;
         }
-        if (logHdr && lastAppliedHdr != applied)
+        if (newState != hdrActiveState)
         {
-            string outStr = outputHdr.HasValue ? (outputHdr.Value ? "HDR" : "SDR") : "unknown";
-            Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} output={outStr} → {(applied ? "HDR" : "SDR")}");
+            // Silent error handling is banned (CLAUDE.md). Failed = the user asked for HDR and the compositor refused; surface it unconditionally rather than gating on VOMPL_LOG_HDR. Only logged on transitions into Failed so a stuck-in-Failed state doesn't spam.
+            if (newState == HdrActiveState.Failed)
+            {
+                Console.Error.WriteLine("[vompl] hdr: requested but compositor refused (no wp_color_manager_v1 or description build failed) — staying SDR");
+            }
+            if (logHdr)
+            {
+                string outStr = outputHdr.HasValue ? (outputHdr.Value ? "HDR" : "SDR") : "unknown";
+                Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} display={outStr} → {newState}");
+            }
         }
-        lastAppliedHdr = applied;
+        hdrActiveState = newState;
     }
 
     private void OnVideoRenderFailed(int code)

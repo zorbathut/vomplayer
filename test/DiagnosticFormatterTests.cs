@@ -11,7 +11,8 @@ public class DiagnosticFormatterTests
         return new DiagnosticSnapshot(
             Hwdec: "vaapi",
             IsSourceHdr: false,
-            OutputIsHdr: false,
+            DisplayIsHdr: false,
+            HdrActive: false,
             VrrClass: VrrClassification.Fixed,
             VrrMeasuredHzCenti: 6000,
             IsWaylandPath: true);
@@ -21,21 +22,21 @@ public class DiagnosticFormatterTests
     public void HwdecNullRendersAsNone()
     {
         var s = Baseline() with { Hwdec = null };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:  (none)"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:   (none)"));
     }
 
     [Test]
     public void HwdecEmptyRendersAsNone()
     {
         var s = Baseline() with { Hwdec = "" };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:  (none)"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:   (none)"));
     }
 
     [Test]
     public void HwdecRendersVerbatim()
     {
         var s = Baseline() with { Hwdec = "nvdec" };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:  nvdec"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:   nvdec"));
     }
 
     // mpv reports literal "no" for software fallback in some contexts (alongside the null/empty paths Playback.UpdateHwdecCurrent normalizes). The formatter passes it through verbatim — same shape as the existing stderr log line "[vomplayer] hwdec: no" — rather than re-normalizing to "(none)". Pinning the current behavior here so a future "helpful" re-normalization is a deliberate test update.
@@ -43,56 +44,79 @@ public class DiagnosticFormatterTests
     public void HwdecNoRendersVerbatim()
     {
         var s = Baseline() with { Hwdec = "no" };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:  no"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[0], Is.EqualTo("hwdec:   no"));
     }
 
     [Test]
     public void SourceHdrRendersHdrTag()
     {
         var s = Baseline() with { IsSourceHdr = true };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[1], Is.EqualTo("source: HDR (PQ/HLG)"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[1], Is.EqualTo("source:  HDR (PQ/HLG)"));
     }
 
     [Test]
     public void SourceSdrRendersSdr()
     {
         var s = Baseline() with { IsSourceHdr = false };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[1], Is.EqualTo("source: SDR"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[1], Is.EqualTo("source:  SDR"));
     }
 
     [Test]
-    public void OutputHdrOnWaylandTrueRendersHdr()
+    public void DisplayHdrOnWaylandTrueRendersHdr()
     {
-        var s = Baseline() with { OutputIsHdr = true };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("output: HDR"));
+        var s = Baseline() with { DisplayIsHdr = true };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: HDR"));
     }
 
     [Test]
-    public void OutputHdrOnWaylandFalseRendersSdr()
+    public void DisplayHdrOnWaylandFalseRendersSdr()
     {
-        var s = Baseline() with { OutputIsHdr = false };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("output: SDR"));
+        var s = Baseline() with { DisplayIsHdr = false };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: SDR"));
     }
 
     [Test]
-    public void OutputHdrOnWaylandNullRendersUnknown()
+    public void DisplayHdrOnWaylandNullRendersUnknown()
     {
-        var s = Baseline() with { OutputIsHdr = null };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("output: unknown"));
+        var s = Baseline() with { DisplayIsHdr = null };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: unknown"));
     }
 
     [Test]
-    public void OutputHdrOnGlareaRendersNA()
+    public void DisplayHdrOnGlareaRendersNA()
     {
-        var s = Baseline() with { IsWaylandPath = false, OutputIsHdr = null };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("output: N/A (GLArea)"));
+        var s = Baseline() with { IsWaylandPath = false, DisplayIsHdr = null };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: N/A (GLArea)"));
+    }
+
+    // The "active:" line reports whether the player has actually HDR-tagged the subsurface — the Hdr outcome of MainWindow.ApplyHdrPolicy. Every other state (intentional SDR, shim refusal, --sdr override, pre-first-apply) collapses to "SDR"; internal distinctions live in the ApplyHdrPolicy stderr log, not the overlay. The "(intended)" hedge on the HDR side is deliberate: Wayland color-management has no feedback channel proving the compositor honors our request at scan-out.
+    [Test]
+    public void HdrActiveTrueRendersClaimed()
+    {
+        var s = Baseline() with { HdrActive = true };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  HDR (intended)"));
+    }
+
+    [Test]
+    public void HdrActiveFalseRendersSdr()
+    {
+        var s = Baseline() with { HdrActive = false };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  SDR"));
+    }
+
+    [Test]
+    public void HdrActiveOnGlareaRendersNA()
+    {
+        // On GLArea, HdrActive is ignored because IsWaylandPath=false short-circuits. Verify by setting it to true (which would otherwise render "HDR (intended)").
+        var s = Baseline() with { IsWaylandPath = false, DisplayIsHdr = null, HdrActive = true };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  N/A (GLArea)"));
     }
 
     [Test]
     public void VrrOnGlareaRendersNA()
     {
-        var s = Baseline() with { IsWaylandPath = false, VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 0 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    N/A (GLArea)"));
+        var s = Baseline() with { IsWaylandPath = false, VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 0, DisplayIsHdr = null };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     N/A (GLArea)"));
     }
 
     [Test]
@@ -100,7 +124,7 @@ public class DiagnosticFormatterTests
     {
         // Pre-warmup: ring not yet full → classifier returns Unknown. We deliberately omit the Hz reading because a partial-ring measurement would be misleading; "UNKNOWN" alone is enough to communicate "still warming up."
         var s = Baseline() with { VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 0 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    UNKNOWN"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     UNKNOWN"));
     }
 
     [Test]
@@ -108,14 +132,14 @@ public class DiagnosticFormatterTests
     {
         // Defensive: the formatter must not leak measured Hz when classification is Unknown, even if the bridge happens to have a partial-ring measurement. Whether the bridge ever does this is implementation detail of the bridge — the formatter contract is "Unknown ⇒ no Hz."
         var s = Baseline() with { VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 5000 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    UNKNOWN"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     UNKNOWN"));
     }
 
     [Test]
     public void VrrFixedAt60Hz()
     {
         var s = Baseline() with { VrrClass = VrrClassification.Fixed, VrrMeasuredHzCenti = 6000 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    FIXED @ 60.00 Hz"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     FIXED @ 60.00 Hz"));
     }
 
     [Test]
@@ -123,21 +147,21 @@ public class DiagnosticFormatterTests
     {
         // Canonical bug case: 50 fps content scanned out via VRR. Measured rate (50.00) is the useful number; the panel's 60Hz nominal mode is irrelevant to what the player is presenting.
         var s = Baseline() with { VrrClass = VrrClassification.Vrr, VrrMeasuredHzCenti = 5000 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    VRR @ 50.00 Hz"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     VRR @ 50.00 Hz"));
     }
 
     [Test]
     public void VrrVrrAt144Hz()
     {
         var s = Baseline() with { VrrClass = VrrClassification.Vrr, VrrMeasuredHzCenti = 14400 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    VRR @ 144.00 Hz"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     VRR @ 144.00 Hz"));
     }
 
     [Test]
     public void VrrCantTellRenders()
     {
         var s = Baseline() with { VrrClass = VrrClassification.CantTell, VrrMeasuredHzCenti = 6000 };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("VRR:    CANT-TELL @ 60.00 Hz"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     CANT-TELL @ 60.00 Hz"));
     }
 
     [Test]
@@ -146,16 +170,18 @@ public class DiagnosticFormatterTests
         var s = new DiagnosticSnapshot(
             Hwdec: "vaapi",
             IsSourceHdr: true,
-            OutputIsHdr: true,
+            DisplayIsHdr: true,
+            HdrActive: true,
             VrrClass: VrrClassification.Fixed,
             VrrMeasuredHzCenti: 6000,
             IsWaylandPath: true);
         Assert.That(DiagnosticFormatter.FormatLines(s), Is.EqualTo(new[]
         {
-            "hwdec:  vaapi",
-            "source: HDR (PQ/HLG)",
-            "output: HDR",
-            "VRR:    FIXED @ 60.00 Hz",
+            "hwdec:   vaapi",
+            "source:  HDR (PQ/HLG)",
+            "display: HDR",
+            "active:  HDR (intended)",
+            "VRR:     FIXED @ 60.00 Hz",
         }));
     }
 }
