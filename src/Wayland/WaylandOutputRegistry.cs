@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace Vomplayer.Wayland;
 
-// Process-global registry of wl_output state, keyed by the compositor-assigned registry name (unique per session). Populated by trampoline callbacks from native/hdr_helper.c — see vom_set_output_callbacks in the C shim.
+// Process-global registry of wl_output state, keyed by the compositor-assigned registry name (unique per session). Populated by trampoline callbacks from native/hdr_helper.c — see vompl_set_output_callbacks in the C shim.
 //
 // Tracks two per-output facts:
 //   - current-mode refresh rate (mHz), consumed by the VRR classifier.

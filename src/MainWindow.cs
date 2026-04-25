@@ -60,8 +60,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private const uint ControlsHideDelayMs = 2000;
     // Ignore motion events whose position is within this many px of the position at the last timer arm. Filters out sub-pixel jitter and any spurious synthetic events the compositor/GTK might emit. Real user motion easily exceeds this.
     private const double MotionDeadZonePx = 3.0;
-    // Set VOM_FS_DEBUG=1 in the environment to dump [fs] traces to stderr covering timer arms, timer fires, motion events (rate-limited), and the hide path — helps diagnose why autohide isn't firing if the default logic fails in the wild.
-    private static readonly bool FsDebug = Environment.GetEnvironmentVariable("VOM_FS_DEBUG") == "1";
+    // Set VOMPL_FS_DEBUG=1 in the environment to dump [fs] traces to stderr covering timer arms, timer fires, motion events (rate-limited), and the hide path — helps diagnose why autohide isn't firing if the default logic fails in the wild.
+    private static readonly bool FsDebug = Environment.GetEnvironmentVariable("VOMPL_FS_DEBUG") == "1";
     private static readonly System.Diagnostics.Stopwatch FsStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
     private static void FsLog(string msg)
@@ -99,9 +99,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         SetApplication(app);
         Title = forceSdr ? "Vomplayer — SDR" : "Vomplayer";
         SetDefaultSize(1280, 720);
-        AddCssClass("vom-main-window");
+        AddCssClass("vompl-main-window");
 
-        InstallVomCss();
+        InstallVomplCss();
 
         var filePicker = new FilePickerGtk(this);
         viewModel = new ViewModelMain(playback, filePicker);
@@ -153,9 +153,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         durationLabel = Gtk.Label.New("00:00");
 
         controlsBox = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
-        // Spacing around the bar comes from CSS padding on .vom-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges. vom-chrome gives it the theme bg; vom-controls-bar adds the padding. Split so the fullscreen OSD swap (below) only touches the background/padding pair and leaves vom-chrome off (OSD has its own semi-transparent fill).
-        controlsBox.AddCssClass("vom-chrome");
-        controlsBox.AddCssClass("vom-controls-bar");
+        // Spacing around the bar comes from CSS padding on .vompl-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges. vompl-chrome gives it the theme bg; vompl-controls-bar adds the padding. Split so the fullscreen OSD swap (below) only touches the background/padding pair and leaves vompl-chrome off (OSD has its own semi-transparent fill).
+        controlsBox.AddCssClass("vompl-chrome");
+        controlsBox.AddCssClass("vompl-controls-bar");
         controlsBox.Append(openButton);
         controlsBox.Append(playPauseButton);
         controlsBox.Append(stopButton);
@@ -171,7 +171,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         // Black placeholder that fills the video region while the Wayland subsurface has no buffer attached yet (subsurface placed below the transparent parent shows the desktop through otherwise). Hidden permanently on mpv's FirstFrameRendered; we don't re-show on stop, since mpv keeps the last rendered frame in the subsurface and that's a better "stopped" indicator than flashing back to black.
         noVideoBg = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
-        noVideoBg.AddCssClass("vom-no-video-bg");
+        noVideoBg.AddCssClass("vompl-no-video-bg");
         noVideoBg.SetHalign(Gtk.Align.Fill);
         noVideoBg.SetValign(Gtk.Align.Fill);
         noVideoBg.SetHexpand(true);
@@ -456,11 +456,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
     }
 
-    // The main window's own CSS background must be transparent so the video subsurface (placed below the parent wl_surface) shows through wherever no widget paints opaque. GTK4's render tree is parent-first, child-on-top with alpha compositing — a child's transparent background can't punch a hole through an opaque parent, so the only way to get alpha=0 anywhere is for the window itself not to paint. Keep the rule scoped by the vom-main-window class so About/file/other dialogs (also Gtk.Window) aren't dragged along. In practice the rendered transparent area is exactly the video widget region, since every other chrome widget opts in to opaque via the vom-chrome class (menu bar, controls bar in windowed mode). Priority APPLICATION (600) beats theme defaults.
-    private static void InstallVomCss()
+    // The main window's own CSS background must be transparent so the video subsurface (placed below the parent wl_surface) shows through wherever no widget paints opaque. GTK4's render tree is parent-first, child-on-top with alpha compositing — a child's transparent background can't punch a hole through an opaque parent, so the only way to get alpha=0 anywhere is for the window itself not to paint. Keep the rule scoped by the vompl-main-window class so About/file/other dialogs (also Gtk.Window) aren't dragged along. In practice the rendered transparent area is exactly the video widget region, since every other chrome widget opts in to opaque via the vompl-chrome class (menu bar, controls bar in windowed mode). Priority APPLICATION (600) beats theme defaults.
+    private static void InstallVomplCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vom-main-window { background: transparent; } .vom-chrome { background-color: @theme_bg_color; } .vom-controls-bar { padding: 6px; } .osd { padding: 6px; } .vom-no-video-bg { background-color: black; } .vom-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; }");
+        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
@@ -569,7 +569,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         ApplyFullscreenState(on);
     }
 
-    // Reparent controlsBox between rootBox (windowed, stacked below video) and videoOverlay (fullscreen, floating over the bottom of the video). Toggling visibility on the overlay child doesn't resize the video widget, so controls appearing/disappearing during auto-hide don't cause the video to rescale. The background/padding class pair swaps at the same time: windowed uses vom-chrome + vom-controls-bar (opaque theme bg + 6px padding); fullscreen uses osd (GTK's built-in semi-transparent dark over video). Parent-guarded: if ApplyFullscreenState ever runs twice for the same state (e.g., from our toggle and again from notify::fullscreened after a compositor-initiated transition racing with our own), the double-remove/double-add would fault on a non-child widget.
+    // Reparent controlsBox between rootBox (windowed, stacked below video) and videoOverlay (fullscreen, floating over the bottom of the video). Toggling visibility on the overlay child doesn't resize the video widget, so controls appearing/disappearing during auto-hide don't cause the video to rescale. The background/padding class pair swaps at the same time: windowed uses vompl-chrome + vompl-controls-bar (opaque theme bg + 6px padding); fullscreen uses osd (GTK's built-in semi-transparent dark over video). Parent-guarded: if ApplyFullscreenState ever runs twice for the same state (e.g., from our toggle and again from notify::fullscreened after a compositor-initiated transition racing with our own), the double-remove/double-add would fault on a non-child widget.
     private void ApplyFullscreenState(bool on)
     {
         FsLog($"apply on={on}");
@@ -586,8 +586,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 rootBox.Remove(controlsBox);
             }
             controlsBox.SetValign(Gtk.Align.End);
-            controlsBox.RemoveCssClass("vom-chrome");
-            controlsBox.RemoveCssClass("vom-controls-bar");
+            controlsBox.RemoveCssClass("vompl-chrome");
+            controlsBox.RemoveCssClass("vompl-controls-bar");
             controlsBox.AddCssClass("osd");
             if (controlsBox.Parent != videoOverlay)
             {
@@ -604,8 +604,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 videoOverlay.RemoveOverlay(controlsBox);
             }
             controlsBox.RemoveCssClass("osd");
-            controlsBox.AddCssClass("vom-chrome");
-            controlsBox.AddCssClass("vom-controls-bar");
+            controlsBox.AddCssClass("vompl-chrome");
+            controlsBox.AddCssClass("vompl-controls-bar");
             controlsBox.SetValign(Gtk.Align.Fill);
             if (controlsBox.Parent != rootBox)
             {

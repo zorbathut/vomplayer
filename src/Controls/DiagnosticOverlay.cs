@@ -51,7 +51,7 @@ public sealed class DiagnosticOverlay : IDisposable
         box.SetVexpand(false);
         // Clicks / pointer events fall through to widgets underneath. No EventController is attached, so we don't need a Wayland input-region dance here; CanTarget=false is enough for GTK-side hit-testing.
         box.SetCanTarget(false);
-        box.AddCssClass("vom-diagnostic");
+        box.AddCssClass("vompl-diagnostic");
 
         labels = new Gtk.Label[5];
         for (int i = 0; i < labels.Length; i++)

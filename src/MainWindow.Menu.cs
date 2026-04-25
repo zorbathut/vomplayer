@@ -89,8 +89,8 @@ public sealed partial class MainWindow
         root.AppendSubmenu("Help", helpMenu);
 
         var bar = Gtk.PopoverMenuBar.NewFromModel(root);
-        // Without vom-chrome the bar's CSS node (which is `menubar`, not `popovermenubar` — GTK uses the legacy name) inherits the transparent main-window background and shows desktop through. The theme's default menubar fill exists but doesn't reliably cover in our setup. Explicit class makes the opaque fill unambiguous.
-        bar.AddCssClass("vom-chrome");
+        // Without vompl-chrome the bar's CSS node (which is `menubar`, not `popovermenubar` — GTK uses the legacy name) inherits the transparent main-window background and shows desktop through. The theme's default menubar fill exists but doesn't reliably cover in our setup. Explicit class makes the opaque fill unambiguous.
+        bar.AddCssClass("vompl-chrome");
         return bar;
     }
 

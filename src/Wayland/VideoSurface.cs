@@ -20,7 +20,7 @@ public sealed partial class VideoSurface : IDisposable
 
     private readonly Gtk.Window window;
     private readonly VideoArea area;
-    private VomVideoSurface? surface;
+    private VomplVideoSurface? surface;
     private MpvRenderContext? renderContext;
     private MpvDispatcher? dispatcher;
     // Cached for TryCreateRenderContext, which is also reachable via SetMpvDispatcher (post-realize). The wl_display is GDK-app-scope and remains valid across the render-context lifetime.
@@ -114,7 +114,7 @@ public sealed partial class VideoSurface : IDisposable
         window.OnUnrealize += OnWindowUnrealize;
         area.GeometryChanged += OnAreaGeometryChanged;
 
-        // Static-event subscription — must be unhooked in Dispose or we'd leak this VideoSurface for the process lifetime. The Bridge-side subscription is hooked/unhooked with the VomVideoSurface lifetime in TryCreateRenderContext / TearDown.
+        // Static-event subscription — must be unhooked in Dispose or we'd leak this VideoSurface for the process lifetime. The Bridge-side subscription is hooked/unhooked with the VomplVideoSurface lifetime in TryCreateRenderContext / TearDown.
         WaylandOutputRegistry.IsHdrChanged += OnRegistryIsHdrChanged;
     }
 
@@ -170,8 +170,8 @@ public sealed partial class VideoSurface : IDisposable
         try
         {
             // Must register output callbacks before the shim's first ensure_globals call (triggered by Create below). The initial wl_output + mode events arrive during its two roundtrips; without the callbacks wired, WaylandOutputRegistry would miss them and the VRR classifier would stay Unknown.
-            VomOutputCallbacks.EnsureRegistered();
-            surface = new VomVideoSurface(wlDisplay, wlSurface, initialW, initialH, initialScale);
+            VomplOutputCallbacks.EnsureRegistered();
+            surface = new VomplVideoSurface(wlDisplay, wlSurface, initialW, initialH, initialScale);
         }
         catch (Exception ex)
         {
@@ -179,7 +179,7 @@ public sealed partial class VideoSurface : IDisposable
             RenderFailed?.Invoke(-1);
             return;
         }
-        // Note the ordering: ensure_globals (inside the VomVideoSurface constructor above) synchronously pumps roundtrips. If the compositor fires wl_surface.enter during those roundtrips, it lands on the bridge BEFORE this subscription, so the first ActiveOutputsChanged that fires through us is for a later mutation. That's acceptable because CurrentOutputIsHdr.get reads bridge+registry state directly — ApplyHdrPolicy will see the correct combined value whenever it next runs (from SourceHdrChanged or a real output change).
+        // Note the ordering: ensure_globals (inside the VomplVideoSurface constructor above) synchronously pumps roundtrips. If the compositor fires wl_surface.enter during those roundtrips, it lands on the bridge BEFORE this subscription, so the first ActiveOutputsChanged that fires through us is for a later mutation. That's acceptable because CurrentOutputIsHdr.get reads bridge+registry state directly — ApplyHdrPolicy will see the correct combined value whenever it next runs (from SourceHdrChanged or a real output change).
         surface.Bridge.ActiveOutputsChanged += OnBridgeActiveOutputsChanged;
 
         if (pendingGeometry.HasValue)

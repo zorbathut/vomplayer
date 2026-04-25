@@ -2,11 +2,11 @@
 //
 // Entry points:
 //
-// 1. vom_video_surface_* API
-//    Creates a wl_subsurface child of a given parent wl_surface, places it BELOW the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window. Subsurface starts untagged (compositor treats as sRGB); vom_video_surface_set_hdr toggles a PQ/BT.2020 image description at runtime, staged for flush on the next eglSwapBuffers. The caller drives rendering: make_current → (caller's render) → swap.
+// 1. vompl_video_surface_* API
+//    Creates a wl_subsurface child of a given parent wl_surface, places it BELOW the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window. Subsurface starts untagged (compositor treats as sRGB); vompl_video_surface_set_hdr toggles a PQ/BT.2020 image description at runtime, staged for flush on the next eglSwapBuffers. The caller drives rendering: make_current → (caller's render) → swap.
 //
 // 2. Output + presentation-feedback trampolines
-//    Process-global output events (added / mode / removed) forward to callbacks registered via vom_set_output_callbacks. Per-surface wl_surface.enter/leave and wp_presentation_feedback.presented/discarded events forward to callbacks registered via vom_video_surface_set_callbacks. The consumer (C# FrameTimingBridge + WaylandOutputRegistry) owns all state derived from these events.
+//    Process-global output events (added / mode / removed) forward to callbacks registered via vompl_set_output_callbacks. Per-surface wl_surface.enter/leave and wp_presentation_feedback.presented/discarded events forward to callbacks registered via vompl_video_surface_set_callbacks. The consumer (C# FrameTimingBridge + WaylandOutputRegistry) owns all state derived from these events.
 //
 // The wp_color_manager_v1 + wp_presentation + wl_output globals are bound once per process (via a retained wl_registry on first use).
 //
@@ -28,25 +28,25 @@
 // Callback function-pointer types forwarded up to the C# layer.
 //---------------------------------------------------------------
 
-typedef void (*vom_output_mode_fn)(uint32_t registry_name, int32_t refresh_mhz);
-typedef void (*vom_output_removed_fn)(uint32_t registry_name);
+typedef void (*vompl_output_mode_fn)(uint32_t registry_name, int32_t refresh_mhz);
+typedef void (*vompl_output_removed_fn)(uint32_t registry_name);
 // Forwards the raw tf_named observation for an output's preferred image description. has_tf_named is 0 if no tf_named event arrived before the info `done` (compositor described the TF some other way, or the description failed). Classification into HDR/SDR lives in C# (HdrClassifier).
-typedef void (*vom_output_image_info_fn)(uint32_t registry_name, int has_tf_named, uint32_t tf_named);
+typedef void (*vompl_output_image_info_fn)(uint32_t registry_name, int has_tf_named, uint32_t tf_named);
 
-typedef void (*vom_surface_enter_fn)(void *data, uint32_t registry_name);
-typedef void (*vom_surface_leave_fn)(void *data, uint32_t registry_name);
-typedef void (*vom_feedback_presented_fn)(void *data, uint64_t tv_ns, uint32_t refresh_ns);
-typedef void (*vom_feedback_discarded_fn)(void *data);
+typedef void (*vompl_surface_enter_fn)(void *data, uint32_t registry_name);
+typedef void (*vompl_surface_leave_fn)(void *data, uint32_t registry_name);
+typedef void (*vompl_feedback_presented_fn)(void *data, uint64_t tv_ns, uint32_t refresh_ns);
+typedef void (*vompl_feedback_discarded_fn)(void *data);
 
-static vom_output_mode_fn g_output_mode_cb;
-static vom_output_removed_fn g_output_removed_cb;
-static vom_output_image_info_fn g_output_image_info_cb;
+static vompl_output_mode_fn g_output_mode_cb;
+static vompl_output_removed_fn g_output_removed_cb;
+static vompl_output_image_info_fn g_output_image_info_cb;
 
 //---------------------------------------------------------------
 // Process-global Wayland globals, resolved lazily on first use.
 //---------------------------------------------------------------
 
-// Per-output record. The cached mode+image-info fields exist purely for replay: if vom_set_output_callbacks is called after the initial wl_output enumeration has already fired, we re-deliver the cached values so the consumer doesn't miss them. Under steady-state, the consumer (C#) is the authoritative store.
+// Per-output record. The cached mode+image-info fields exist purely for replay: if vompl_set_output_callbacks is called after the initial wl_output enumeration has already fired, we re-deliver the cached values so the consumer doesn't miss them. Under steady-state, the consumer (C#) is the authoritative store.
 //
 // HDR probe state (cm_output, pending_desc, pending_info, pending_tf_*) drives a single-shot ready→get_information→tf_named→done handshake per probe. A fresh probe starts on initial output bind and on every wp_color_management_output_v1.image_description_changed event; any in-flight proxies are destroyed before restarting so at most one chain is live per output at a time.
 struct output_info
@@ -89,8 +89,8 @@ static uint32_t lookup_output_registry_name(struct wl_output *o)
     return 0;
 }
 
-// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes + image info so consumer state catches up). The replay decouples ordering between vom_set_output_callbacks and whatever triggers ensure_globals.
-void vom_set_output_callbacks(vom_output_mode_fn mode, vom_output_removed_fn removed, vom_output_image_info_fn image_info)
+// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes + image info so consumer state catches up). The replay decouples ordering between vompl_set_output_callbacks and whatever triggers ensure_globals.
+void vompl_set_output_callbacks(vompl_output_mode_fn mode, vompl_output_removed_fn removed, vompl_output_image_info_fn image_info)
 {
     g_output_mode_cb = mode;
     g_output_removed_cb = removed;
@@ -566,16 +566,16 @@ static struct wp_image_description_v1 *build_sdr_description(struct wl_display *
 // Entry point 1: subsurface + EGL surface + HDR (used by the Wayland path).
 //---------------------------------------------------------------
 
-// In-flight wp_presentation_feedback record. The compositor sends `presented` or `discarded` asynchronously; without tracking, a feedback delivered after vom_video_surface_destroy has freed `vs` would UAF the listener data (and, on the C# side, a freed-then-recycled GCHandle). By keeping a per-vs list of outstanding proxies, destroy() can wp_presentation_feedback_destroy all of them synchronously and nuke their listeners before freeing vs.
+// In-flight wp_presentation_feedback record. The compositor sends `presented` or `discarded` asynchronously; without tracking, a feedback delivered after vompl_video_surface_destroy has freed `vs` would UAF the listener data (and, on the C# side, a freed-then-recycled GCHandle). By keeping a per-vs list of outstanding proxies, destroy() can wp_presentation_feedback_destroy all of them synchronously and nuke their listeners before freeing vs.
 struct fb_node
 {
     struct wp_presentation_feedback *fb;
     struct fb_node *next;
     struct fb_node *prev;
-    struct vom_video_surface *vs;
+    struct vompl_video_surface *vs;
 };
 
-struct vom_video_surface
+struct vompl_video_surface
 {
     struct wl_display *display;
     struct wl_surface *parent;
@@ -591,12 +591,12 @@ struct vom_video_surface
     int buffer_w;
     int buffer_h;
 
-    // Callback trampoline targets. Populated by vom_video_surface_set_callbacks.
+    // Callback trampoline targets. Populated by vompl_video_surface_set_callbacks.
     void *cb_data;
-    vom_surface_enter_fn enter_cb;
-    vom_surface_leave_fn leave_cb;
-    vom_feedback_presented_fn presented_cb;
-    vom_feedback_discarded_fn discarded_cb;
+    vompl_surface_enter_fn enter_cb;
+    vompl_surface_leave_fn leave_cb;
+    vompl_feedback_presented_fn presented_cb;
+    vompl_feedback_discarded_fn discarded_cb;
 
     // Doubly-linked list of in-flight feedback proxies; head only. Listener receives fb_node* as user data, so unlink on terminal event is O(1).
     struct fb_node *fb_head;
@@ -605,7 +605,7 @@ struct vom_video_surface
 static void vs_surface_handle_enter(void *data, struct wl_surface *s, struct wl_output *o)
 {
     (void)s;
-    struct vom_video_surface *vs = data;
+    struct vompl_video_surface *vs = data;
     uint32_t name = lookup_output_registry_name(o);
     if (name != 0 && vs->enter_cb)
     {
@@ -616,7 +616,7 @@ static void vs_surface_handle_enter(void *data, struct wl_surface *s, struct wl_
 static void vs_surface_handle_leave(void *data, struct wl_surface *s, struct wl_output *o)
 {
     (void)s;
-    struct vom_video_surface *vs = data;
+    struct vompl_video_surface *vs = data;
     uint32_t name = lookup_output_registry_name(o);
     if (name != 0 && vs->leave_cb)
     {
@@ -647,7 +647,7 @@ static void feedback_presented(void *data, struct wp_presentation_feedback *fb,
 {
     (void)seq_hi; (void)seq_lo; (void)flags;
     struct fb_node *n = data;
-    struct vom_video_surface *vs = n->vs;
+    struct vompl_video_surface *vs = n->vs;
     uint64_t now_ns = (((uint64_t)tv_sec_hi << 32) | tv_sec_lo) * 1000000000ULL + tv_nsec;
     if (vs->presented_cb)
     {
@@ -661,7 +661,7 @@ static void feedback_presented(void *data, struct wp_presentation_feedback *fb,
 static void feedback_discarded(void *data, struct wp_presentation_feedback *fb)
 {
     struct fb_node *n = data;
-    struct vom_video_surface *vs = n->vs;
+    struct vompl_video_surface *vs = n->vs;
     if (vs->discarded_cb)
     {
         vs->discarded_cb(vs->cb_data);
@@ -697,7 +697,7 @@ static int choose_egl_config(EGLDisplay egl_display, EGLConfig *out)
     return 0;
 }
 
-struct vom_video_surface *vom_video_surface_create(
+struct vompl_video_surface *vompl_video_surface_create(
     struct wl_display *display, struct wl_surface *parent,
     int initial_w, int initial_h, int initial_buffer_scale)
 {
@@ -712,7 +712,7 @@ struct vom_video_surface *vom_video_surface_create(
         return NULL;
     }
 
-    struct vom_video_surface *vs = calloc(1, sizeof(*vs));
+    struct vompl_video_surface *vs = calloc(1, sizeof(*vs));
     if (!vs)
     {
         return NULL;
@@ -754,7 +754,7 @@ struct vom_video_surface *vom_video_surface_create(
     wl_subsurface_set_position(vs->wl_subsurface, 0, 0);
     wl_subsurface_set_desync(vs->wl_subsurface);
 
-    // The subsurface starts with no wp_color_management_v1 image description attached. C# calls vom_video_surface_set_hdr synchronously from OnVideoRenderContextReadyWayland, then again per-video from ApplyHdrPolicy as policy decisions arrive (SourceHdrChanged / CurrentOutputHdrChanged), staging either a PQ/BT.2020 (HDR) or GAMMA22/BT.709 (SDR) description. The staged tag's commit is piggy-backed on the next eglSwapBuffers so the CM state and the first new-content buffer land atomically. We never leave the surface untagged at frame time — see vom_video_surface_set_hdr's comment for why.
+    // The subsurface starts with no wp_color_management_v1 image description attached. C# calls vompl_video_surface_set_hdr synchronously from OnVideoRenderContextReadyWayland, then again per-video from ApplyHdrPolicy as policy decisions arrive (SourceHdrChanged / CurrentOutputHdrChanged), staging either a PQ/BT.2020 (HDR) or GAMMA22/BT.709 (SDR) description. The staged tag's commit is piggy-backed on the next eglSwapBuffers so the CM state and the first new-content buffer land atomically. We never leave the surface untagged at frame time — see vompl_video_surface_set_hdr's comment for why.
 
     // EGL setup.
     vs->egl_display = eglGetDisplay((EGLNativeDisplayType)display);
@@ -826,9 +826,9 @@ fail:
     return NULL;
 }
 
-void vom_video_surface_set_callbacks(struct vom_video_surface *vs, void *data,
-    vom_surface_enter_fn enter, vom_surface_leave_fn leave,
-    vom_feedback_presented_fn presented, vom_feedback_discarded_fn discarded)
+void vompl_video_surface_set_callbacks(struct vompl_video_surface *vs, void *data,
+    vompl_surface_enter_fn enter, vompl_surface_leave_fn leave,
+    vompl_feedback_presented_fn presented, vompl_feedback_discarded_fn discarded)
 {
     if (!vs) { return; }
     vs->cb_data = data;
@@ -839,7 +839,7 @@ void vom_video_surface_set_callbacks(struct vom_video_surface *vs, void *data,
 }
 
 // Caller (C# wrapper) is responsible for clamping inputs and deciding when geometry actually changed; this entry point just executes the protocol sequence unconditionally.
-void vom_video_surface_set_geometry(struct vom_video_surface *vs, int x, int y, int w, int h, int buffer_scale)
+void vompl_video_surface_set_geometry(struct vompl_video_surface *vs, int x, int y, int w, int h, int buffer_scale)
 {
     if (!vs) { return; }
 
@@ -857,7 +857,7 @@ void vom_video_surface_set_geometry(struct vom_video_surface *vs, int x, int y, 
     wl_display_flush(vs->display);
 }
 
-int vom_video_surface_make_current(struct vom_video_surface *vs)
+int vompl_video_surface_make_current(struct vompl_video_surface *vs)
 {
     if (!vs) { return -1; }
     if (!eglMakeCurrent(vs->egl_display, vs->egl_surface, vs->egl_surface, vs->egl_context))
@@ -868,7 +868,7 @@ int vom_video_surface_make_current(struct vom_video_surface *vs)
     return 0;
 }
 
-void vom_video_surface_swap(struct vom_video_surface *vs)
+void vompl_video_surface_swap(struct vompl_video_surface *vs)
 {
     if (!vs) { return; }
     // wp_presentation_feedback must be requested BEFORE the commit it pertains to. eglSwapBuffers internally commits, so we request here. The feedback events fire asynchronously once the compositor actually presents the frame — GTK's main-loop dispatch on the shared wl_display delivers them to our listener, which trampolines up to FrameTimingBridge in C#.
@@ -900,7 +900,7 @@ void vom_video_surface_swap(struct vom_video_surface *vs)
     }
 }
 
-void vom_video_surface_get_buffer_size(struct vom_video_surface *vs, int *out_w, int *out_h)
+void vompl_video_surface_get_buffer_size(struct vompl_video_surface *vs, int *out_w, int *out_h)
 {
     if (!vs) { return; }
     if (out_w) { *out_w = vs->buffer_w; }
@@ -910,7 +910,7 @@ void vom_video_surface_get_buffer_size(struct vom_video_surface *vs, int *out_w,
 // Tags the subsurface with an explicit image description: PQ/BT.2020 when enable=1, GAMMA22/BT.709 SDR when enable=0. Intentionally does NOT call wl_surface_commit — the next eglSwapBuffers flushes the CM state double-buffered alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor (no one-frame flash of mis-tagged content). Caller (C#) must only call EnableHdrOutput on mpv if this returns 0 with enable=1; returning -1 means the compositor didn't advertise wp_color_manager_v1 (or description build failed) and mpv must stay on default-auto targets, else PQ-encoded output would hit an untagged surface.
 //
 // Why the SDR tag is non-optional: per wp_color_management_v1 spec, an untagged surface's color handling is "compositor implementation defined." On KWin with an HDR output present, untagged subsurfaces get misinterpreted in a way that catastrophically blows out gamma22-encoded SDR output when it scans onto an SDR panel. We confirmed empirically that explicit GAMMA22/BT.709 tagging fixes it; the exact misinterpretation mechanism (likely the compositor's HDR-aware working color space treating the bytes as PQ) wasn't instrumented and isn't load-bearing for the fix. Spec language is enough: don't leave the surface in compositor-defined territory.
-int vom_video_surface_set_hdr(struct vom_video_surface *vs, int enable)
+int vompl_video_surface_set_hdr(struct vompl_video_surface *vs, int enable)
 {
     if (!vs)
     {
@@ -944,7 +944,7 @@ int vom_video_surface_set_hdr(struct vom_video_surface *vs, int enable)
     return 0;
 }
 
-void vom_video_surface_destroy(struct vom_video_surface *vs)
+void vompl_video_surface_destroy(struct vompl_video_surface *vs)
 {
     if (!vs) { return; }
     // Null the callbacks first so any listener that fires between now and actual proxy destruction becomes a no-op. Then destroy all in-flight feedback proxies synchronously — post-destroy, no late feedback can deliver against a freed vs or a recycled GCHandle on the C# side.

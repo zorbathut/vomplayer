@@ -3,10 +3,10 @@ using System.Runtime.InteropServices;
 
 namespace Vomplayer.Wayland;
 
-// P/Invoke bindings to the native/hdr_helper.c subsurface API. Opaque IntPtr handle. Disposing the wrapper calls vom_video_surface_destroy.
+// P/Invoke bindings to the native/hdr_helper.c subsurface API. Opaque IntPtr handle. Disposing the wrapper calls vompl_video_surface_destroy.
 //
 // Delegate lifetime: per-surface trampoline delegates are held on instance fields so their thunks remain rooted until Dispose. A GCHandle routes callbacks back to the C# FrameTimingBridge via the native `data` parameter. Matches the Mpv/MpvRenderContext.cs:15 pattern.
-internal sealed partial class VomVideoSurface : IDisposable
+internal sealed partial class VomplVideoSurface : IDisposable
 {
     private const string Lib = "hdr_helper";
 
@@ -21,7 +21,7 @@ internal sealed partial class VomVideoSurface : IDisposable
 
     internal FrameTimingBridge Bridge { get; }
 
-    public VomVideoSurface(IntPtr wlDisplay, IntPtr wlParentSurface, int initialW, int initialH, int initialBufferScale)
+    public VomplVideoSurface(IntPtr wlDisplay, IntPtr wlParentSurface, int initialW, int initialH, int initialBufferScale)
     {
         Bridge = new FrameTimingBridge();
         bridgeHandle = GCHandle.Alloc(Bridge);
@@ -34,7 +34,7 @@ internal sealed partial class VomVideoSurface : IDisposable
         if (handle == IntPtr.Zero)
         {
             bridgeHandle.Free();
-            throw new InvalidOperationException("vom_video_surface_create returned NULL — see stderr for details.");
+            throw new InvalidOperationException("vompl_video_surface_create returned NULL — see stderr for details.");
         }
 
         enterDelegate = OnEnterTrampoline;
@@ -201,35 +201,35 @@ internal sealed partial class VomVideoSurface : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void FeedbackDiscardedCallback(IntPtr data);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_create")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_create")]
     private static partial IntPtr Create(IntPtr wlDisplay, IntPtr wlParentSurface, int initialW, int initialH, int initialBufferScale);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_set_callbacks")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_set_callbacks")]
     private static partial void SetCallbacks(IntPtr vs, IntPtr data,
         SurfaceEnterCallback enter, SurfaceLeaveCallback leave,
         FeedbackPresentedCallback presented, FeedbackDiscardedCallback discarded);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_set_geometry")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_set_geometry")]
     private static partial void SetGeometryNative(IntPtr vs, int x, int y, int w, int h, int bufferScale);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_make_current")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_make_current")]
     private static partial int MakeCurrentNative(IntPtr vs);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_swap")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_swap")]
     private static partial void SwapNative(IntPtr vs);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_get_buffer_size")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_get_buffer_size")]
     private static partial void GetBufferSizeNative(IntPtr vs, out int w, out int h);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_set_hdr")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_set_hdr")]
     private static partial int SetHdrNative(IntPtr vs, int enable);
 
-    [LibraryImport(Lib, EntryPoint = "vom_video_surface_destroy")]
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_destroy")]
     private static partial void DestroyNative(IntPtr vs);
 }
 
 // Process-global output-event trampolines. Forwards straight into WaylandOutputRegistry. Delegates are static-rooted so they're pinned for the process lifetime. The native shim buffers cached mode + HDR bits and replays them when callbacks register, so ordering vs. ensure_globals is not load-bearing.
-internal static partial class VomOutputCallbacks
+internal static partial class VomplOutputCallbacks
 {
     private const string Lib = "hdr_helper";
 
@@ -300,6 +300,6 @@ internal static partial class VomOutputCallbacks
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void OutputImageInfoCallback(uint registryName, int hasTfNamed, uint tfNamed);
 
-    [LibraryImport(Lib, EntryPoint = "vom_set_output_callbacks")]
+    [LibraryImport(Lib, EntryPoint = "vompl_set_output_callbacks")]
     private static partial void SetOutputCallbacks(OutputModeCallback mode, OutputRemovedCallback removed, OutputImageInfoCallback imageInfo);
 }
