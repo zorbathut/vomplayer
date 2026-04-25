@@ -17,10 +17,34 @@ public sealed class FilePickerGtk : IFilePicker
         this.parent = parent;
     }
 
+    // Common video container extensions advertised in the Open dialog. AddSuffix matches case-insensitively, so lowercase here is enough. The list is deliberately short — vomplayer plays whatever libmpv plays, so the "All files" filter is the escape hatch for anything unusual.
+    private static readonly string[] VideoExtensions =
+    {
+        "mp4", "mkv", "webm", "mov", "avi", "m4v", "ts", "mpg", "mpeg", "wmv", "flv",
+    };
+
     public async Task<string?> PickVideoFileAsync(string title)
     {
         var dialog = Gtk.FileDialog.New();
         dialog.SetTitle(title);
+
+        var videoFilter = Gtk.FileFilter.New();
+        videoFilter.SetName("Video files");
+        foreach (var ext in VideoExtensions)
+        {
+            videoFilter.AddSuffix(ext);
+        }
+
+        var allFilter = Gtk.FileFilter.New();
+        allFilter.SetName("All files");
+        allFilter.AddPattern("*");
+
+        // Gtk.FileDialog.SetFilters takes a Gio.ListModel; the standard pattern is a Gio.ListStore typed for Gtk.FileFilter.
+        var filters = Gio.ListStore.New(Gtk.FileFilter.GetGType());
+        filters.Append(videoFilter);
+        filters.Append(allFilter);
+        dialog.SetFilters(filters);
+        dialog.SetDefaultFilter(videoFilter);
 
         try
         {
