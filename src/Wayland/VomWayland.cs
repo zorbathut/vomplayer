@@ -85,7 +85,7 @@ internal sealed partial class VomVideoSurface : IDisposable
         return (w, h);
     }
 
-    // Stages a PQ/BT.2020 image description on the subsurface's wp_color_management_v1 surface (enable=true) or stages removal (enable=false). Does NOT issue a wl_surface_commit — the next Swap flushes it atomically with the first new-content buffer, avoiding a one-frame flash of mis-tagged content. Returns 0 on success, -1 if the compositor does not advertise wp_color_manager_v1 or the description build failed; caller must only advance mpv to PQ targets when this returns 0.
+    // Stages an explicit image description on the subsurface's wp_color_management_v1 surface: PQ/BT.2020 for enable=true, GAMMA22/BT.709 SDR for enable=false. Does NOT issue a wl_surface_commit — the next Swap flushes it atomically with the first new-content buffer, avoiding a one-frame flash of mis-tagged content. Returns 0 on success, -1 if the compositor does not advertise wp_color_manager_v1 or the description build failed; caller must only advance mpv to PQ targets when this returns 0 with enable=true.
     public int SetHdr(bool enable)
     {
         if (handle == IntPtr.Zero)

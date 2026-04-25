@@ -89,12 +89,27 @@ public class DiagnosticFormatterTests
         Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: N/A (GLArea)"));
     }
 
-    // The "active:" line reports whether the player has actually HDR-tagged the subsurface — the Hdr outcome of MainWindow.ApplyHdrPolicy. Every other state (intentional SDR, shim refusal, --sdr override, pre-first-apply) collapses to "SDR"; internal distinctions live in the ApplyHdrPolicy stderr log, not the overlay. The "(intended)" hedge on the HDR side is deliberate: Wayland color-management has no feedback channel proving the compositor honors our request at scan-out.
+    // The "active:" line reports whether the player has HDR-tagged the subsurface — the Hdr outcome of MainWindow.ApplyHdrPolicy. The label splits by display HDR-capability: HDR display = "HDR (intended)" (compositor passes PQ through to scan-out); SDR display = "HDR→SDR (compositor)" (compositor tonemaps PQ→SDR, since we deliberately delegate that to libplacebo via KWin instead of mpv's gl_video). HdrActive=false collapses to "SDR" regardless of display. The "(intended)" hedge is deliberate on the HDR-display branch: Wayland color-management has no feedback channel proving the compositor honors our request at scan-out.
     [Test]
-    public void HdrActiveTrueRendersClaimed()
+    public void HdrActiveOnHdrDisplayRendersIntended()
     {
-        var s = Baseline() with { HdrActive = true };
+        var s = Baseline() with { HdrActive = true, DisplayIsHdr = true };
         Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  HDR (intended)"));
+    }
+
+    [Test]
+    public void HdrActiveOnSdrDisplayRendersCompositorTonemap()
+    {
+        var s = Baseline() with { HdrActive = true, DisplayIsHdr = false };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  HDR→SDR (compositor)"));
+    }
+
+    [Test]
+    public void HdrActiveOnUnknownDisplayRendersCompositorTonemap()
+    {
+        // Unknown display capability: assume the conservative "the compositor will handle it" framing rather than promising HDR scan-out we can't verify. Matches the SDR-display branch.
+        var s = Baseline() with { HdrActive = true, DisplayIsHdr = null };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  HDR→SDR (compositor)"));
     }
 
     [Test]
@@ -107,7 +122,7 @@ public class DiagnosticFormatterTests
     [Test]
     public void HdrActiveOnGlareaRendersNA()
     {
-        // On GLArea, HdrActive is ignored because IsWaylandPath=false short-circuits. Verify by setting it to true (which would otherwise render "HDR (intended)").
+        // On GLArea, HdrActive is ignored because IsWaylandPath=false short-circuits. Verify by setting it to true (which would otherwise render an HDR-flavor label).
         var s = Baseline() with { IsWaylandPath = false, DisplayIsHdr = null, HdrActive = true };
         Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  N/A (GLArea)"));
     }

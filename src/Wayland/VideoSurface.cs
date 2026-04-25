@@ -40,7 +40,7 @@ public sealed partial class VideoSurface : IDisposable
 
     private bool? lastPublishedOutputIsHdr;
 
-    // Stages a PQ/BT.2020 image description (enable=true) or stages removal (enable=false) on the subsurface. The shim does NOT commit — the next mpv-driven Swap flushes it alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor. Returns 0 on success; -1 if the compositor does not advertise wp_color_manager_v1 or the subsurface is not yet realized. Caller must only enable mpv PQ targeting when this returns 0, else PQ-encoded output would hit an untagged surface.
+    // Stages an explicit image description on the subsurface: PQ/BT.2020 for enable=true, GAMMA22/BT.709 SDR for enable=false. The shim does NOT commit — the next mpv-driven Swap flushes it alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor. Returns 0 on success; -1 if the compositor does not advertise wp_color_manager_v1 or the subsurface is not yet realized. Caller must only enable mpv PQ targeting when this returns 0 with enable=true, else PQ-encoded output would hit an SDR-tagged surface. For enable=false, an SDR tag is preferable to untagged because per wp_color_management_v1 spec untagged surface handling is compositor-defined; on KWin with an HDR output present that compositor-defined handling blows out gamma22-encoded SDR output catastrophically (see hdr_helper.c). On compositors without wp_color_manager_v1 the surface stays untagged and -1 is returned — most compositors handle untagged-as-sRGB sensibly, so this is logged but tolerated.
     public int SetHdr(bool enable)
     {
         if (surface == null)

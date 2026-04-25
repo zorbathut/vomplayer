@@ -349,9 +349,13 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
     }
 
-    // Wayland path: HDR tagging is driven per-video from OnSourceHdrChanged; no HDR work to do at render-context-ready time beyond letting the VM know playback is now alive.
+    // Wayland path: pre-stage the SDR image description on the subsurface synchronously, before any frame can render. Necessary to cover three paths that ApplyHdrPolicy alone doesn't reach: (a) `--sdr` mode, where the policy event subscriptions are skipped entirely; (b) first-SDR-file in a fresh process, where the source-gamma observation arrives as null→bt.1886 and never crosses isSourceHdr's transition gate, so SourceHdrChanged never fires; (c) any compositor whose first wl_surface.enter races ahead of our bridge subscription (the comment in TryCreateRenderContext acknowledges the first enter is often missed). In all three, without this kickoff the subsurface stays untagged and KWin's HDR-aware compositor blows out gamma22 SDR output the same way the original bug did. We deliberately do NOT touch mpv's target-* options here — that interacts badly with mpv's auto resolution (tried, reverted) and ApplyHdrPolicy will set them appropriately when it does run for HDR sources.
     private void OnVideoRenderContextReadyWayland()
     {
+        if (videoSurface != null)
+        {
+            videoSurface.SetHdr(false);
+        }
         viewModel.OnRenderContextReady();
     }
 
@@ -396,7 +400,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         ApplyHdrPolicy();
     }
 
-    // Single point of decision for the HDR-viewport question. Combined truth table: source HDR × output HDR. Only (true, true) enables HDR; every other combination (including "output unknown" i.e. null) stays SDR. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable. On disable, mirror in reverse order so the next SDR frame lands on an untagged surface.
+    // Single point of decision for the HDR-viewport question. Drives the wp_color_management_v1 tag on the subsurface and mpv's target-* options. Policy: PQ tag iff source is HDR (regardless of display HDR-capability). Rationale: mpv-via-libmpv is forced to use the older gl_video pipeline whose tone-map curve clips highlights hard at the source mastering-display peak (1000 nits → all-white SDR for typical files); KWin 6.x runs HDR-aware compositing with libplacebo, which has nicer curves. By tagging PQ and having mpv emit pass-through PQ, we hand HDR→SDR conversion to the compositor and inherit its tone-map. Caveats: we haven't instrumented the curve-equality claim ("matches gpu-next") — KWin's tonemap quality depends on its libplacebo version, the user's KDE settings, and the per-output ICC profile if any; on a misconfigured compositor this could be worse than mpv's tonemap, but in our testing the trade is a clear win. Display HDR-capability is no longer load-bearing for the policy — it's still tracked for the diagnostic overlay's `display=` row, but doesn't gate the tag. Window-spanning a PQ-tagged subsurface across HDR + SDR outputs is now correct by construction: the compositor pass-throughs on the HDR side and tonemaps on the SDR side per-output. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable (else mpv tone-maps to gamma22 — fallback for non-CM compositors). On disable, mirror in reverse order so the next SDR frame lands on an SDR-tagged surface (GAMMA22/BT.709) — see VideoSurface.SetHdr for why we tag SDR explicitly rather than leave the surface in compositor-defined territory.
     private void ApplyHdrPolicy()
     {
         if (videoSurface == null)
@@ -404,7 +408,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             return;
         }
         bool? outputHdr = videoSurface.CurrentOutputIsHdr;
-        bool wantHdr = lastSourceHdr && outputHdr == true;
+        bool wantHdr = lastSourceHdr;
         HdrActiveState newState;
         if (wantHdr)
         {
@@ -422,7 +426,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
         else
         {
-            videoSurface.SetHdr(false);
+            // SetHdr(false) attaches the SDR (GAMMA22/BT.709) image description. -1 means the compositor doesn't advertise wp_color_manager_v1 (or description build failed) — surface stays untagged, which is implementation-defined per the wp_color_management_v1 spec. On most compositors that's fine (treated as sRGB); on KWin with an HDR output present, an untagged surface is misinterpreted and SDR output blows out. We can't do anything about it from here, but log so a future bug report ("blown out on a non-KWin compositor") is diagnosable.
+            int sdrRc = videoSurface.SetHdr(false);
+            if (sdrRc != 0 && hdrActiveState != HdrActiveState.Sdr)
+            {
+                Console.Error.WriteLine("[vompl] hdr: SDR tag attach failed (no wp_color_manager_v1) — surface left untagged; if SDR output looks blown out, your compositor is misinterpreting untagged surfaces");
+            }
             playback.DisableHdrOutput();
             newState = HdrActiveState.Sdr;
         }
@@ -433,11 +442,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             {
                 Console.Error.WriteLine("[vompl] hdr: requested but compositor refused (no wp_color_manager_v1 or description build failed) — staying SDR");
             }
-            if (logHdr)
-            {
-                string outStr = outputHdr.HasValue ? (outputHdr.Value ? "HDR" : "SDR") : "unknown";
-                Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} display={outStr} → {newState}");
-            }
+        }
+        if (logHdr)
+        {
+            string outStr = outputHdr.HasValue ? (outputHdr.Value ? "HDR" : "SDR") : "unknown";
+            Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} display={outStr} → {newState} (was {hdrActiveState})");
         }
         hdrActiveState = newState;
     }

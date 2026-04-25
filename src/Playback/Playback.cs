@@ -107,7 +107,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
         });
     }
 
-    // Called after the Wayland color-management shim attaches a PQ/BT.2020 description to the subsurface — libplacebo must then render to match, or the compositor will misinterpret sRGB-encoded output as PQ. If HDR is never applied (non-Linux, X11, compositor without wp-color-management-v1, or current source is SDR), we never call this and mpv keeps its sRGB-target default.
+    // Called after the Wayland color-management shim attaches a PQ/BT.2020 description to the subsurface. mpv's gl_video pipeline must then emit PQ pass-through (no tone-map within mpv) so the compositor's libplacebo-backed pipeline can do PQ→SDR (or PQ→HDR pass-through, depending on output) using its own curves, which match smplayer/`vo=gpu-next` quality. If HDR is never applied (non-Linux, X11, compositor without wp-color-management-v1, or current source is SDR), we never call this and mpv keeps its `target-*=auto` defaults so gl_video can fall back to its own tone-map.
+    //
+    // target-peak is set to 10000 (full PQ range) rather than the file's mastering peak: gl_video tone-maps when src.max_luma > dst.max_luma, so any pin lower than the source's mastering peak (1000 for typical HDR10, up to 4000 for UHD Blu-ray, 10000 for HDR10+) would cascade gl_video's curve INTO our PQ output before the compositor's curve runs again, defeating the point of delegation. 10000 is the largest PQ-encodeable peak, so any source mastering ≤ 10000 nits passes through untouched.
     //
     // Goes through dispatcher.Post because mpv_set_property_string for target-* blocks the caller until the render context has acknowledged the change. The ack comes via mpv_render_context_render, which runs on the main thread — so calling SetProperty from main would deadlock. The dispatcher serializes these onto its worker thread, where the block is harmless because the main thread stays free to service the render callback mpv core is waiting on.
     public void EnableHdrOutput()
@@ -116,11 +118,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
         {
             h.SetProperty("target-prim", "bt.2020");
             h.SetProperty("target-trc", "pq");
-            h.SetProperty("target-peak", "1000");
+            h.SetProperty("target-peak", "10000");
         });
     }
 
-    // Inverse of EnableHdrOutput: drops the PQ targets so mpv falls back to its sRGB/bt.709 default for SDR output. Called when transitioning from HDR to SDR content (playlist switch) or when the --sdr override wants mpv to tonemap HDR content down to SDR. Reset is symmetric with EnableHdrOutput so the state stays coherent across transitions. Same deadlock-avoidance rationale as EnableHdrOutput — see that comment.
+    // Inverse of EnableHdrOutput: drops the PQ targets so mpv falls back to its auto target-* defaults. Tried pinning target-trc=gamma2.2 etc. for symmetry with the surface's GAMMA22/BT.709 tag, but that empirically broke the SDR-display HDR-source case again — auto here works, gamma2.2 pinned does not, mechanism unknown (in theory both should resolve to identical dst.transfer for the gl_video pipeline; reality disagrees). Stick with auto until someone instruments the divergence. Same deadlock-avoidance rationale as EnableHdrOutput — see that comment.
     public void DisableHdrOutput()
     {
         dispatcher.Post(h =>

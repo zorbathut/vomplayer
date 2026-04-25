@@ -500,8 +500,8 @@ static const struct wp_image_description_v1_listener desc_listener = {
     .ready = desc_ready,
 };
 
-// Builds a PQ/BT.2020 parametric image description and waits for ready. Returns NULL on failure. The ready/failed roundtrip is a one-shot protocol handshake (not ongoing logic), so it stays here rather than getting split across the ABI.
-static struct wp_image_description_v1 *build_pq_description(struct wl_display *display)
+// Builds a parametric image description with the given named primaries + tf and waits for ready. Returns NULL on failure. The ready/failed roundtrip is a one-shot protocol handshake (not ongoing logic), so it stays here rather than getting split across the ABI. Only the HDR caller passes mastering-display primaries; SDR descriptions don't carry HDR metadata.
+static struct wp_image_description_v1 *build_named_description(struct wl_display *display, uint32_t primaries, uint32_t tf, int with_mastering_primaries)
 {
     if (!g_color_manager)
     {
@@ -514,14 +514,17 @@ static struct wp_image_description_v1 *build_pq_description(struct wl_display *d
     {
         return NULL;
     }
-    wp_image_description_creator_params_v1_set_primaries_named(creator, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020);
-    wp_image_description_creator_params_v1_set_tf_named(creator, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
-    wp_image_description_creator_params_v1_set_mastering_display_primaries(
-        creator,
-        34000, 16000,
-        13250, 34500,
-         7500,  3000,
-        15635, 16450);
+    wp_image_description_creator_params_v1_set_primaries_named(creator, primaries);
+    wp_image_description_creator_params_v1_set_tf_named(creator, tf);
+    if (with_mastering_primaries)
+    {
+        wp_image_description_creator_params_v1_set_mastering_display_primaries(
+            creator,
+            34000, 16000,
+            13250, 34500,
+             7500,  3000,
+            15635, 16450);
+    }
 
     struct wp_image_description_v1 *desc = wp_image_description_creator_params_v1_create(creator);
     if (!desc)
@@ -545,6 +548,18 @@ static struct wp_image_description_v1 *build_pq_description(struct wl_display *d
         return NULL;
     }
     return desc;
+}
+
+// PQ/BT.2020 with HDR10 mastering metadata, for HDR output to an HDR-capable display.
+static struct wp_image_description_v1 *build_pq_description(struct wl_display *display)
+{
+    return build_named_description(display, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ, 1);
+}
+
+// GAMMA22/BT.709 SDR. Per wp_color_management_v1 spec, a surface without an attached image description has compositor-defined handling — on KWin with an HDR output present we observed catastrophic blow-out of gamma22-encoded SDR output on the SDR scan-out (the exact misinterpretation mechanism wasn't instrumented, but the spec language is enough to justify always tagging). Pairs with Playback.DisableHdrOutput's `target-*=auto` defaults: mpv's gl_video resolves auto target-trc to gamma22 for HDR sources tone-mapped to SDR, and to bt.1886 (close-but-not-identical to gamma22) for native SDR sources. The slight gamma curve mismatch on bt.1886 sources is small enough to be invisible in practice; the alternative (pinning mpv to gamma2.2 to match the tag) was tried and empirically broke the HDR-on-SDR case for unclear reasons.
+static struct wp_image_description_v1 *build_sdr_description(struct wl_display *display)
+{
+    return build_named_description(display, WP_COLOR_MANAGER_V1_PRIMARIES_SRGB, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22, 0);
 }
 
 //---------------------------------------------------------------
@@ -571,7 +586,8 @@ struct vom_video_surface
     EGLContext egl_context;
     EGLSurface egl_surface;
     struct wp_color_management_surface_v1 *cm_surface;
-    struct wp_image_description_v1 *image_desc;
+    struct wp_image_description_v1 *pq_image_desc;
+    struct wp_image_description_v1 *sdr_image_desc;
     int buffer_w;
     int buffer_h;
 
@@ -738,7 +754,7 @@ struct vom_video_surface *vom_video_surface_create(
     wl_subsurface_set_position(vs->wl_subsurface, 0, 0);
     wl_subsurface_set_desync(vs->wl_subsurface);
 
-    // The subsurface starts with no wp_color_management_v1 image description attached — the compositor treats it as sRGB by default. vom_video_surface_set_hdr later toggles a PQ/BT.2020 description in response to per-video source-colorspace detection; the toggle's commit is piggy-backed on the next eglSwapBuffers so the CM state and the first new-content buffer land atomically.
+    // The subsurface starts with no wp_color_management_v1 image description attached. C# calls vom_video_surface_set_hdr synchronously from OnVideoRenderContextReadyWayland, then again per-video from ApplyHdrPolicy as policy decisions arrive (SourceHdrChanged / CurrentOutputHdrChanged), staging either a PQ/BT.2020 (HDR) or GAMMA22/BT.709 (SDR) description. The staged tag's commit is piggy-backed on the next eglSwapBuffers so the CM state and the first new-content buffer land atomically. We never leave the surface untagged at frame time — see vom_video_surface_set_hdr's comment for why.
 
     // EGL setup.
     vs->egl_display = eglGetDisplay((EGLNativeDisplayType)display);
@@ -801,7 +817,8 @@ fail:
     if (vs->egl_surface != EGL_NO_SURFACE) { eglDestroySurface(vs->egl_display, vs->egl_surface); }
     if (vs->egl_window) { wl_egl_window_destroy(vs->egl_window); }
     if (vs->egl_context != EGL_NO_CONTEXT) { eglDestroyContext(vs->egl_display, vs->egl_context); }
-    if (vs->image_desc) { wp_image_description_v1_destroy(vs->image_desc); }
+    if (vs->pq_image_desc) { wp_image_description_v1_destroy(vs->pq_image_desc); }
+    if (vs->sdr_image_desc) { wp_image_description_v1_destroy(vs->sdr_image_desc); }
     if (vs->cm_surface) { wp_color_management_surface_v1_destroy(vs->cm_surface); }
     if (vs->wl_subsurface) { wl_subsurface_destroy(vs->wl_subsurface); }
     if (vs->wl_surface) { wl_surface_destroy(vs->wl_surface); }
@@ -890,7 +907,9 @@ void vom_video_surface_get_buffer_size(struct vom_video_surface *vs, int *out_w,
     if (out_h) { *out_h = vs->buffer_h; }
 }
 
-// Toggles a PQ/BT.2020 image description on the subsurface's wp_color_management_v1 surface. Intentionally does NOT call wl_surface_commit — the next eglSwapBuffers flushes the CM state double-buffered alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor (no one-frame flash of mis-tagged content). Caller (C#) must only call EnableHdrOutput on mpv if this returns 0; returning -1 means the compositor didn't advertise wp_color_manager_v1 (or description build failed) and mpv must stay on default-auto targets, else PQ-encoded output would hit an untagged surface.
+// Tags the subsurface with an explicit image description: PQ/BT.2020 when enable=1, GAMMA22/BT.709 SDR when enable=0. Intentionally does NOT call wl_surface_commit — the next eglSwapBuffers flushes the CM state double-buffered alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor (no one-frame flash of mis-tagged content). Caller (C#) must only call EnableHdrOutput on mpv if this returns 0 with enable=1; returning -1 means the compositor didn't advertise wp_color_manager_v1 (or description build failed) and mpv must stay on default-auto targets, else PQ-encoded output would hit an untagged surface.
+//
+// Why the SDR tag is non-optional: per wp_color_management_v1 spec, an untagged surface's color handling is "compositor implementation defined." On KWin with an HDR output present, untagged subsurfaces get misinterpreted in a way that catastrophically blows out gamma22-encoded SDR output when it scans onto an SDR panel. We confirmed empirically that explicit GAMMA22/BT.709 tagging fixes it; the exact misinterpretation mechanism (likely the compositor's HDR-aware working color space treating the bytes as PQ) wasn't instrumented and isn't load-bearing for the fix. Spec language is enough: don't leave the surface in compositor-defined territory.
 int vom_video_surface_set_hdr(struct vom_video_surface *vs, int enable)
 {
     if (!vs)
@@ -901,33 +920,27 @@ int vom_video_surface_set_hdr(struct vom_video_surface *vs, int enable)
     {
         return -1;
     }
-    if (enable)
+    struct wp_image_description_v1 **slot = enable ? &vs->pq_image_desc : &vs->sdr_image_desc;
+    if (!*slot)
     {
-        if (!vs->image_desc)
+        *slot = enable ? build_pq_description(vs->display) : build_sdr_description(vs->display);
+        if (!*slot)
         {
-            vs->image_desc = build_pq_description(vs->display);
-            if (!vs->image_desc)
-            {
-                return -1;
-            }
+            fprintf(stderr, "[vompl] set_hdr(enable=%d): description build failed\n", enable);
+            return -1;
         }
+    }
+    if (!vs->cm_surface)
+    {
+        vs->cm_surface = wp_color_manager_v1_get_surface(g_color_manager, vs->wl_surface);
         if (!vs->cm_surface)
         {
-            vs->cm_surface = wp_color_manager_v1_get_surface(g_color_manager, vs->wl_surface);
-            if (!vs->cm_surface)
-            {
-                fprintf(stderr, "[vompl] set_hdr: get_surface failed\n");
-                return -1;
-            }
+            fprintf(stderr, "[vompl] set_hdr: get_surface failed\n");
+            return -1;
         }
-        wp_color_management_surface_v1_set_image_description(
-            vs->cm_surface, vs->image_desc, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
-        return 0;
     }
-    if (vs->cm_surface)
-    {
-        wp_color_management_surface_v1_unset_image_description(vs->cm_surface);
-    }
+    wp_color_management_surface_v1_set_image_description(
+        vs->cm_surface, *slot, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
     return 0;
 }
 
@@ -956,7 +969,8 @@ void vom_video_surface_destroy(struct vom_video_surface *vs)
     }
     if (vs->egl_window) { wl_egl_window_destroy(vs->egl_window); }
     if (vs->cm_surface) { wp_color_management_surface_v1_destroy(vs->cm_surface); }
-    if (vs->image_desc) { wp_image_description_v1_destroy(vs->image_desc); }
+    if (vs->pq_image_desc) { wp_image_description_v1_destroy(vs->pq_image_desc); }
+    if (vs->sdr_image_desc) { wp_image_description_v1_destroy(vs->sdr_image_desc); }
     if (vs->wl_subsurface) { wl_subsurface_destroy(vs->wl_subsurface); }
     if (vs->wl_surface) { wl_surface_destroy(vs->wl_surface); }
     free(vs);
