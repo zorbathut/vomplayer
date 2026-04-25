@@ -35,6 +35,13 @@ public class PlaybackTests
     }
 
     [Test]
+    public void IsCoreIdleDefaultsTrue()
+    {
+        using var pb = NewHeadlessInitialized();
+        Assert.That(pb.IsCoreIdle, Is.True);
+    }
+
+    [Test]
     public void LoadFileNullPathThrows()
     {
         using var pb = NewHeadlessInitialized();

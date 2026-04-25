@@ -23,6 +23,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private bool isSeeking;
 
+    // Defaults to true: pre-Initialize / pre-LoadFile mpv has no file loaded and is "idle" by definition. The first synthesized property fire from mpv after Initialize() lands with the actual core-idle value (true until a file is loaded). Diverges from IsPaused — see IPlayback.IsCoreIdle for the rationale.
+    [ObservableProperty]
+    private bool isCoreIdle = true;
+
     // Decoder mpv actually selected, as reported by the `hwdec-current` property. Authoritative: if a hwdec backend fails to initialize for a given file mpv falls back to software and updates this to "no", so the value reflects the real decode path, not the requested one. Empty string or "no" ⇒ software; names like "vaapi", "nvdec", "videotoolbox", "d3d11va" ⇒ hardware.
     [ObservableProperty]
     private string? hwdecCurrent;
@@ -85,6 +89,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("duration", MpvFormat.Double);
             h.ObserveProperty("pause", MpvFormat.Flag);
             h.ObserveProperty("seeking", MpvFormat.Flag);
+            // core-idle differs from `pause` precisely at end-of-file with keep-open=yes: pause stays no, but the playback core stops advancing. Consumers that need "actually decoding/displaying right now" (e.g. screensaver inhibit) should track this rather than IsPaused.
+            h.ObserveProperty("core-idle", MpvFormat.Flag);
             // Sub-property path observation: video-params is a Node map, but mpv exposes each scalar inside it (primaries, gamma, sig-peak, …) as its own string-typed observable when addressed via the "<parent>/<key>" syntax. This sidesteps MpvClient.ReadPropertyValue not knowing how to unpack node-map payloads. Initial synthesized fire lands with null (no file loaded yet), which IsHdrGamma classifies as SDR — no spurious transition.
             h.ObserveProperty("video-params/gamma", MpvFormat.String);
             // Observe the actual decoder mpv selected, not the requested one. Fires on FileLoaded (mpv resolves hwdec after probing the file) and again if negotiation falls back mid-playback. The synthesized initial event lands with "no" or empty before any file loads.
@@ -175,6 +181,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 break;
             case "seeking":
                 IsSeeking = change.Value.AsFlag ?? false;
+                break;
+            case "core-idle":
+                IsCoreIdle = change.Value.AsFlag ?? true;
                 break;
             case "video-params/gamma":
                 UpdateSourceHdr(change.Value.AsString);

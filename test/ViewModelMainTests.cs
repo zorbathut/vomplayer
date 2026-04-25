@@ -24,6 +24,9 @@ public partial class ViewModelMainTests
         [ObservableProperty]
         private bool isSeeking;
 
+        [ObservableProperty]
+        private bool isCoreIdle = true;
+
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
 

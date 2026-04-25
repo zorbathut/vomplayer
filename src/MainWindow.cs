@@ -71,6 +71,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             Console.Error.WriteLine($"[fs t={FsStopwatch.Elapsed.TotalSeconds:F3}] {msg}");
         }
     }
+    // Screensaver/idle inhibit cookie returned by Gtk.Application.Inhibit. 0 ⇒ not currently inhibited (Gtk uses 0 as the failure / not-applied sentinel). Held while mpv reports core-idle=false (i.e. actually decoding/displaying); released on every transition back to idle (pause, EOF with keep-open, stop, no file loaded) so we don't keep the system awake when playback parks at end-of-file.
+    private uint screensaverInhibitCookie;
     private bool updatingFromVm;
     // Seek-scale state machine. idle = both false; holding = userHolding; settling = awaitingSeekSettle (post-release, waiting for mpv's in-flight seek to report a time-pos distinct from the pre-release one). `seekValueAtRelease` is the baseline we wait to move away from — gating on "time-pos has actually advanced" avoids a race where mpv fires `seeking=false` before its `time-pos` update, which would otherwise let a stale SeekValue push flicker the scale.
     private bool userHolding;
@@ -232,6 +234,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         playback.PropertyChanged += OnPlaybackPropertyChangedForSeekSettle;
+        playback.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
         OnCloseRequest += OnWindowCloseRequest;
     }
 
@@ -291,6 +294,54 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             awaitingSeekSettle = false;
             PushVmSeekValueToScale();
+        }
+    }
+
+    // Drive Gtk.Application.Inhibit/Uninhibit off mpv state. Predicate is `!IsCoreIdle || IsSeeking`: core-idle is the primary signal (and the right one over IsPaused, because mpv with keep-open=yes parks at EOF without setting pause=yes — IsPaused-driven inhibit would persist after a file ends). IsSeeking is folded in because mpv may briefly flip core-idle=true while a seek restarts; without it we'd thrash the inhibit (one DBus round-trip per seek) on a drag-scrub. Subscribed to both property names below — either changing re-evaluates.
+    private void OnPlaybackPropertyChangedForScreensaver(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(IPlayback.IsCoreIdle)
+            && e.PropertyName != nameof(IPlayback.IsSeeking))
+        {
+            return;
+        }
+        ApplyScreensaverInhibit();
+    }
+
+    // Has Inhibit ever returned 0? On compositors that don't implement org.gnome.SessionManager / org.freedesktop.ScreenSaver (e.g. some wlroots-based compositors without the screensaver service), Gtk.Application.Inhibit returns 0 — the application gets no inhibit and the screensaver kicks in normally. CLAUDE.md bans silent error handling, so log once on the first such failure (no spam if every transition fails). Mirrors the ApplyHdrPolicy "compositor refused" pattern.
+    private bool screensaverInhibitFailureLogged;
+
+    private void ApplyScreensaverInhibit()
+    {
+        bool wantInhibit = !playback.IsCoreIdle || playback.IsSeeking;
+        // The local `cookie != 0` guard is what makes calls safe to repeat — Gtk.Application.Inhibit itself is NOT idempotent (each call registers a new inhibitor and returns a fresh cookie). Without the guard, every property change while playing would leak a cookie.
+        if (wantInhibit && screensaverInhibitCookie == 0)
+        {
+            var app = (Gtk.Application?)GetApplication();
+            if (app == null)
+            {
+                return;
+            }
+            uint cookie = app.Inhibit(this, Gtk.ApplicationInhibitFlags.Idle, "Playing video");
+            if (cookie == 0)
+            {
+                if (!screensaverInhibitFailureLogged)
+                {
+                    screensaverInhibitFailureLogged = true;
+                    Console.Error.WriteLine("[vompl] screensaver: Gtk.Application.Inhibit returned 0 — compositor doesn't expose an inhibit interface (org.gnome.SessionManager / org.freedesktop.ScreenSaver). Screensaver may activate during playback.");
+                }
+                return;
+            }
+            screensaverInhibitCookie = cookie;
+        }
+        else if (!wantInhibit && screensaverInhibitCookie != 0)
+        {
+            var app = (Gtk.Application?)GetApplication();
+            if (app != null)
+            {
+                app.Uninhibit(screensaverInhibitCookie);
+            }
+            screensaverInhibitCookie = 0;
         }
     }
 
@@ -657,7 +708,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     {
         isClosing = true;
         CancelControlsHideTimer();
+        // Release any held screensaver inhibit on close. Belt-and-braces: when the app exits and its DBus connection drops, the session daemon auto-releases inhibitors anyway, but doing this explicitly avoids depending on that and keeps clean shutdown behavior if the window is closed without quitting (multi-window future).
+        if (screensaverInhibitCookie != 0)
+        {
+            var app = (Gtk.Application?)GetApplication();
+            if (app != null)
+            {
+                app.Uninhibit(screensaverInhibitCookie);
+            }
+            screensaverInhibitCookie = 0;
+        }
         playback.PropertyChanged -= OnPlaybackPropertyChangedForSeekSettle;
+        playback.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
         playback.SourceHdrChanged -= OnSourceHdrChanged;
         if (videoSurface != null)
         {
