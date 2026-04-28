@@ -63,6 +63,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     [RelayCommand]
     private void PlayPause()
     {
+        // Catches the no-file-loaded case (the user-visible bug: clicking play before opening anything flipped the icon to "pause" without anything to play). mpv accepts pause toggles pre-load fine — this is purely a UX gate. Lives in the VM rather than only on the button so the Space-key path through PlayPauseCommand is also covered. Also incidentally gates pause on live streams / unseekable inputs that report duration=0; if anyone needs pause-on-livestream this should become a HasFile latched on FileLoaded.
+        if (Duration <= TimeSpan.Zero)
+        {
+            return;
+        }
         playback.TogglePause();
     }
 

@@ -145,6 +145,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         // Freedesktop standard icon names — present in every GTK icon theme (Adwaita, Yaru, Breeze, …). Tooltip carries the textual affordance for accessibility and discoverability since the button is icon-only.
         playPauseButton = Gtk.Button.NewFromIconName("media-playback-start");
         playPauseButton.SetTooltipText("Play");
+        playPauseButton.SetSensitive(false);
 
         seekScale = Gtk.Scale.NewWithRange(Gtk.Orientation.Horizontal, 0.0, 1.0, 0.001);
         seekScale.SetHexpand(true);
@@ -379,7 +380,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 break;
             case nameof(ViewModelMain.Duration):
                 durationLabel.SetLabel(TimeFormatter.Format(viewModel.Duration.TotalSeconds));
-                seekScale.SetSensitive(viewModel.Duration > TimeSpan.Zero);
+                bool hasMedia = viewModel.Duration > TimeSpan.Zero;
+                seekScale.SetSensitive(hasMedia);
+                playPauseButton.SetSensitive(hasMedia);
                 break;
             case nameof(ViewModelMain.IsPaused):
                 playPauseButton.SetIconName(viewModel.IsPaused ? "media-playback-start" : "media-playback-pause");

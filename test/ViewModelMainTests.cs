@@ -164,8 +164,18 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker());
+        pb.DurationSeconds = 60;
         vm.PlayPauseCommand.Execute(null);
         Assert.That(pb.TogglePauseCalls, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void PlayPauseCommandIsNoopBeforeFileLoad()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        vm.PlayPauseCommand.Execute(null);
+        Assert.That(pb.TogglePauseCalls, Is.EqualTo(0));
     }
 
     [Test]
