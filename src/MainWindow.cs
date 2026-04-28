@@ -577,6 +577,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             controlsBox.SetVisible(true);
         }
+        SetCursorFromName(null);
         ArmControlsHideTimer();
     }
 
@@ -650,6 +651,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         else
         {
             CancelControlsHideTimer();
+            // Restore the cursor unconditionally — the timer may have hidden it while we were fullscreen, and exits via Escape/F11/compositor don't fire pointer motion to undo that.
+            SetCursorFromName(null);
             if (controlsBox.Parent == videoOverlay)
             {
                 videoOverlay.RemoveOverlay(controlsBox);
@@ -698,6 +701,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         if (isFullscreen)
         {
             controlsBox.SetVisible(false);
+            // "none" is a standard CSS cursor name; GTK maps it to a blank cursor on every backend we care about. Setting it on the window covers the video region too: the wl_subsurface is opaque to GTK, but its input region is empty (see hdr_helper.c), so pointer events route to the parent GTK surface and the window-level cursor is what the compositor draws there.
+            SetCursorFromName("none");
             videoOverlay.QueueDraw();
             FsLog($"hide applied visible={controlsBox.GetVisible()}");
         }
