@@ -149,6 +149,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         seekScale = Gtk.Scale.NewWithRange(Gtk.Orientation.Horizontal, 0.0, 1.0, 0.001);
         seekScale.SetHexpand(true);
         seekScale.SetDrawValue(false);
+        seekScale.SetSensitive(false);
         RemoveScaleLongPressGesture(seekScale);
 
         positionLabel = Gtk.Label.New("00:00");
@@ -378,6 +379,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 break;
             case nameof(ViewModelMain.Duration):
                 durationLabel.SetLabel(TimeFormatter.Format(viewModel.Duration.TotalSeconds));
+                seekScale.SetSensitive(viewModel.Duration > TimeSpan.Zero);
                 break;
             case nameof(ViewModelMain.IsPaused):
                 playPauseButton.SetIconName(viewModel.IsPaused ? "media-playback-start" : "media-playback-pause");

@@ -147,6 +147,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     public void Seek(double seconds)
     {
+        // libmpv aborts the host process (`free(): invalid pointer`) if a `seek` command runs before any file is loaded. Gate on DurationSeconds, which is 0 pre-load and positive once mpv has probed a real file. Streams and unseekable inputs report duration=0 too, where mpv itself wouldn't honor the seek anyway.
+        if (DurationSeconds <= 0)
+        {
+            return;
+        }
         var target = seconds.ToString("F3", CultureInfo.InvariantCulture);
         dispatcher.Post(h => h.Command("seek", target, "absolute"));
     }

@@ -41,6 +41,16 @@ public class PlaybackTests
         Assert.That(pb.IsCoreIdle, Is.True);
     }
 
+    // Regression: libmpv aborts the host process with `free(): invalid pointer` if a `seek` command runs before any file has been loaded. User-visible symptom was the seek slider crashing the player when clicked with no media open. Sleeps bracket the Seek call to give the dispatcher's worker thread time to drain the posted action — without them the test could reach Dispose before the seek even reaches mpv, masking the abort. Reaching the end of this test without the test host being killed is the assertion; reverting the gate in Playback.Seek causes this test to abort the entire test run.
+    [Test]
+    public void SeekBeforeLoadFileIsSafe()
+    {
+        using var pb = NewHeadlessInitialized();
+        System.Threading.Thread.Sleep(300);
+        pb.Seek(0.0);
+        System.Threading.Thread.Sleep(300);
+    }
+
     [Test]
     public void LoadFileNullPathThrows()
     {
