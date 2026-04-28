@@ -54,6 +54,12 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         playback.LoadFile(path);
     }
 
+    // Direct path/URI load, bypassing the file picker. Used by drag-and-drop. Accepts whatever libmpv accepts: a local filesystem path, or a remote URI (http://, https://, smb://, …).
+    public void OpenFile(string pathOrUri)
+    {
+        playback.LoadFile(pathOrUri);
+    }
+
     [RelayCommand]
     private void PlayPause()
     {

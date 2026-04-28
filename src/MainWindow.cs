@@ -229,6 +229,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         clickGesture.OnPressed += OnVideoClickPressed;
         videoWidget.AddController(clickGesture);
 
+        // Drag-and-drop loading. Register a Gio.File drop target — GTK's content-format negotiation has built-in deserializers from text/uri-list (which file managers and browsers universally offer) to a single GFile, taking the first URI. We don't register Gdk.FileList because GirCore 0.7.0 doesn't expose its element accessor; in practice every common DnD source also offers text/uri-list, so the GFile path matches. Accept Copy|Move|Link because Wayland/X11 sources negotiate the action set with the destination — we read the file either way, so refusing Move would just reject otherwise-valid drops. Attached to the window so drops anywhere — including over chrome — are accepted; the user shouldn't have to aim at the video region.
+        var dropTarget = Gtk.DropTarget.New(Gio.FileHelper.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
+        dropTarget.OnDrop += OnFileDrop;
+        AddController(dropTarget);
+
         // Mirror the real fullscreen state rather than treating a local bool as authority. Covers compositor/WM-initiated un-fullscreen that bypasses our key/gesture paths.
         OnNotify += OnWindowNotify;
 
@@ -579,6 +584,22 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
         SetCursorFromName(null);
         ArmControlsHideTimer();
+    }
+
+    // GTK delivers a Gio.File for the matched format. Prefer GetPath() (local filesystem) and fall back to GetUri() so remote URIs (smb://, http://, …) flow through to mpv, which handles those natively. Returning false signals GTK to draw the rejected-drop cursor; per CLAUDE.md (silent error handling banned) we also log so a future "DnD didn't work" report has something to chase.
+    private bool OnFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
+    {
+        if (args.Value.GetObject() is Gio.File file)
+        {
+            string? target = file.GetPath() ?? file.GetUri();
+            if (!string.IsNullOrEmpty(target))
+            {
+                viewModel.OpenFile(target);
+                return true;
+            }
+        }
+        Console.Error.WriteLine("[vompl] dnd: dropped value did not yield a usable path or URI; ignoring");
+        return false;
     }
 
     private void OnVideoClickPressed(Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)

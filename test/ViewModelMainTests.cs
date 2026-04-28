@@ -206,6 +206,25 @@ public partial class ViewModelMainTests
     }
 
     [Test]
+    public void OpenFileLoadsTheTarget()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        vm.OpenFile("/path/to/dropped.mp4");
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/dropped.mp4"));
+    }
+
+    [Test]
+    public void OpenFileAcceptsRemoteUris()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        vm.OpenFile("https://example.com/stream.m3u8");
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("https://example.com/stream.m3u8"));
+    }
+
+    [Test]
     public void OnRenderContextReadyLoadsInitialFileOnce()
     {
         var pb = new FakePlayback();
