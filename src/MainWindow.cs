@@ -142,8 +142,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             videoWidget = view;
         }
 
-        var openButton = Gtk.Button.NewWithLabel("Open");
-        playPauseButton = Gtk.Button.NewWithLabel("Play");
+        // Freedesktop standard icon names — present in every GTK icon theme (Adwaita, Yaru, Breeze, …). Tooltip carries the textual affordance for accessibility and discoverability since the button is icon-only.
+        playPauseButton = Gtk.Button.NewFromIconName("media-playback-start");
+        playPauseButton.SetTooltipText("Play");
 
         seekScale = Gtk.Scale.NewWithRange(Gtk.Orientation.Horizontal, 0.0, 1.0, 0.001);
         seekScale.SetHexpand(true);
@@ -157,7 +158,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         // Spacing around the bar comes from CSS padding on .vompl-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges. vompl-chrome gives it the theme bg; vompl-controls-bar adds the padding. Split so the fullscreen OSD swap (below) only touches the background/padding pair and leaves vompl-chrome off (OSD has its own semi-transparent fill).
         controlsBox.AddCssClass("vompl-chrome");
         controlsBox.AddCssClass("vompl-controls-bar");
-        controlsBox.Append(openButton);
         controlsBox.Append(playPauseButton);
         controlsBox.Append(positionLabel);
         controlsBox.Append(seekScale);
@@ -190,7 +190,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         rootBox.Append(controlsBox);
         SetChild(rootBox);
 
-        openButton.OnClicked += (_, _) => viewModel.OpenCommand.Execute(null);
         playPauseButton.OnClicked += (_, _) => viewModel.PlayPauseCommand.Execute(null);
 
         seekScale.OnValueChanged += OnSeekScaleValueChanged;
@@ -381,7 +380,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 durationLabel.SetLabel(TimeFormatter.Format(viewModel.Duration.TotalSeconds));
                 break;
             case nameof(ViewModelMain.IsPaused):
-                playPauseButton.SetLabel(viewModel.IsPaused ? "Play" : "Pause");
+                playPauseButton.SetIconName(viewModel.IsPaused ? "media-playback-start" : "media-playback-pause");
+                playPauseButton.SetTooltipText(viewModel.IsPaused ? "Play" : "Pause");
                 break;
             case nameof(ViewModelMain.SeekValue):
                 if (userHolding)
