@@ -32,7 +32,6 @@ public partial class ViewModelMainTests
 
         public int InitializeCalls { get; private set; }
         public int TogglePauseCalls { get; private set; }
-        public int StopCalls { get; private set; }
         public int LoadFileCalls { get; private set; }
         public string? LastLoadedFile { get; private set; }
         public double? LastSeekSeconds { get; private set; }
@@ -53,11 +52,6 @@ public partial class ViewModelMainTests
         {
             TogglePauseCalls++;
             IsPaused = !IsPaused;
-        }
-
-        public void Stop()
-        {
-            StopCalls++;
         }
 
         public void Seek(double seconds)
@@ -172,15 +166,6 @@ public partial class ViewModelMainTests
         var vm = new ViewModelMain(pb, new FakeFilePicker());
         vm.PlayPauseCommand.Execute(null);
         Assert.That(pb.TogglePauseCalls, Is.EqualTo(1));
-    }
-
-    [Test]
-    public void StopCommandStopsPlayback()
-    {
-        var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
-        vm.StopCommand.Execute(null);
-        Assert.That(pb.StopCalls, Is.EqualTo(1));
     }
 
     [Test]

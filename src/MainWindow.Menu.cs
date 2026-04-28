@@ -19,10 +19,6 @@ public sealed partial class MainWindow
         playPauseAction.OnActivate += (_, _) => viewModel.PlayPauseCommand.Execute(null);
         AddAction(playPauseAction);
 
-        var stopAction = Gio.SimpleAction.New("stop", null);
-        stopAction.OnActivate += (_, _) => viewModel.StopCommand.Execute(null);
-        AddAction(stopAction);
-
         var fullscreenAction = Gio.SimpleAction.New("fullscreen", null);
         fullscreenAction.OnActivate += (_, _) => SetFullscreen(!isFullscreen);
         AddAction(fullscreenAction);
@@ -73,7 +69,6 @@ public sealed partial class MainWindow
         // Space isn't registered via SetAccelsForAction — that would double-fire with focused Gtk.Buttons, which activate on Space. Instead the window's capture-phase key controller (OnWindowKeyPressed) claims Space before focused children see it. This attribute is a display-only hint so the menu shows an accelerator label; the actual dispatch happens in the key controller.
         playPauseItem.SetAttributeValue("accel", GLib.Variant.NewString("space"));
         playbackMenu.InsertItem(-1, playPauseItem);
-        playbackMenu.InsertItem(-1, Gio.MenuItem.New("Stop", "win.stop"));
 
         var viewMenu = Gio.Menu.New();
         viewMenu.InsertItem(-1, Gio.MenuItem.New("Fullscreen", "win.fullscreen"));

@@ -18,6 +18,5 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     void Initialize();
     void LoadFile(string path);
     void TogglePause();
-    void Stop();
     void Seek(double seconds);
 }

@@ -71,7 +71,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             Console.Error.WriteLine($"[fs t={FsStopwatch.Elapsed.TotalSeconds:F3}] {msg}");
         }
     }
-    // Screensaver/idle inhibit cookie returned by Gtk.Application.Inhibit. 0 ⇒ not currently inhibited (Gtk uses 0 as the failure / not-applied sentinel). Held while mpv reports core-idle=false (i.e. actually decoding/displaying); released on every transition back to idle (pause, EOF with keep-open, stop, no file loaded) so we don't keep the system awake when playback parks at end-of-file.
+    // Screensaver/idle inhibit cookie returned by Gtk.Application.Inhibit. 0 ⇒ not currently inhibited (Gtk uses 0 as the failure / not-applied sentinel). Held while mpv reports core-idle=false (i.e. actually decoding/displaying); released on every transition back to idle (pause, EOF with keep-open, no file loaded) so we don't keep the system awake when playback parks at end-of-file.
     private uint screensaverInhibitCookie;
     private bool updatingFromVm;
     // Seek-scale state machine. idle = both false; holding = userHolding; settling = awaitingSeekSettle (post-release, waiting for mpv's in-flight seek to report a time-pos distinct from the pre-release one). `seekValueAtRelease` is the baseline we wait to move away from — gating on "time-pos has actually advanced" avoids a race where mpv fires `seeking=false` before its `time-pos` update, which would otherwise let a stale SeekValue push flicker the scale.
@@ -144,7 +144,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         var openButton = Gtk.Button.NewWithLabel("Open");
         playPauseButton = Gtk.Button.NewWithLabel("Play");
-        var stopButton = Gtk.Button.NewWithLabel("Stop");
 
         seekScale = Gtk.Scale.NewWithRange(Gtk.Orientation.Horizontal, 0.0, 1.0, 0.001);
         seekScale.SetHexpand(true);
@@ -160,7 +159,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         controlsBox.AddCssClass("vompl-controls-bar");
         controlsBox.Append(openButton);
         controlsBox.Append(playPauseButton);
-        controlsBox.Append(stopButton);
         controlsBox.Append(positionLabel);
         controlsBox.Append(seekScale);
         controlsBox.Append(durationLabel);
@@ -171,7 +169,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         videoOverlay.SetHexpand(true);
         videoOverlay.SetVexpand(true);
 
-        // Black placeholder that fills the video region while the Wayland subsurface has no buffer attached yet (subsurface placed below the transparent parent shows the desktop through otherwise). Hidden permanently on mpv's FirstFrameRendered; we don't re-show on stop, since mpv keeps the last rendered frame in the subsurface and that's a better "stopped" indicator than flashing back to black.
+        // Black placeholder that fills the video region while the Wayland subsurface has no buffer attached yet (subsurface placed below the transparent parent shows the desktop through otherwise). Hidden permanently on mpv's FirstFrameRendered.
         noVideoBg = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         noVideoBg.AddCssClass("vompl-no-video-bg");
         noVideoBg.SetHalign(Gtk.Align.Fill);
@@ -194,7 +192,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         openButton.OnClicked += (_, _) => viewModel.OpenCommand.Execute(null);
         playPauseButton.OnClicked += (_, _) => viewModel.PlayPauseCommand.Execute(null);
-        stopButton.OnClicked += (_, _) => viewModel.StopCommand.Execute(null);
 
         seekScale.OnValueChanged += OnSeekScaleValueChanged;
 

@@ -66,12 +66,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         playback.TogglePause();
     }
 
-    [RelayCommand]
-    private void Stop()
-    {
-        playback.Stop();
-    }
-
     public void OnRenderContextReady()
     {
         if (initialFileLoaded)

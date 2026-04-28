@@ -145,11 +145,6 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.Post(h => h.SetProperty("pause", pausedNow ? "no" : "yes"));
     }
 
-    public void Stop()
-    {
-        dispatcher.Post(h => h.Command("stop"));
-    }
-
     public void Seek(double seconds)
     {
         var target = seconds.ToString("F3", CultureInfo.InvariantCulture);
