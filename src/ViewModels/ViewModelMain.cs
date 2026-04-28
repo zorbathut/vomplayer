@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Vomplayer.Playback;
 using Vomplayer.Services;
+using Vomplayer.UserData;
 
 namespace Vomplayer.ViewModels;
 
@@ -12,6 +13,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 {
     private readonly IPlayback playback;
     private readonly IFilePicker filePicker;
+    private readonly IRecentFiles recentFiles;
     private bool initialFileLoaded;
 
     [ObservableProperty]
@@ -28,7 +30,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     public string? InitialFile { get; set; }
 
-    public ViewModelMain(IPlayback playback, IFilePicker filePicker)
+    public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles)
     {
         if (playback == null)
         {
@@ -38,8 +40,13 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             throw new ArgumentNullException(nameof(filePicker));
         }
+        if (recentFiles == null)
+        {
+            throw new ArgumentNullException(nameof(recentFiles));
+        }
         this.playback = playback;
         this.filePicker = filePicker;
+        this.recentFiles = recentFiles;
         this.playback.PropertyChanged += OnPlaybackPropertyChanged;
     }
 
@@ -51,12 +58,14 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             return;
         }
+        recentFiles.Record(path);
         playback.LoadFile(path);
     }
 
     // Direct path/URI load, bypassing the file picker. Used by drag-and-drop. Accepts whatever libmpv accepts: a local filesystem path, or a remote URI (http://, https://, smb://, …).
     public void OpenFile(string pathOrUri)
     {
+        recentFiles.Record(pathOrUri);
         playback.LoadFile(pathOrUri);
     }
 
@@ -79,7 +88,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         if (!string.IsNullOrEmpty(InitialFile))
         {
-            playback.LoadFile(InitialFile);
+            // Route through OpenFile so the command-line file is recorded in recents the same way drag-and-drop and the file picker are.
+            OpenFile(InitialFile);
         }
         initialFileLoaded = true;
     }

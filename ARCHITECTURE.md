@@ -35,6 +35,11 @@ src/
   Services/
     IFilePicker.cs
     FilePickerGtk.cs     # Gtk.FileDialog
+  UserData/
+    UserDataPaths.cs     # XDG-aware locations for config.toml and state.db; VOMPL_CONFIG_DIR / VOMPL_STATE_DIR overrides for tests / portable installs
+    UserConfig.cs        # TOML, Tomlyn-backed; load-or-defaults (no file is written automatically — fresh installs have no config.toml). Currently only [placeholder].example, deliberately throwaway
+    IRecentFiles.cs      # interface the VM depends on
+    RecentFiles.cs       # SQLite-backed; WAL mode, append-only Migrations[] registry walked against PRAGMA user_version. Adding a v(N+1) is one append + one new migration test that pre-stages a vN DB via the internal OpenConnectionAndMigrateTo escape hatch and verifies data survives the upgrade
   Util/TimeFormatter.cs
   ViewModels/
     ViewModelMain.cs     # CommunityToolkit.Mvvm, RelayCommands, seek scale glue
@@ -136,6 +141,8 @@ UI (MainWindow / VideoView / VideoSurface at runtime) is not unit-tested; change
 
 - `libmpv.so` — runtime required (`mpv_*`)
 - `libhdr_helper.so` — built from `src/Native/hdr_helper.c` + generated protocol glue
+- Tomlyn (NuGet) — TOML deserialization for `UserConfig`. 2.x uses `System.Text.Json.JsonNamingPolicy.SnakeCaseLower` for property naming so `[ui_section] some_key` maps to PascalCase POCO members
+- Microsoft.Data.Sqlite (NuGet) — SQLite for `RecentFiles` (and any future state-db tables). Bundles `SQLitePCLRaw.bundle_e_sqlite3`, so no system SQLite needed
 - `libgtk-4.so.1`, `libgobject-2.0.so.0`, `libEGL.so.1`, `libGL.so.1`, `libc.so.6` — P/Invoke targets with explicit SONAMEs (bare `.so` names are dev-package symlinks that don't exist on runtime-only hosts)
 - GirCore 0.7.0 — note its `Gtk.EventControllerLegacy` `event` signal is not marshallable; `MainWindow.cs` connects that one signal via raw `g_signal_connect_data`.
 

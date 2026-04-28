@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Vomplayer.Controls;
 using Vomplayer.Playback;
 using Vomplayer.Services;
+using Vomplayer.UserData;
 using Vomplayer.Util;
 using Vomplayer.ViewModels;
 using Vomplayer.Wayland;
@@ -85,7 +86,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private ulong seekLegacyHandlerId;
     private IntPtr seekLegacyControllerHandle;
 
-    public MainWindow(Gtk.Application app, Playback.Playback playback, string? initialFile, bool forceSdr)
+    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, string? initialFile, bool forceSdr)
     {
         if (app == null)
         {
@@ -94,6 +95,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         if (playback == null)
         {
             throw new ArgumentNullException(nameof(playback));
+        }
+        if (recentFiles == null)
+        {
+            throw new ArgumentNullException(nameof(recentFiles));
         }
         this.playback = playback;
         this.forceSdr = forceSdr;
@@ -106,7 +111,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         InstallVomplCss();
 
         var filePicker = new FilePickerGtk(this);
-        viewModel = new ViewModelMain(playback, filePicker);
+        viewModel = new ViewModelMain(playback, filePicker, recentFiles);
         viewModel.InitialFile = initialFile;
 
         Gtk.Widget videoWidget;

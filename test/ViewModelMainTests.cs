@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Playback;
 using Vomplayer.Services;
+using Vomplayer.UserData;
 using Vomplayer.ViewModels;
 
 namespace Vomplayer.Tests;
@@ -86,23 +88,44 @@ public partial class ViewModelMainTests
         }
     }
 
+    private sealed class FakeRecentFiles : IRecentFiles
+    {
+        public List<string> RecordedPaths { get; } = new();
+
+        public void Record(string pathOrUri)
+        {
+            RecordedPaths.Add(pathOrUri);
+        }
+
+        public IReadOnlyList<RecentFileEntry> GetMostRecent(int limit)
+        {
+            return Array.Empty<RecentFileEntry>();
+        }
+    }
+
     [Test]
     public void NullPlaybackThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(null!, new FakeFilePicker()));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(null!, new FakeFilePicker(), new FakeRecentFiles()));
     }
 
     [Test]
     public void NullFilePickerThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), null!));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), null!, new FakeRecentFiles()));
+    }
+
+    [Test]
+    public void NullRecentFilesThrows()
+    {
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), new FakeFilePicker(), null!));
     }
 
     [Test]
     public void PositionMirrorsPlaybackPositionSeconds()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.PositionSeconds = 12.5;
         Assert.That(vm.Position, Is.EqualTo(TimeSpan.FromSeconds(12.5)));
     }
@@ -111,7 +134,7 @@ public partial class ViewModelMainTests
     public void DurationMirrorsPlaybackDurationSeconds()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.DurationSeconds = 60;
         Assert.That(vm.Duration, Is.EqualTo(TimeSpan.FromSeconds(60)));
     }
@@ -120,7 +143,7 @@ public partial class ViewModelMainTests
     public void IsPausedMirrorsPlayback()
     {
         var pb = new FakePlayback { IsPaused = true };
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.IsPaused = false;
         Assert.That(vm.IsPaused, Is.False);
     }
@@ -129,7 +152,7 @@ public partial class ViewModelMainTests
     public void SeekValueTracksPlaybackWhenNotDragging()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.DurationSeconds = 100;
         pb.PositionSeconds = 25;
         Assert.That(vm.SeekValue, Is.EqualTo(0.25));
@@ -139,7 +162,7 @@ public partial class ViewModelMainTests
     public void SeekToSeeksToNormalizedPositionScaledByDuration()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.DurationSeconds = 100;
 
         vm.SeekTo(0.4);
@@ -151,7 +174,7 @@ public partial class ViewModelMainTests
     public void SeekValueTracksPlaybackPosition()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.DurationSeconds = 100;
 
         pb.PositionSeconds = 75;
@@ -163,7 +186,7 @@ public partial class ViewModelMainTests
     public void PlayPauseCommandTogglesPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.DurationSeconds = 60;
         vm.PlayPauseCommand.Execute(null);
         Assert.That(pb.TogglePauseCalls, Is.EqualTo(1));
@@ -173,7 +196,7 @@ public partial class ViewModelMainTests
     public void PlayPauseCommandIsNoopBeforeFileLoad()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         vm.PlayPauseCommand.Execute(null);
         Assert.That(pb.TogglePauseCalls, Is.EqualTo(0));
     }
@@ -183,10 +206,21 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = "/path/to/video.mp4" };
-        var vm = new ViewModelMain(pb, picker);
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles());
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(picker.Calls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/video.mp4"));
+    }
+
+    [Test]
+    public async Task OpenCommandRecordsBeforeLoading()
+    {
+        var pb = new FakePlayback();
+        var picker = new FakeFilePicker { NextResult = "/path/to/video.mp4" };
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, picker, recents);
+        await vm.OpenCommand.ExecuteAsync(null);
+        Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/path/to/video.mp4" }));
     }
 
     [Test]
@@ -194,36 +228,52 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = null };
-        var vm = new ViewModelMain(pb, picker);
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, picker, recents);
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(picker.Calls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.Null);
+        // Cancellation must not record — recents are user-opened files, not user-attempts.
+        Assert.That(recents.RecordedPaths, Is.Empty);
     }
 
     [Test]
     public void OpenFileLoadsTheTarget()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         vm.OpenFile("/path/to/dropped.mp4");
         Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/dropped.mp4"));
     }
 
     [Test]
+    public void OpenFileRecordsTheTarget()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents);
+        vm.OpenFile("/path/to/dropped.mp4");
+        Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/path/to/dropped.mp4" }));
+    }
+
+    [Test]
     public void OpenFileAcceptsRemoteUris()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents);
         vm.OpenFile("https://example.com/stream.m3u8");
         Assert.That(pb.LastLoadedFile, Is.EqualTo("https://example.com/stream.m3u8"));
+        Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "https://example.com/stream.m3u8" }));
     }
 
     [Test]
     public void OnRenderContextReadyLoadsInitialFileOnce()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker())
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents)
         {
             InitialFile = "/path/to/initial.mp4",
         };
@@ -231,26 +281,31 @@ public partial class ViewModelMainTests
         vm.OnRenderContextReady();
         Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/initial.mp4"));
+        // The command-line file should be in recents the same way drag-drop and picker openings are.
+        Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/path/to/initial.mp4" }));
 
-        // A second fire (e.g. detach/reattach) must not reload.
+        // A second fire (e.g. detach/reattach) must not reload or re-record.
         vm.OnRenderContextReady();
         Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
+        Assert.That(recents.RecordedPaths.Count, Is.EqualTo(1));
     }
 
     [Test]
     public void OnRenderContextReadyWithNoInitialFileNoOps()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents);
         vm.OnRenderContextReady();
         Assert.That(pb.LastLoadedFile, Is.Null);
+        Assert.That(recents.RecordedPaths, Is.Empty);
     }
 
     [Test]
     public void DisposeUnsubscribesFromPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
         pb.PositionSeconds = 5;
         var beforeDispose = vm.Position;
 

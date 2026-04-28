@@ -1,4 +1,5 @@
 using System;
+using Vomplayer.UserData;
 
 namespace Vomplayer;
 
@@ -26,15 +27,20 @@ public static class Program
             }
         }
 
+        // Loaded but not yet consumed — UserConfig.Placeholder is a throwaway slot while the config plumbing settles. Real read sites will appear here as user-facing settings land.
+        _ = UserConfig.LoadOrDefault(UserDataPaths.ConfigFile);
+        // Owned by Main so the SQLite connection is closed cleanly after the GTK main loop exits — including on abnormal exit, since the using block fires on any control-flow path. Shared across activations if the NonUnique app ever re-activates within one process; today that's a single window per process, but co-locating recents across hypothetical multi-window matches user intent.
+        using var recentFiles = RecentFiles.Open(UserDataPaths.StateDb);
+
         var app = Gtk.Application.New("net.vomplayer.Vomplayer", Gio.ApplicationFlags.NonUnique);
         app.OnActivate += (sender, _) =>
         {
-            BuildAndPresent((Gtk.Application)sender, initialFile, forceSdr);
+            BuildAndPresent((Gtk.Application)sender, recentFiles, initialFile, forceSdr);
         };
         return app.RunWithSynchronizationContext(null);
     }
 
-    private static void BuildAndPresent(Gtk.Application app, string? initialFile, bool forceSdr)
+    private static void BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, string? initialFile, bool forceSdr)
     {
         // gtk_init ran setlocale(LC_ALL, "") already; force LC_NUMERIC=C back before any mpv call. Must happen on the main thread after GTK init, not before Main.
         LibC.ForceCNumericLocale();
@@ -49,7 +55,7 @@ public static class Program
                 }));
         playback.Initialize();
 
-        var window = new MainWindow(app, playback, initialFile, forceSdr);
+        var window = new MainWindow(app, playback, recentFiles, initialFile, forceSdr);
         window.Present();
     }
 }
