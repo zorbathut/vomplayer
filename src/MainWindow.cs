@@ -184,6 +184,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         positionLabel = Gtk.Label.New("00:00");
         durationLabel = Gtk.Label.New("00:00");
+        // Position can never exceed duration, so sizing the position label to the formatted duration's character count is the tightest slot that won't reflow mid-playback (covers the MM:SS ↔ H:MM:SS flip at the 1h mark). Width is updated when Duration arrives; tabular-nums keeps each digit the same advance regardless of glyph.
+        positionLabel.AddCssClass("vompl-time-label");
+        durationLabel.AddCssClass("vompl-time-label");
+        positionLabel.SetXalign(1.0f);
 
         controlsBox = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
         // Spacing around the bar comes from CSS padding on .vompl-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges. vompl-chrome gives it the theme bg; vompl-controls-bar adds the padding. Split so the fullscreen OSD swap (below) only touches the background/padding pair and leaves vompl-chrome off (OSD has its own semi-transparent fill).
@@ -408,7 +412,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 positionLabel.SetLabel(TimeFormatter.Format(viewModel.Position.TotalSeconds));
                 break;
             case nameof(ViewModelMain.Duration):
-                durationLabel.SetLabel(TimeFormatter.Format(viewModel.Duration.TotalSeconds));
+                string formattedDuration = TimeFormatter.Format(viewModel.Duration.TotalSeconds);
+                durationLabel.SetLabel(formattedDuration);
+                positionLabel.SetWidthChars(formattedDuration.Length);
+                positionLabel.SetMaxWidthChars(formattedDuration.Length);
                 bool hasMedia = viewModel.Duration > TimeSpan.Zero;
                 seekScale.SetSensitive(hasMedia);
                 playPauseButton.SetSensitive(hasMedia);
@@ -565,7 +572,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private static void InstallVomplCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; }");
+        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
