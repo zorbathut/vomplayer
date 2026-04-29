@@ -30,8 +30,15 @@ public class UserConfigTests
         var path = Path.Combine(tempDir!, "config.toml");
         var cfg = UserConfig.LoadOrDefault(path);
 
-        Assert.That(cfg.Placeholder.Example, Is.EqualTo("hello"));
-        // Steady state for a fresh install: no file is written. The user creates one by hand if they want to override.
+        // Hotkey defaults reproduce the pre-customization built-in keymap.
+        Assert.That(cfg.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
+        Assert.That(cfg.Hotkeys.Quit, Is.EqualTo(new[] { "<Primary>Q" }));
+        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
+        Assert.That(cfg.Hotkeys.ToggleFullscreen, Is.EqualTo(new[] { "f", "<Shift>F", "F11", "MouseDoubleClick1" }));
+        Assert.That(cfg.Hotkeys.ExitFullscreen, Is.EqualTo(new[] { "Escape" }));
+        Assert.That(cfg.Hotkeys.ToggleDiagnosticOverlay, Is.Empty);
+        Assert.That(cfg.Hotkeys.ShowPreferences, Is.Empty);
+        // Steady state for a fresh install: no file is written. The user creates one by hand or the preferences dialog writes one explicitly.
         Assert.That(File.Exists(path), Is.False);
     }
 
@@ -40,10 +47,16 @@ public class UserConfigTests
     {
         var path = Path.Combine(tempDir!, "config.toml");
         Directory.CreateDirectory(tempDir!);
-        File.WriteAllText(path, "[placeholder]\nexample = \"world\"\n");
+        File.WriteAllText(path,
+            "[hotkeys]\n" +
+            "play_pause = [\"p\"]\n" +
+            "toggle_fullscreen = [\"<Primary>F\"]\n");
 
         var cfg = UserConfig.LoadOrDefault(path);
-        Assert.That(cfg.Placeholder.Example, Is.EqualTo("world"));
+        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "p" }));
+        Assert.That(cfg.Hotkeys.ToggleFullscreen, Is.EqualTo(new[] { "<Primary>F" }));
+        // Keys not mentioned in the file fall back to the POCO default — touching one binding shouldn't reset the rest.
+        Assert.That(cfg.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
     }
 
     [Test]
@@ -51,24 +64,24 @@ public class UserConfigTests
     {
         var path = Path.Combine(tempDir!, "config.toml");
         Directory.CreateDirectory(tempDir!);
-        // File exists but has no [placeholder] section.
+        // File exists but has no [hotkeys] section.
         File.WriteAllText(path, "# user comment, no sections\n");
 
         var cfg = UserConfig.LoadOrDefault(path);
-        Assert.That(cfg.Placeholder, Is.Not.Null);
-        Assert.That(cfg.Placeholder.Example, Is.EqualTo("hello"));
+        Assert.That(cfg.Hotkeys, Is.Not.Null);
+        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
     }
 
     [Test]
-    public void SectionExistsWithMissingKeyFallsBackToDefault()
+    public void ExplicitlyEmptyListOverridesDefault()
     {
+        // Distinguishes "user wants no binding" from "user didn't touch this key".
         var path = Path.Combine(tempDir!, "config.toml");
         Directory.CreateDirectory(tempDir!);
-        // [placeholder] declared but `example` not set — POCO default should win.
-        File.WriteAllText(path, "[placeholder]\n");
+        File.WriteAllText(path, "[hotkeys]\nplay_pause = []\n");
 
         var cfg = UserConfig.LoadOrDefault(path);
-        Assert.That(cfg.Placeholder.Example, Is.EqualTo("hello"));
+        Assert.That(cfg.Hotkeys.PlayPause, Is.Empty);
     }
 
     [Test]
@@ -82,7 +95,7 @@ public class UserConfigTests
         var cfg = UserConfig.LoadOrDefault(path);
 
         // Defaults apply, app doesn't crash.
-        Assert.That(cfg.Placeholder.Example, Is.EqualTo("hello"));
+        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
         // Original path is gone — the broken file was rotated.
         Assert.That(File.Exists(path), Is.False);
         // Exactly one .bak was produced, and its contents are the original broken text (preserved verbatim for the user to recover).
@@ -110,7 +123,7 @@ public class UserConfigTests
 
                 var cfg = UserConfig.LoadOrDefault(path);
 
-                Assert.That(cfg.Placeholder.Example, Is.EqualTo("hello"));
+                Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
             }
             finally
             {
@@ -122,5 +135,25 @@ public class UserConfigTests
         {
             Assert.Ignore("rotation-failure simulation requires POSIX directory permissions");
         }
+    }
+
+    [Test]
+    public void SaveRoundTripsThroughLoad()
+    {
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+
+        var cfg = new UserConfig();
+        cfg.Hotkeys.PlayPause = new() { "p", "<Primary>space" };
+        cfg.Hotkeys.ToggleDiagnosticOverlay = new() { "<Primary>D" };
+        cfg.Save(path);
+
+        Assert.That(File.Exists(path), Is.True);
+
+        var reloaded = UserConfig.LoadOrDefault(path);
+        Assert.That(reloaded.Hotkeys.PlayPause, Is.EqualTo(new[] { "p", "<Primary>space" }));
+        Assert.That(reloaded.Hotkeys.ToggleDiagnosticOverlay, Is.EqualTo(new[] { "<Primary>D" }));
+        // Untouched keys round-trip from their defaults.
+        Assert.That(reloaded.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
     }
 }

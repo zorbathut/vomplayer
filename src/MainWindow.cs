@@ -37,6 +37,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
     private readonly Playback.Playback playback;
     private readonly ViewModelMain viewModel;
+    private readonly UserConfig userConfig;
+    private readonly string configPath;
+    private HotkeyMap hotkeys;
+    private Gio.SimpleAction? diagnosticAction;
     private readonly Gtk.Scale seekScale;
     private readonly Gtk.Label positionLabel;
     private readonly Gtk.Label durationLabel;
@@ -86,7 +90,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private ulong seekLegacyHandlerId;
     private IntPtr seekLegacyControllerHandle;
 
-    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, string? initialFile, bool forceSdr)
+    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, UserConfig userConfig, string configPath, string? initialFile, bool forceSdr)
     {
         if (app == null)
         {
@@ -100,7 +104,19 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             throw new ArgumentNullException(nameof(recentFiles));
         }
+        if (userConfig == null)
+        {
+            throw new ArgumentNullException(nameof(userConfig));
+        }
+        if (string.IsNullOrEmpty(configPath))
+        {
+            throw new ArgumentException("configPath must be non-empty", nameof(configPath));
+        }
         this.playback = playback;
+        this.userConfig = userConfig;
+        this.configPath = configPath;
+        // Derive the runtime keymap from the config now that we're past gtk_init. Trigger parsing logs and skips bad entries rather than aborting load — a single typo in config.toml shouldn't lock the user out of every other binding.
+        this.hotkeys = HotkeyMap.FromTomlForm(userConfig.Hotkeys.ToDictionary(), m => Console.Error.WriteLine($"[vompl] {m}"));
         this.forceSdr = forceSdr;
 
         SetApplication(app);
@@ -226,9 +242,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         motionController.OnMotion += OnWindowPointerMotion;
         AddController(motionController);
 
-        // Double-click on the video widget toggles fullscreen. GestureClick does participate in the gesture-claim protocol, but the video widgets (VideoArea/VideoView) attach no other gestures, so there's nothing to contend with. Single-click is unbound; any future click-to-pause must consider that double-click fires a single-press first (GestureClick delivers pressed for each of the two presses, with NPress incrementing).
+        // Click on the video widget routes through the HotkeyMap so any button + click-count combination can be bound to any action. Default keymap binds MouseDoubleClick1 (double-left) to ToggleFullscreen, matching the pre-customization behavior. Button=0 means the gesture fires for any button; OnVideoClickPressed reads the actual button via GetCurrentButton(). GestureClick delivers `pressed` for each press in a sequence with NPress incrementing — so a single-click bind also fires once on the first press of a double-click, an inherent property the user has to live with. Note this gesture now claims press/release for every button (formerly only BUTTON_PRIMARY): a future "right-click context menu on video" would need to coexist (e.g., by using a sibling GestureClick at a higher phase or by routing through the HotkeyMap).
         var clickGesture = Gtk.GestureClick.New();
-        clickGesture.Button = (uint)Gdk.Constants.BUTTON_PRIMARY;
+        clickGesture.Button = 0;
         clickGesture.OnPressed += OnVideoClickPressed;
         videoWidget.AddController(clickGesture);
 
@@ -527,34 +543,16 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
-    // Keyboard dispatch is split across two sources; check both when debugging input:
-    //   1. This Capture-phase handler: f, F, Space, Escape.
-    //   2. Gtk.Application accelerators registered in BuildMenuBar: Ctrl+O, Ctrl+Q, F11.
-    // Escape stays here (not an accelerator) because its behavior is conditional — only exit-fullscreen, don't swallow otherwise.
+    // Single keyboard dispatch path. The capture-phase EventControllerKey runs before any focused-child controller. Trigger.MakeKey canonicalizes the keyval (lowercase) and masks the modifier state to the GTK default-mod-mask, so CapsLock-on `f` and Shift+f match their bound forms regardless of whether the binding was authored as "f" or "<Shift>F". ExecuteAction returns true to consume the key, false to let it propagate (used for ExitFullscreen-when-not-fullscreen, so Escape remains available to dialogs/popovers we host in the future).
     private bool OnWindowKeyPressed(Gtk.EventControllerKey sender, Gtk.EventControllerKey.KeyPressedSignalArgs args)
     {
-        uint keyval = args.Keyval;
-        if (keyval == (uint)Gdk.Constants.KEY_f
-            || keyval == (uint)Gdk.Constants.KEY_F)
+        var trigger = Trigger.MakeKey(args.Keyval, args.State);
+        var action = hotkeys.Lookup(trigger);
+        if (action == null)
         {
-            SetFullscreen(!isFullscreen);
-            return true;
-        }
-        if (keyval == (uint)Gdk.Constants.KEY_space)
-        {
-            viewModel.PlayPauseCommand.Execute(null);
-            return true;
-        }
-        if (keyval == (uint)Gdk.Constants.KEY_Escape)
-        {
-            if (isFullscreen)
-            {
-                SetFullscreen(false);
-                return true;
-            }
             return false;
         }
-        return false;
+        return ExecuteAction(action.Value);
     }
 
     private void OnWindowPointerMotion(Gtk.EventControllerMotion sender, Gtk.EventControllerMotion.MotionSignalArgs args)
@@ -611,10 +609,85 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
     private void OnVideoClickPressed(Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
     {
-        if (args.NPress == 2)
+        uint button = sender.GetCurrentButton();
+        if (button == 0)
         {
-            SetFullscreen(!isFullscreen);
+            return;
         }
+        var trigger = new Trigger.MouseClick(button, args.NPress);
+        var action = hotkeys.Lookup(trigger);
+        if (action != null)
+        {
+            ExecuteAction(action.Value);
+        }
+    }
+
+    // Single dispatch site for HotkeyMap-bound actions. Returns true when the input has been consumed so the key controller can short-circuit propagation; the click handler ignores the return value because GestureClick doesn't propagate the same way. ExitFullscreen returns false when not actually fullscreen so the bound key (typically Escape) doesn't get silently swallowed in non-fullscreen state — matches the pre-customization behavior.
+    private bool ExecuteAction(HotkeyAction action)
+    {
+        switch (action)
+        {
+            case HotkeyAction.Open:
+                viewModel.OpenCommand.Execute(null);
+                return true;
+            case HotkeyAction.Quit:
+                Close();
+                return true;
+            case HotkeyAction.PlayPause:
+                viewModel.PlayPauseCommand.Execute(null);
+                return true;
+            case HotkeyAction.ToggleFullscreen:
+                SetFullscreen(!isFullscreen);
+                return true;
+            case HotkeyAction.ExitFullscreen:
+                if (isFullscreen)
+                {
+                    SetFullscreen(false);
+                    return true;
+                }
+                return false;
+            case HotkeyAction.ToggleDiagnosticOverlay:
+                ToggleDiagnosticOverlay();
+                return true;
+            case HotkeyAction.ShowPreferences:
+                ShowHotkeysDialog();
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // Shared between the menu's stateful action and the hotkey-bound action. Reads the action's current state and toggles via ChangeState so the menu's check glyph stays in sync regardless of which path triggered the toggle. Throws if BuildMenuBar hasn't run yet — control flow today guarantees menu construction precedes the controllers that can fire ExecuteAction, but a future refactor that breaks that ordering should fail loud rather than make a hotkey silently no-op (CLAUDE.md bans silent error handling).
+    private void ToggleDiagnosticOverlay()
+    {
+        if (diagnosticAction == null)
+        {
+            throw new InvalidOperationException("ToggleDiagnosticOverlay invoked before BuildMenuBar registered diagnosticAction");
+        }
+        var state = diagnosticAction.GetState();
+        bool current = state != null && state.GetBoolean();
+        diagnosticAction.ChangeState(GLib.Variant.NewBoolean(!current));
+    }
+
+    // Reload the runtime keymap from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by HotkeysDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated, so the new bindings are live; the user can retry by saving again.
+    internal void ApplyHotkeys(HotkeyMap map)
+    {
+        hotkeys = map;
+        userConfig.Hotkeys = UserConfig.HotkeysSection.FromDictionary(map.ToTomlForm());
+        try
+        {
+            userConfig.Save(configPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[vompl] hotkeys: failed to save config to {configPath}: {ex.Message}");
+        }
+        RefreshMenuAccels();
+    }
+
+    internal HotkeyMap GetHotkeysSnapshot()
+    {
+        return hotkeys.Clone();
     }
 
     // Notify handler for the "fullscreened" property. Resyncs when the compositor/WM changes the window state behind our back (e.g., a tiling-WM shortcut that un-fullscreens). If the state already matches, SetFullscreen already applied the visibility logic synchronously — no work left.
