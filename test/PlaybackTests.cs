@@ -328,4 +328,64 @@ public class PlaybackTests
         }));
     }
 
+    [Test]
+    public void ChaptersDefaultEmpty()
+    {
+        using var pb = new Playback.Playback(a => a());
+        Assert.That(pb.Chapters, Is.Empty);
+    }
+
+    [Test]
+    public void ChaptersUpdateOnNewSnapshot()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var snap = new[]
+        {
+            new MediaChapter(0, "Intro", 0.0),
+            new MediaChapter(1, "Act 1", 60.0),
+        };
+        pb.UpdateChapters(snap);
+        Assert.That(pb.Chapters, Is.EqualTo(snap));
+    }
+
+    [Test]
+    public void ChaptersDedupEqualSnapshots()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = 0;
+        pb.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Playback.Playback.Chapters))
+            {
+                fires++;
+            }
+        };
+
+        var first = new[] { new MediaChapter(0, "Intro", 0.0), new MediaChapter(1, "Act 1", 60.0) };
+        var sameContent = new[] { new MediaChapter(0, "Intro", 0.0), new MediaChapter(1, "Act 1", 60.0) };
+        var different = new[] { new MediaChapter(0, "Intro", 0.0), new MediaChapter(1, "Act 1", 90.0) };
+
+        pb.UpdateChapters(first);
+        pb.UpdateChapters(sameContent); // record-equal → no PropertyChanged
+        pb.UpdateChapters(different);
+
+        Assert.That(fires, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ChaptersDedupBackToEmpty()
+    {
+        using var pb = new Playback.Playback(a => a());
+        int fires = 0;
+        pb.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Playback.Playback.Chapters))
+            {
+                fires++;
+            }
+        };
+        pb.UpdateChapters(Array.Empty<MediaChapter>());
+        Assert.That(fires, Is.Zero);
+    }
+
 }

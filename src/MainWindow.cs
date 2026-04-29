@@ -42,6 +42,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private HotkeyMap hotkeys;
     private Gio.SimpleAction? diagnosticAction;
     private readonly Gtk.Scale seekScale;
+    private readonly Controls.ChapterScrubber chapterScrubber;
     private readonly Gtk.Label positionLabel;
     private readonly Gtk.Label durationLabel;
     private readonly Gtk.Button playPauseButton;
@@ -177,6 +178,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         seekScale.SetDrawValue(false);
         seekScale.SetSensitive(false);
         RemoveScaleLongPressGesture(seekScale);
+        // ChapterScrubber owns the seekScale's container slot from here on (it appends seekScale into its own vertical Gtk.Box). The scale itself is kept by reference for the existing seek-state-machine wiring (raw legacy event controller, OnValueChanged, etc.) — chapter markers are an additive concern.
+        chapterScrubber = new Controls.ChapterScrubber(seekScale);
+        chapterScrubber.ChapterClicked += normalized => viewModel.SeekTo(normalized);
 
         positionLabel = Gtk.Label.New("00:00");
         durationLabel = Gtk.Label.New("00:00");
@@ -187,7 +191,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         controlsBox.AddCssClass("vompl-controls-bar");
         controlsBox.Append(playPauseButton);
         controlsBox.Append(positionLabel);
-        controlsBox.Append(seekScale);
+        controlsBox.Append(chapterScrubber.Widget);
         controlsBox.Append(durationLabel);
 
         // Video sits inside an Overlay so fullscreen can move the controls on top of the video (valign=End + "osd" style class) without taking space in the layout. In windowed mode the overlay has no overlay children — controls are packed below in rootBox as usual.
@@ -408,6 +412,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 bool hasMedia = viewModel.Duration > TimeSpan.Zero;
                 seekScale.SetSensitive(hasMedia);
                 playPauseButton.SetSensitive(hasMedia);
+                // Re-push to the scrubber so its in-trough mark normalization (`time/duration`) updates whenever duration arrives or changes — covers both file-load (chapters fire before duration on some containers) and the rare same-file duration update.
+                chapterScrubber.SetChapters(viewModel.Chapters, viewModel.Duration.TotalSeconds);
+                break;
+            case nameof(ViewModelMain.Chapters):
+                chapterScrubber.SetChapters(viewModel.Chapters, viewModel.Duration.TotalSeconds);
                 break;
             case nameof(ViewModelMain.IsPaused):
                 playPauseButton.SetIconName(viewModel.IsPaused ? "media-playback-start" : "media-playback-pause");

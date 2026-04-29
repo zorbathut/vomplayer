@@ -40,6 +40,9 @@ public partial class ViewModelMainTests
         private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
 
         [ObservableProperty]
+        private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
+
+        [ObservableProperty]
         private int? currentVideoId;
 
         [ObservableProperty]
@@ -254,6 +257,16 @@ public partial class ViewModelMainTests
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.IsPaused = false;
         Assert.That(vm.IsPaused, Is.False);
+    }
+
+    [Test]
+    public void ChaptersMirrorPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        var snap = new[] { new MediaChapter(0, "Intro", 0.0), new MediaChapter(1, "Act 1", 60.0) };
+        pb.Chapters = snap;
+        Assert.That(vm.Chapters, Is.EqualTo(snap));
     }
 
     [Test]

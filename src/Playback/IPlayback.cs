@@ -7,6 +7,9 @@ namespace Vomplayer.Playback;
 // Snapshot of one of mpv's tracks (video, audio, or subtitle — same record shape covers all three since the relevant fields are identical). Id matches mpv's track id (the value passed to the kind-specific property — vid/aid/sid — to select it). Title and Lang are nullable because mpv reports them as property-unavailable when the source container didn't provide them. External=true marks tracks loaded via `*-add` (or auto) rather than embedded in the primary file; ExternalFilename is the basename of the source file when external (null for embedded tracks) — used by the per-directory preferences matcher to identify "this is the same external file across directory siblings". Plain readonly record so the snapshot can be replaced wholesale on each track-list change without consumers worrying about partial mutation.
 public sealed record MediaTrack(int Id, string? Title, string? Lang, bool External, string? ExternalFilename);
 
+// Snapshot of one of mpv's chapters. Index is the position in `chapter-list` (0-based, matches mpv's `chapter` writable property for jump-to). Title is nullable because some containers carry only timestamps. TimeSeconds is the chapter start time in source-content seconds (mpv exposes this via `chapter-list/N/time` as a double).
+public sealed record MediaChapter(int Index, string? Title, double TimeSeconds);
+
 public interface IPlayback : INotifyPropertyChanged, IDisposable
 {
     double PositionSeconds { get; }
@@ -20,6 +23,8 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     IReadOnlyList<MediaTrack> VideoTracks { get; }
     IReadOnlyList<MediaTrack> AudioTracks { get; }
     IReadOnlyList<MediaTrack> SubtitleTracks { get; }
+    // Source's chapter list (ordered by mpv index). Replaced wholesale on chapter-list changes (file load, eject, etc.). Empty for chapter-less files.
+    IReadOnlyList<MediaChapter> Chapters { get; }
     // mpv's currently-selected track id per kind, or null when no track is active (vid/aid/sid=no, or no file loaded). Mirrors `current-tracks/{video,audio,sub}/id`.
     int? CurrentVideoId { get; }
     int? CurrentAudioId { get; }

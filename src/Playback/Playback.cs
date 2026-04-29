@@ -43,6 +43,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
 
+    // Snapshot of mpv's chapter-list. Re-walked on chapter-list/count changes (covers file load + add/remove). Reset to empty on LoadFile / FileEnded so a stale chapter set from the previous file can never linger past a swap.
+    [ObservableProperty]
+    private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
+
     // Mirrors of mpv's `current-tracks/{video,audio,sub}/id`. Null when no track of that kind is active. Observed independently of track-list/count so the radio selection in each menu can update the moment the user picks a different track without waiting for a track-list change.
     [ObservableProperty]
     private int? currentVideoId;
@@ -124,6 +128,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("current-tracks/video/id", MpvFormat.Int64);
             h.ObserveProperty("current-tracks/audio/id", MpvFormat.Int64);
             h.ObserveProperty("current-tracks/sub/id", MpvFormat.Int64);
+            // chapter-list/count fires on file load and on any chapter add/remove. We re-walk the list on each fire. Observing /count rather than chapter-list itself is the same accommodation as track-list — MpvClient.ReadPropertyValue can't unpack NodeArray. The known edge case (a same-count list replacement, e.g. mpv-script chapter-add immediately followed by chapter-remove) is accepted: chapters change far less than tracks, and any file load changes the count anyway.
+            h.ObserveProperty("chapter-list/count", MpvFormat.Int64);
         });
     }
 
@@ -135,6 +141,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
         // Preemptive SDR reset: if the previous file was HDR, snap the surface and mpv targeting back to sRGB before the new file's params land. The observer upgrades to HDR again if the new file is PQ/HLG. Without this, an HDR→SDR playlist swap would leave the subsurface PQ-tagged while mpv decodes SDR content, producing the exact overdrive we're avoiding.
         UpdateSourceHdr(null);
+        // Preemptive chapter clear: drop any chapters from the previous file before the new file's count event lands, so a chapter-less follow-up can't render with stale markers in the gap between LoadFile and the first chapter-list/count fire.
+        UpdateChapters(Array.Empty<MediaChapter>());
         dispatcher.Post(h =>
         {
             h.Command("loadfile", path);
@@ -265,6 +273,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
             case "track-list/count":
                 // OnMpvPropertyChanged runs on the main thread (the dispatcher's PropertyChanged is forwarded through postToMainThread upstream in the constructor). Re-walking the track-list requires mpv client-API calls, which are pinned to the dispatcher worker — so ReloadTracks Post()s back onto the worker for the read, then re-marshals the snapshot to the main thread for the property assignment.
                 ReloadTracks();
+                break;
+            case "chapter-list/count":
+                ReloadChapters();
                 break;
             case "current-tracks/video/id":
                 UpdateCurrentVideoId((int?)change.Value.AsInt64);
@@ -428,6 +439,75 @@ public sealed partial class Playback : ObservableObject, IPlayback
         TracksReloaded?.Invoke();
     }
 
+    // Same shape as ReloadTracks but for chapter-list. Walked per-index because MpvClient.ReadPropertyValue doesn't unpack NodeArray. Title via GetPropertyString (nullable — some containers carry only timestamps); time via GetPropertyDouble (mpv reports it as a double directly).
+    private void ReloadChapters()
+    {
+        dispatcher.Post(h =>
+        {
+            var snapshot = ReadChaptersFromMpv(h);
+            postToMainThread(() => UpdateChapters(snapshot));
+        });
+    }
+
+    private static IReadOnlyList<MediaChapter> ReadChaptersFromMpv(MpvHandle h)
+    {
+        var empty = Array.Empty<MediaChapter>();
+        var countStr = h.GetPropertyString("chapter-list/count");
+        if (countStr == null)
+        {
+            return empty;
+        }
+        if (!int.TryParse(countStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out int count))
+        {
+            Console.Error.WriteLine($"[vomplayer] chapters: unparseable chapter-list/count='{countStr}'");
+            return empty;
+        }
+        if (count <= 0)
+        {
+            return empty;
+        }
+        var list = new List<MediaChapter>(count);
+        for (int i = 0; i < count; i++)
+        {
+            var time = h.GetPropertyDouble($"chapter-list/{i}/time");
+            if (!time.HasValue)
+            {
+                // mpv contracts every chapter to have a time; missing one is mid-walk race or a contract break. Log and skip.
+                Console.Error.WriteLine($"[vomplayer] chapters: missing time for chapter-list/{i}, skipping");
+                continue;
+            }
+            var title = h.GetPropertyString($"chapter-list/{i}/title");
+            list.Add(new MediaChapter(i, NullIfEmpty(title), time.Value));
+        }
+        return list;
+    }
+
+    // Internal so PlaybackTests can drive snapshot replacement without spinning up mpv. Same sequence-equality dedup pattern as UpdateVideoTracks et al — empty→empty and identical-list re-fires are suppressed so PropertyChanged consumers don't redraw for nothing.
+    internal void UpdateChapters(IReadOnlyList<MediaChapter> snapshot)
+    {
+        if (ChaptersEqual(Chapters, snapshot))
+        {
+            return;
+        }
+        Chapters = snapshot;
+    }
+
+    private static bool ChaptersEqual(IReadOnlyList<MediaChapter> a, IReadOnlyList<MediaChapter> b)
+    {
+        if (a.Count != b.Count)
+        {
+            return false;
+        }
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (a[i] != b[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // Internal so PlaybackTests can drive the property without spinning up mpv. The ObservableProperty setter already dedups same-value writes, so the gate here is purely for documentation symmetry with the Update*Tracks methods / UpdateHwdecCurrent.
     internal void UpdateCurrentVideoId(int? value)
     {
@@ -478,6 +558,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
     {
         // Reset HDR state back to SDR on every file-end, including error-path ends where no new file will follow. Keeps the subsurface from lingering in a PQ-tagged state after playback stops.
         UpdateSourceHdr(null);
+        // Drop chapters so the controls stop drawing markers as soon as playback ends. Mirrors the SDR reset above.
+        UpdateChapters(Array.Empty<MediaChapter>());
         FileEnded?.Invoke(reason);
     }
 

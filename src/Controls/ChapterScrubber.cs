@@ -1,0 +1,270 @@
+using System;
+using System.Collections.Generic;
+using Vomplayer.Playback;
+using Vomplayer.Util;
+
+namespace Vomplayer.Controls;
+
+// Adds chapter-marker behavior to a horizontal Gtk.Scale. Ticks are drawn entirely by Cairo onto a non-targetable Gtk.DrawingArea overlay layered above the scale.
+//
+// Why not Gtk.Scale.AddMark: AddMark reserves `> marks` subnodes above and below the trough, which grows the controls bar by the indicator height on each side. Even with CSS min-height 0 / 2 px, you pay 4 px of bar growth and the indicator is too short to read as a clear chapter tick. Cairo painting uses space the scale ALREADY owns (the vertical padding inside the scale's natural height — the slider thumb is taller than the trough, so there's a few px of slack on each side of the trough). Painting into that slack gives a noticeably taller tick at zero bar-height cost.
+//
+// Composition over inheritance: GirCore's GObject subclassing story is fragile (see DiagnosticOverlay.cs). We own a Gtk.Overlay (scale + transparent hover layer) and expose it via Widget.
+//
+// Click routing: a Capture-phase Gtk.GestureClick on the scale watches every press. If the press lands within the trough's Y range (Gtk.Range.GetRangeRect), we don't claim — the scale's own internal click gesture sees the press and runs normal click-to-seek. If the press lands above or below the trough (i.e. inside the tick-mark region) AND is within ClickToleranceTpx of a chapter's X, we emit ChapterClicked and SetState(Claimed) to deny the scale's own gesture; trough-Y clicks are never claimed, so "click on the bar itself even right over a marker" cannot snap to a chapter. Off-marker clicks in the tick region don't claim either, so they fall through to the scale's normal seek-to-X — keeps full-width clickability of the scale intact.
+//
+// Hover affordance: a motion controller on the scale tracks the hovered chapter (the chapter under the cursor's X within tolerance, when the cursor's Y is in the tick region). While a chapter is hovered, the scale's cursor switches to "pointer" and the hovered chapter paints bright white (vs. the dim theme-fg default) — an "active marker" visual. The overlay is SetCanTarget(false) so clicks pass straight through to the scale.
+//
+// X math: chapter ticks are positioned at `effectiveLeft + V * effectiveWidth`, where the effective range is the trough's allocation rect (from Gtk.Widget.ComputeBounds) shrunk on each side by `trough.padding + trough.border + slider.padding + slider.border` (all from Gtk.StyleContext queries). Empirically (from a regression on 30+ logged sliderValue→slider.center pairs across the V range), GTK constrains the slider thumb's allocation such that its border-box fits inside the trough's content area — so the slider's center can never reach within `(trough.border+padding) + (slider.border+padding)` px of the trough's allocation edge. With Adwaita's `tBdr=(1,1) sBdr=(1,1)` that's 2 px on each side; with f3-formula residuals < 1px across V, vs the gtk_range_compute_slider_position-style documented formula which gave residuals up to ±7px, vs trough-padding-only which gave ±1.7px drifting linearly with V. The slider's CSS margin (typically negative on Adwaita: -9px each side) does NOT enter the position formula — it controls visual overhang of the rendered thumb beyond its allocation, not where the allocation sits. We deliberately don't use Gtk.Range.GetRangeRect / GetSliderRange: GetRangeRect coords are in a different coord space than the hoverLayer's Cairo coords (scale's CSS margin shifts them), and GetSliderRange has been observed to return zero/stale values during first paint. ComputeBounds gives the rendered rect directly in any target's coord space, so we ask for it in hoverLayer coords for paint and in scale coords for hit-test against motion-event args.X.
+public sealed class ChapterScrubber
+{
+    // Click hit-test tolerance in pixels.
+    private const double ClickToleranceTpx = 6.0;
+
+    private readonly Gtk.Overlay overlay;
+    private readonly Gtk.Scale scale;
+    private readonly Gtk.DrawingArea hoverLayer;
+
+    private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
+    private double durationSeconds;
+    // Cached trough/slider subwidget references. Looked up lazily on first RefreshGeometry — the scale is realized by then. CSS names "trough" / "slider" are stable across GTK4 themes since they're set by GtkRange itself, not by the theme.
+    private Gtk.Widget? troughWidget;
+    private Gtk.Widget? sliderWidget;
+    // Trough rect in hoverLayer (= Cairo paint) coords.
+    private double troughLeftInHoverPx;
+    private double troughTopInHoverPx;
+    private double troughWidthInHoverPx;
+    private double troughHeightInHoverPx;
+    // Trough rect in scale-local coords (= motion-event args.X coords).
+    private double troughLeftInScalePx;
+    private double troughTopInScalePx;
+    private double troughWidthInScalePx;
+    private double troughHeightInScalePx;
+    // Per-side inset from the trough's allocation edge to where the slider thumb's center can reach. Equals trough's CSS (padding+border) + slider's CSS (padding+border) — empirically derived from logged slider positions; see the class-level comment.
+    private double troughInsetLeftPx;
+    private double troughInsetRightPx;
+    // Time of the chapter currently under the cursor, null when no marker is hovered.
+    private double? hoveredChapterTime;
+
+    public event Action<double>? ChapterClicked;
+
+    public Gtk.Widget Widget
+    {
+        get
+        {
+            return overlay;
+        }
+    }
+
+    public ChapterScrubber(Gtk.Scale scale)
+    {
+        if (scale == null)
+        {
+            throw new ArgumentNullException(nameof(scale));
+        }
+        this.scale = scale;
+
+        overlay = Gtk.Overlay.New();
+        overlay.SetHexpand(true);
+        overlay.SetChild(scale);
+
+        hoverLayer = Gtk.DrawingArea.New();
+        // CanTarget=false makes the overlay invisible to pointer hit-testing — clicks/motion go straight to the scale beneath. Without this, the overlay would intercept everything and the scale would never see input.
+        hoverLayer.SetCanTarget(false);
+        // Hexpand/Vexpand are load-bearing: a default DrawingArea has 0x0 natural size, so without expansion Gtk.Overlay would allocate a minimum-sized child and the `height` passed to DrawHover would be a few pixels — clipping the Cairo lines to nearly nothing. Both expands force the overlay to size the layer to the full scale rectangle.
+        hoverLayer.SetHexpand(true);
+        hoverLayer.SetVexpand(true);
+        hoverLayer.SetDrawFunc(DrawHover);
+        overlay.AddOverlay(hoverLayer);
+
+        // Capture phase: runs before the scale's internal click-to-seek gesture so we can claim the sequence and deny it. The legacy event controller already attached to the scale in MainWindow runs at Capture too but never claims (returns FALSE), so the two coexist.
+        var click = Gtk.GestureClick.New();
+        click.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        click.OnPressed += OnScalePressed;
+        scale.AddController(click);
+
+        var motion = Gtk.EventControllerMotion.New();
+        motion.OnMotion += OnScaleMotion;
+        motion.OnLeave += OnScaleLeave;
+        scale.AddController(motion);
+    }
+
+    private void RefreshGeometry()
+    {
+        if (troughWidget == null)
+        {
+            troughWidget = FindByCssName(scale, "trough");
+        }
+        if (sliderWidget == null)
+        {
+            sliderWidget = FindByCssName(scale, "slider");
+        }
+        if (troughWidget == null || sliderWidget == null)
+        {
+            return;
+        }
+        if (troughWidget.ComputeBounds(hoverLayer, out var inHover))
+        {
+            troughLeftInHoverPx = inHover.GetX();
+            troughTopInHoverPx = inHover.GetY();
+            troughWidthInHoverPx = inHover.GetWidth();
+            troughHeightInHoverPx = inHover.GetHeight();
+        }
+        if (troughWidget.ComputeBounds(scale, out var inScale))
+        {
+            troughLeftInScalePx = inScale.GetX();
+            troughTopInScalePx = inScale.GetY();
+            troughWidthInScalePx = inScale.GetWidth();
+            troughHeightInScalePx = inScale.GetHeight();
+        }
+        var troughStyle = troughWidget.GetStyleContext();
+        troughStyle.GetPadding(out var troughPadding);
+        troughStyle.GetBorder(out var troughBorder);
+        var sliderStyle = sliderWidget.GetStyleContext();
+        sliderStyle.GetPadding(out var sliderPadding);
+        sliderStyle.GetBorder(out var sliderBorder);
+        troughInsetLeftPx = troughPadding.Left + troughBorder.Left + sliderPadding.Left + sliderBorder.Left;
+        troughInsetRightPx = troughPadding.Right + troughBorder.Right + sliderPadding.Right + sliderBorder.Right;
+    }
+
+    private static Gtk.Widget? FindByCssName(Gtk.Widget root, string cssName)
+    {
+        var child = root.GetFirstChild();
+        while (child != null)
+        {
+            if (child.GetCssName() == cssName)
+            {
+                return child;
+            }
+            var found = FindByCssName(child, cssName);
+            if (found != null)
+            {
+                return found;
+            }
+            child = child.GetNextSibling();
+        }
+        return null;
+    }
+
+    // True if (x, y) is in the tick region (outside the trough's Y range) AND aligned with a chapter's X within tolerance. Returns the chapter time when so; null otherwise. Trough-Y clicks deliberately return null even if X aligns with a marker — that's the "clicking the bar itself doesn't snap to chapter" requirement.
+    private double? HitTestTickArea(double x, double y)
+    {
+        if (durationSeconds <= 0)
+        {
+            return null;
+        }
+        double effectiveLeft = troughLeftInScalePx + troughInsetLeftPx;
+        double effectiveWidth = troughWidthInScalePx - troughInsetLeftPx - troughInsetRightPx;
+        if (effectiveWidth <= 0)
+        {
+            return null;
+        }
+        if (y >= troughTopInScalePx && y < troughTopInScalePx + troughHeightInScalePx)
+        {
+            return null;
+        }
+        return ChapterHitTest.NearestTimeSeconds(x, effectiveLeft, effectiveWidth, durationSeconds, chapters, ClickToleranceTpx);
+    }
+
+    private void OnScalePressed(Gtk.GestureClick gesture, Gtk.GestureClick.PressedSignalArgs args)
+    {
+        RefreshGeometry();
+        var time = HitTestTickArea(args.X, args.Y);
+        if (!time.HasValue)
+        {
+            return;
+        }
+        ChapterClicked?.Invoke(time.Value / durationSeconds);
+        // Claim denies the scale's own click gesture. Without this, the scale would also seek-to-X for the same press and the chapter seek would be visibly overridden by the trough-X seek.
+        gesture.SetState(Gtk.EventSequenceState.Claimed);
+    }
+
+    private void OnScaleMotion(Gtk.EventControllerMotion sender, Gtk.EventControllerMotion.MotionSignalArgs args)
+    {
+        RefreshGeometry();
+        var time = HitTestTickArea(args.X, args.Y);
+        if (time == hoveredChapterTime)
+        {
+            return;
+        }
+        hoveredChapterTime = time;
+        scale.SetCursorFromName(time.HasValue ? "pointer" : null);
+        hoverLayer.QueueDraw();
+    }
+
+    private void OnScaleLeave(Gtk.EventControllerMotion sender, EventArgs args)
+    {
+        if (!hoveredChapterTime.HasValue)
+        {
+            return;
+        }
+        hoveredChapterTime = null;
+        scale.SetCursorFromName(null);
+        hoverLayer.QueueDraw();
+    }
+
+    // Update the chapter set and the duration ticks are computed against. The actual tick rendering happens in DrawHover; this just stashes state and queues a redraw.
+    public void SetChapters(IReadOnlyList<MediaChapter> newChapters, double newDurationSeconds)
+    {
+        if (newChapters == null)
+        {
+            throw new ArgumentNullException(nameof(newChapters));
+        }
+        chapters = newChapters;
+        durationSeconds = newDurationSeconds;
+        // Hover identity may no longer correspond to where the cursor sits (chapter X positions just changed). Clear; next OnMotion will re-establish.
+        if (hoveredChapterTime.HasValue)
+        {
+            hoveredChapterTime = null;
+            scale.SetCursorFromName(null);
+        }
+        hoverLayer.QueueDraw();
+    }
+
+    // Paints every chapter as a 2-px-wide vertical Cairo line at the trough-relative X for that chapter's time. The line spans from a few pixels above the trough to a few pixels below — landing inside the scale's natural slider-thumb-height padding, so the bar's allocated height is unchanged. Non-hovered ticks use the scale's theme foreground color so they read correctly across light/dark themes. The hovered tick switches to bright white as the "active marker" feedback.
+    private void DrawHover(Gtk.DrawingArea area, Cairo.Context cr, int width, int height)
+    {
+        if (durationSeconds <= 0 || chapters.Count == 0)
+        {
+            return;
+        }
+        // Refresh geometry — the layer paints lazily and the cached values may be stale on first paint after layout.
+        RefreshGeometry();
+        double effectiveLeft = troughLeftInHoverPx + troughInsetLeftPx;
+        double effectiveWidth = troughWidthInHoverPx - troughInsetLeftPx - troughInsetRightPx;
+        if (effectiveWidth <= 0)
+        {
+            return;
+        }
+        // Tick extends a few pixels above and below the trough. The scale's natural height accommodates the slider thumb (taller than the trough), so there's a few px of slack on each side of the trough we can paint into without growing the bar. Clamp to [0, height] in case the scale is unusually tight.
+        const double TickExtensionPx = 4.0;
+        double tickTop = Math.Max(0, troughTopInHoverPx - TickExtensionPx);
+        double tickBottom = Math.Min(height, troughTopInHoverPx + troughHeightInHoverPx + TickExtensionPx);
+        scale.GetStyleContext().GetColor(out var fg);
+        double fgR = fg.Red;
+        double fgG = fg.Green;
+        double fgB = fg.Blue;
+        cr.LineWidth = 2.0;
+        for (int i = 0; i < chapters.Count; i++)
+        {
+            double t = chapters[i].TimeSeconds;
+            if (t <= 0 || t >= durationSeconds)
+            {
+                continue;
+            }
+            double x = effectiveLeft + (t / durationSeconds) * effectiveWidth;
+            bool hovered = hoveredChapterTime.HasValue && hoveredChapterTime.Value == t;
+            if (hovered)
+            {
+                cr.SetSourceRgba(1.0, 1.0, 1.0, 1.0);
+            }
+            else
+            {
+                cr.SetSourceRgba(fgR, fgG, fgB, 0.9);
+            }
+            cr.MoveTo(x, tickTop);
+            cr.LineTo(x, tickBottom);
+            cr.Stroke();
+        }
+    }
+}

@@ -74,6 +74,9 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
 
     [ObservableProperty]
+    private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
+
+    [ObservableProperty]
     private int? currentVideoId;
 
     [ObservableProperty]
@@ -396,6 +399,9 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
                 break;
             case nameof(IPlayback.SubtitleTracks):
                 SubtitleTracks = playback.SubtitleTracks;
+                break;
+            case nameof(IPlayback.Chapters):
+                Chapters = playback.Chapters;
                 break;
             case nameof(IPlayback.CurrentVideoId):
                 CurrentVideoId = playback.CurrentVideoId;
