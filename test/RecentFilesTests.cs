@@ -293,4 +293,133 @@ public class RecentFilesTests
         cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='track_preferences';";
         Assert.That(cmd.ExecuteScalar(), Is.EqualTo("track_preferences"));
     }
+
+    // --- Per-file play position (v3) ---
+
+    [Test]
+    public void RecordAndGetPositionRoundtrip()
+    {
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        rf.Record("/a.mp4");
+        rf.RecordPosition("/a.mp4", 123.45);
+        Assert.That(rf.GetPosition("/a.mp4"), Is.EqualTo(123.45));
+    }
+
+    [Test]
+    public void GetPositionForUnknownFileReturnsNull()
+    {
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        Assert.That(rf.GetPosition("/never-recorded.mp4"), Is.Null);
+    }
+
+    [Test]
+    public void GetPositionWhenNeverRecordedPositionReturnsNull()
+    {
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        rf.Record("/a.mp4");
+        Assert.That(rf.GetPosition("/a.mp4"), Is.Null);
+    }
+
+    [Test]
+    public void RecordPositionDoesNotAffectRecentsOrder()
+    {
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        rf.Record("/a.mp4");
+        rf.Record("/b.mp4");
+        rf.RecordPosition("/a.mp4", 50);
+        var entries = rf.GetMostRecent(10);
+        Assert.That(entries, Has.Count.EqualTo(2));
+        Assert.That(entries[0].PathOrUri, Is.EqualTo("/b.mp4"));
+        Assert.That(entries[1].PathOrUri, Is.EqualTo("/a.mp4"));
+    }
+
+    [Test]
+    public void ReRecordingFileDoesNotClobberPosition()
+    {
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        rf.Record("/a.mp4");
+        rf.RecordPosition("/a.mp4", 50);
+        rf.Record("/a.mp4");
+        Assert.That(rf.GetPosition("/a.mp4"), Is.EqualTo(50));
+    }
+
+    [Test]
+    public void RecordPositionForUnrecordedFileIsSilentNoOp()
+    {
+        // RecordPosition is reachable only via VM paths that always Record() first, so the file should already be in recents. If somehow it isn't, the UPDATE matches zero rows — don't synthesize a phantom recents row from the position side channel.
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        Assert.DoesNotThrow(() => rf.RecordPosition("/never-recorded.mp4", 50));
+        Assert.That(rf.GetPosition("/never-recorded.mp4"), Is.Null);
+        Assert.That(rf.GetMostRecent(10), Is.Empty);
+    }
+
+    [Test]
+    public void PositionSurvivesAcrossOpens()
+    {
+        var path = DbPath();
+        using (var __db_rf = StateDatabase.Open(path))
+        {
+            var rf = new RecentFiles(__db_rf.Connection);
+            rf.Record("/persistent.mp4");
+            rf.RecordPosition("/persistent.mp4", 77.5);
+        }
+        using (var __db_rf2 = StateDatabase.Open(path))
+        {
+            var rf2 = new RecentFiles(__db_rf2.Connection);
+            Assert.That(rf2.GetPosition("/persistent.mp4"), Is.EqualTo(77.5));
+        }
+    }
+
+    [Test]
+    public void RecordPositionEmptyPathThrows()
+    {
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        Assert.Throws<ArgumentException>(() => rf.RecordPosition("", 50));
+    }
+
+    [Test]
+    public void V2RecentsAndPrefsDataSurviveV3Migration()
+    {
+        // Pre-stage a v2 DB with both a recents row and a track_preferences row, then run normal Open() which carries through v2→v3 (an ALTER TABLE rather than a CREATE TABLE — first migration of that shape, so worth covering explicitly). All v2 data must survive, the new position_seconds column must default to NULL on the existing recents row, and RecordPosition must work against that pre-existing row.
+        var path = DbPath();
+        long t0 = DateTimeOffset.UtcNow.UtcTicks;
+        using (var conn = StateDatabase.OpenConnectionAndMigrateTo(path, 2))
+        {
+            using var insertRecents = conn.CreateCommand();
+            insertRecents.CommandText = "INSERT INTO recent_files (path_or_uri, last_opened, open_count) VALUES ('/v2.mp4', $t, 5);";
+            insertRecents.Parameters.AddWithValue("$t", t0);
+            insertRecents.ExecuteNonQuery();
+
+            using var insertPrefs = conn.CreateCommand();
+            insertPrefs.CommandText = "INSERT INTO track_preferences (directory, kind, is_none, title, lang, external, external_filename, index_in_kind) VALUES ('/somedir', 'audio', 0, 'English', 'eng', 0, NULL, 0);";
+            insertPrefs.ExecuteNonQuery();
+        }
+
+        using (var __db_rf = StateDatabase.Open(path))
+        {
+            var rf = new RecentFiles(__db_rf.Connection);
+            var entries = rf.GetMostRecent(10);
+            Assert.That(entries, Has.Count.EqualTo(1));
+            Assert.That(entries[0].PathOrUri, Is.EqualTo("/v2.mp4"));
+            Assert.That(entries[0].OpenCount, Is.EqualTo(5));
+            Assert.That(rf.GetPosition("/v2.mp4"), Is.Null);
+            rf.RecordPosition("/v2.mp4", 42);
+            Assert.That(rf.GetPosition("/v2.mp4"), Is.EqualTo(42));
+        }
+
+        using var probe = new SqliteConnection($"Data Source={path}");
+        probe.Open();
+        using var cmd = probe.CreateCommand();
+        cmd.CommandText = "PRAGMA user_version;";
+        Assert.That(Convert.ToInt32(cmd.ExecuteScalar()), Is.EqualTo(StateDatabase.CurrentSchemaVersion));
+        cmd.CommandText = "SELECT title FROM track_preferences WHERE directory = '/somedir' AND kind = 'audio';";
+        Assert.That(cmd.ExecuteScalar(), Is.EqualTo("English"));
+    }
 }

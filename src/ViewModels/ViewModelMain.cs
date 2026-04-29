@@ -22,6 +22,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
     }
 
+    // Threshold (in source-content seconds) between periodic saves during playback. Position-delta-based, not wallclock, so 2× playback speed still saves every 10s of *content*. Tuned to the user's "every 5–15s while playing" guidance — 10s is the middle of that band.
+    private const double PeriodicSaveThresholdSeconds = 10.0;
+    // Don't save (or apply) a resume position within this many seconds of the file's end. Otherwise watching to completion leaves a saved position at ~duration, and the next reload jumps straight to the EOF state.
+    private const double NearEndIgnoreSeconds = 5.0;
+
     private readonly IPlayback playback;
     private readonly IFilePicker filePicker;
     private readonly IRecentFiles recentFiles;
@@ -31,6 +36,16 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     //
     // Known limitation (rapid file swap): OpenFile(B) overwrites this before FileLoaded for A arrives if the user opens two files in quick succession. The first-file's TracksReloaded then matches against B's directory preferences. Rare in practice, self-correcting on the next load. Fixing properly would require correlating mpv's `path` property with the load that triggered it.
     private string? currentDirectoryKey;
+    // The full path-or-URI for the most recent OpenFile target. Distinct from currentDirectoryKey because the position layer keys on the file itself, not its directory. Set in OpenFile alongside currentDirectoryKey, used by every save trigger to identify which row to update. Null pre-OpenFile and after the outgoing-file save for a non-local source clears it.
+    private string? currentFilePath;
+    // False from OpenFile until the matching FileLoaded fires. Gates position saves so that mpv's load-time IsPaused churn doesn't spuriously persist position 0 against the new file. (DurationSeconds > 0 is *almost* the same gate, but DurationSeconds can briefly carry the previous file's value across the unload/reload window before the new file's duration arrives — currentFileLoaded is the unambiguous signal.)
+    private bool currentFileLoaded;
+    // Last position we successfully persisted for the current file (in source-content seconds). Used by the periodic-save throttle. Reset to 0 on every OpenFile so the new file's first 10s milestone isn't taken to be already saved.
+    private double lastSavedPositionSeconds;
+    // Saved position to seek to once FileLoaded fires (i.e. once duration is known). Set in OpenFile, cleared in ApplyResumePositionIfPending.
+    private double? pendingResumePosition;
+    // Previous IsPaused value, for rising-edge detection in OnPlaybackPropertyChanged. Updated only by real PropertyChanged events — never re-snapshotted from playback.IsPaused on OpenFile, because the snapshot would race a queued-but-not-yet-dispatched IsPaused event from the dispatcher worker, leaving wasPaused out of sync with the next edge the handler sees.
+    private bool wasPaused = true;
     // Per-kind apply tracking: each kind that has been successfully applied for the current file load is in this set. Reset on FileLoaded so the next file gets a fresh attempt for all three. Each TracksReloaded fire retries any kind not yet in the set, which handles mpv's lazy track discovery (e.g., external sub-auto landing in a later TracksReloaded than the embedded tracks).
     private readonly HashSet<MediaKind> appliedKindsForCurrentFile = new();
     // Set on FileLoaded, cleared on the next FileLoaded. Distinguishes "we're in the apply window" from "no file load is pending" so that user-driven track-list changes (sub-add later in the session) don't trigger spurious applies.
@@ -174,10 +189,18 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Direct path/URI load, bypassing the file picker. Used by drag-and-drop. Accepts whatever libmpv accepts: a local filesystem path, or a remote URI (http://, https://, smb://, …).
     public void OpenFile(string pathOrUri)
     {
+        // Save the OUTGOING file's position synchronously, before mutating any per-file state. This is the primary "user moved on from this file" save trigger and replaces the obvious-but-broken alternative of subscribing to FileEnded: mpv's EndFile event delivers its reason field via a separate struct that the existing MpvClient.Dispatch reads incorrectly (it reads evt.Error, not the mpv_event_end_file.reason behind evt.Data) — and even with that fixed, at EOF with keep-open=yes time-pos parks at duration so the near-end filter would always elide the save. Saving here, on the user's deliberate "open new file" action, dodges both problems.
+        SaveCurrentPositionIfEligible();
+
         recentFiles.Record(pathOrUri);
         // Resolve and cache the directory key NOW so Select* calls between LoadFile and the next OpenFile can reach it. URIs return null and disable persistence for this file.
         currentDirectoryKey = TrackPreferences.TryGetDirectoryKey(pathOrUri);
-        PrefsLog($"OpenFile: pathOrUri={pathOrUri} → directoryKey={currentDirectoryKey ?? "<null>"}");
+        currentFilePath = pathOrUri;
+        currentFileLoaded = false;
+        lastSavedPositionSeconds = 0;
+        // Look up the saved position only for local files. URI sources don't accumulate positions, so skipping the GetPosition call also keeps test fakes' GetPositionCalls clean.
+        pendingResumePosition = TrackPreferences.IsLocalFilesystemPath(pathOrUri) ? recentFiles.GetPosition(pathOrUri) : null;
+        PrefsLog($"OpenFile: pathOrUri={pathOrUri} → directoryKey={currentDirectoryKey ?? "<null>"}, resumePos={(pendingResumePosition?.ToString() ?? "<null>")}");
         playback.LoadFile(pathOrUri);
     }
 
@@ -217,8 +240,70 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         // Open the apply window for this file load, reset per-kind tracking, and apply immediately. mpv discovers tracks BEFORE firing FileLoaded — the only TracksReloaded that carries the new file's tracks lands ahead of FileLoaded, so waiting for "TracksReloaded after FileLoaded" misses it entirely. By FileLoaded time the VM mirror is populated; apply runs against it. The TracksReloaded retry path below still handles any post-FileLoaded track-list changes (e.g., a sub auto-loaded later, or the user adding one via menu — though the per-kind gate prevents re-applying kinds already settled).
         inApplyWindow = true;
         appliedKindsForCurrentFile.Clear();
+        currentFileLoaded = true;
         PrefsLog($"FileLoaded: directoryKey={currentDirectoryKey ?? "<null>"}, applying preferences");
         ApplyTrackPreferences();
+        ApplyResumePositionIfPending();
+    }
+
+    // Seek to the saved position once both FileLoaded has fired AND duration is known. mpv's emission order between MPV_EVENT_FILE_LOADED and the property-change for `duration` isn't contractually guaranteed — track lists arrive before FileLoaded (per OnPlaybackFileLoaded's existing comment) but duration may not — so we re-attempt from both events and only commit pendingResumePosition (clear it) when we have enough info to make a final decision. Brief (~50–150ms) flash of position-0 playback before the seek lands is a known cost; alternatives (mpv's `loadfile … start=N` option, pause-before-loadfile / unpause-after-seek) were rejected for fragility. Filter on (0, duration - NearEndIgnoreSeconds): zero saves a redundant seek when the natural start is fine, near-end avoids the "watched to completion → reload jumps to EOF" footgun.
+    private void ApplyResumePositionIfPending()
+    {
+        if (!currentFileLoaded)
+        {
+            return;
+        }
+        if (!pendingResumePosition.HasValue)
+        {
+            return;
+        }
+        double duration = playback.DurationSeconds;
+        if (duration <= 0)
+        {
+            return;
+        }
+        // Both gates passed — commit one way or another. Clear pendingResumePosition so a subsequent duration update doesn't re-apply.
+        var resume = pendingResumePosition.Value;
+        pendingResumePosition = null;
+        if (resume <= 0 || resume >= duration - NearEndIgnoreSeconds)
+        {
+            PrefsLog($"resume: skipped (pos={resume} duration={duration} — at boundary)");
+            return;
+        }
+        PrefsLog($"resume: seeking to {resume} (duration={duration})");
+        playback.Seek(resume);
+        // Prime the periodic-save throttle so the first save after resume is at resume+10, not at 10.
+        lastSavedPositionSeconds = resume;
+    }
+
+    // Single eligibility-checked save path. All four save triggers (periodic, pause-edge, OpenFile-outgoing, Dispose) funnel through here so the gate stays consistent. After a successful save, lastSavedPositionSeconds is updated so the periodic throttle's next milestone is measured from this save, not the previous one.
+    private void SaveCurrentPositionIfEligible()
+    {
+        if (currentFilePath == null)
+        {
+            return;
+        }
+        if (!currentFileLoaded)
+        {
+            return;
+        }
+        if (!TrackPreferences.IsLocalFilesystemPath(currentFilePath))
+        {
+            return;
+        }
+        double duration = playback.DurationSeconds;
+        if (duration <= 0)
+        {
+            return;
+        }
+        double position = playback.PositionSeconds;
+        if (position >= duration - NearEndIgnoreSeconds)
+        {
+            return;
+        }
+        recentFiles.RecordPosition(currentFilePath, position);
+        lastSavedPositionSeconds = position;
+        PrefsLog($"position saved: file={currentFilePath} pos={position:F3} duration={duration:F3}");
     }
 
     private void OnPlaybackTracksReloaded()
@@ -281,12 +366,27 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
                 {
                     SeekValue = Math.Clamp(playback.PositionSeconds / playback.DurationSeconds, 0, 1);
                 }
+                // Periodic save during playback: save once we've advanced PeriodicSaveThresholdSeconds since the previous save. Position-delta-based so it catches both forward playback AND large jumps from a recent (untracked) seek. The !IsPaused gate is purely a "skip cheap work while the user is paused" optimization — at EOF with keep-open=yes mpv keeps PositionSeconds at duration with IsPaused=false, so the gate doesn't catch that case; the near-end position filter inside SaveCurrentPositionIfEligible does.
+                if (!playback.IsPaused
+                    && Math.Abs(playback.PositionSeconds - lastSavedPositionSeconds) >= PeriodicSaveThresholdSeconds)
+                {
+                    SaveCurrentPositionIfEligible();
+                }
                 break;
             case nameof(IPlayback.DurationSeconds):
                 Duration = TimeSpan.FromSeconds(playback.DurationSeconds);
+                // Late-arriving duration retry: when FileLoaded fired before the duration property-change, ApplyResumePositionIfPending bailed without clearing pendingResumePosition. Now that we have a duration, retry.
+                ApplyResumePositionIfPending();
                 break;
             case nameof(IPlayback.IsPaused):
-                IsPaused = playback.IsPaused;
+                // Detect the rising edge (play → pause) and save then. Falling edge (pause → play) carries no new positional information beyond what the periodic save will catch within the next PeriodicSaveThresholdSeconds.
+                bool nowPaused = playback.IsPaused;
+                if (nowPaused && !wasPaused)
+                {
+                    SaveCurrentPositionIfEligible();
+                }
+                wasPaused = nowPaused;
+                IsPaused = nowPaused;
                 break;
             case nameof(IPlayback.VideoTracks):
                 VideoTracks = playback.VideoTracks;
@@ -311,6 +411,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        // Final position save before tear-down. Window-close path runs viewModel.Dispose() before playback.Dispose() (see MainWindow.OnWindowCloseRequest), and the SQLite connection lives in Program.cs's `using var stateDb` which outlives both — so the DB call here is safe.
+        SaveCurrentPositionIfEligible();
         playback.PropertyChanged -= OnPlaybackPropertyChanged;
         playback.FileLoaded -= OnPlaybackFileLoaded;
         playback.TracksReloaded -= OnPlaybackTracksReloaded;

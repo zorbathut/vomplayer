@@ -162,6 +162,10 @@ public partial class ViewModelMainTests
     private sealed class FakeRecentFiles : IRecentFiles
     {
         public List<string> RecordedPaths { get; } = new();
+        // Pre-seed via the dictionary to simulate "this file already has a saved position"; mutated by RecordPosition for save-side assertions.
+        public Dictionary<string, double> Positions { get; } = new();
+        public List<(string Path, double Position)> RecordedPositions { get; } = new();
+        public List<string> GetPositionCalls { get; } = new();
 
         public void Record(string pathOrUri)
         {
@@ -171,6 +175,18 @@ public partial class ViewModelMainTests
         public IReadOnlyList<RecentFileEntry> GetMostRecent(int limit)
         {
             return Array.Empty<RecentFileEntry>();
+        }
+
+        public void RecordPosition(string pathOrUri, double positionSeconds)
+        {
+            RecordedPositions.Add((pathOrUri, positionSeconds));
+            Positions[pathOrUri] = positionSeconds;
+        }
+
+        public double? GetPosition(string pathOrUri)
+        {
+            GetPositionCalls.Add(pathOrUri);
+            return Positions.TryGetValue(pathOrUri, out var p) ? p : null;
         }
     }
 
@@ -821,5 +837,347 @@ public partial class ViewModelMainTests
         pb.RaiseTracksReloaded();
         Assert.That(pb.AudioSelections, Is.Empty);
         Assert.That(prefs.GetCalls, Is.Empty);
+    }
+
+    // --- Per-file play position: save triggers + apply on reload ---
+
+    [Test]
+    public void OpenFileWithSavedPositionSeeksAfterFileLoaded()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        recents.Positions[path] = 60;
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            vm.OpenFile(path);
+            // Apply happens on FileLoaded (which is when duration is reliably populated in the real flow), not on OpenFile itself.
+            Assert.That(pb.LastSeekSeconds, Is.Null);
+            pb.RaiseFileLoaded();
+            Assert.That(pb.LastSeekSeconds, Is.EqualTo(60));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void OpenFileWithSavedPositionAppliesWhenDurationArrivesAfterFileLoaded()
+    {
+        // mpv's emission order between MPV_EVENT_FILE_LOADED and the synthesized property-change for `duration` is not contractually guaranteed: track lists land before FileLoaded (per the existing comment at OnPlaybackFileLoaded), but duration may land after on some versions / formats. The apply must work regardless of which arrives first.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        recents.Positions[path] = 60;
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            // Simulate "FileLoaded fires before duration is known" — DurationSeconds defaults to 0 on FakePlayback.
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            Assert.That(pb.LastSeekSeconds, Is.Null, "duration not yet known, no seek possible");
+
+            // Now duration arrives.
+            pb.DurationSeconds = 600;
+            Assert.That(pb.LastSeekSeconds, Is.EqualTo(60), "apply must retry once duration is known");
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void OpenFileWithoutSavedPositionDoesNotSeek()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            Assert.That(pb.LastSeekSeconds, Is.Null);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void OpenFileWithSavedPositionPastDurationDoesNotSeek()
+    {
+        // Saved position is within 5 seconds of the end — ignore it and start fresh. Same near-end filter the save side uses; symmetric.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        recents.Positions[path] = 597;
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            Assert.That(pb.LastSeekSeconds, Is.Null);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void OpenFileWithSavedPositionZeroDoesNotSeek()
+    {
+        // Don't waste a seek round-trip when the saved position is the natural start position.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        recents.Positions[path] = 0;
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            Assert.That(pb.LastSeekSeconds, Is.Null);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void OpenFileSavesOutgoingFilesPosition()
+    {
+        // The "user moved on from file A to file B" case. Save A's position synchronously inside OpenFile(B), before currentFilePath is overwritten. Replaces the FileEnded subscription idea — see plan notes about the broken evt.Error reason field and the EOF/keep-open=yes incoherence.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var pathA = LocalPathInTemp("a.mkv");
+        var pathB = LocalPathInTemp("b.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            vm.OpenFile(pathA);
+            pb.RaiseFileLoaded();
+            pb.PositionSeconds = 60;
+            // Default IsPaused=true means the periodic save is gated off; only the outgoing-file save should appear when we switch to B.
+            vm.OpenFile(pathB);
+            Assert.That(recents.RecordedPositions, Has.Count.EqualTo(1));
+            Assert.That(recents.RecordedPositions[0].Path, Is.EqualTo(pathA));
+            Assert.That(recents.RecordedPositions[0].Position, Is.EqualTo(60));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(pathA)!, recursive: true);
+            Directory.Delete(Path.GetDirectoryName(pathB)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void PauseTransitionSavesPosition()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            pb.IsPaused = false;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            pb.PositionSeconds = 30;
+            // The position bump fires a periodic save (|30-0|>=10 with IsPaused=false). Drop it so the assertion isolates the pause-edge save.
+            recents.RecordedPositions.Clear();
+
+            pb.IsPaused = true;
+            Assert.That(recents.RecordedPositions, Has.Count.EqualTo(1));
+            Assert.That(recents.RecordedPositions[0].Path, Is.EqualTo(path));
+            Assert.That(recents.RecordedPositions[0].Position, Is.EqualTo(30));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void UnpausingDoesNotSavePosition()
+    {
+        // Only the rising edge (play→pause) saves; the falling edge (pause→play) carries no new information that the periodic save won't catch later.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            pb.IsPaused = true;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+
+            pb.IsPaused = false;
+            Assert.That(recents.RecordedPositions, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void PeriodicSaveDuringPlaybackFiresEveryTenSeconds()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            pb.IsPaused = false;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+
+            for (int i = 1; i <= 25; i++)
+            {
+                pb.PositionSeconds = i;
+            }
+            // Saves expected at 10 (|10-0|=10) and 20 (|20-10|=10). 25 is only +5 since the last save.
+            Assert.That(recents.RecordedPositions.Select(r => r.Position), Is.EqualTo(new[] { 10.0, 20.0 }));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void PeriodicSaveWhilePausedDoesNotFire()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            pb.IsPaused = true;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+
+            for (int i = 1; i <= 25; i++)
+            {
+                pb.PositionSeconds = i;
+            }
+            Assert.That(recents.RecordedPositions, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void PositionNearEndIsNotSaved()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            pb.PositionSeconds = 599;
+            recents.RecordedPositions.Clear();
+            vm.Dispose();
+            Assert.That(recents.RecordedPositions, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void PeriodicSaveNearEndDoesNotFire()
+    {
+        // Companion to PositionNearEndIsNotSaved: same near-end filter must elide the periodic-save trigger too, not just the dispose-time save. Important for the EOF-with-keep-open=yes case where mpv keeps firing time-pos at duration with IsPaused=false.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            pb.IsPaused = false;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+
+            // Walk position from 595 to 600 in 1s steps — all within the (duration - NearEndIgnoreSeconds = 595) skip threshold. Each tick fires PropertyChanged; periodic save would normally trigger (delta from lastSaved=0 is well over 10), but the near-end filter must skip every one of them.
+            for (int i = 595; i <= 600; i++)
+            {
+                pb.PositionSeconds = i;
+            }
+            Assert.That(recents.RecordedPositions, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void DisposeSavesFinalPosition()
+    {
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            pb.DurationSeconds = 600;
+            pb.IsPaused = false;
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            pb.PositionSeconds = 30;
+            recents.RecordedPositions.Clear();
+            vm.Dispose();
+            Assert.That(recents.RecordedPositions, Has.Count.EqualTo(1));
+            Assert.That(recents.RecordedPositions[0].Position, Is.EqualTo(30));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void UriSourceDoesNotPersistPosition()
+    {
+        // URIs (http/smb/…) skip both the apply lookup AND every save trigger. Position persistence is for local paths only.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+        pb.DurationSeconds = 600;
+        pb.IsPaused = false;
+        vm.OpenFile("https://example.com/stream.m3u8");
+        pb.RaiseFileLoaded();
+        pb.PositionSeconds = 50;
+        pb.IsPaused = true;
+        vm.Dispose();
+        Assert.That(recents.GetPositionCalls, Is.Empty);
+        Assert.That(recents.RecordedPositions, Is.Empty);
     }
 }

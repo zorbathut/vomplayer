@@ -20,6 +20,7 @@ public sealed class StateDatabase : IDisposable
     {
         new Migration(1, "initial schema: recent_files table", ApplyV1Schema),
         new Migration(2, "track_preferences table for per-directory video/audio/subtitle remembered choices", ApplyV2Schema),
+        new Migration(3, "recent_files.position_seconds column for per-file resume", ApplyV3Schema),
     };
 
     internal static int CurrentSchemaVersion
@@ -119,6 +120,15 @@ public sealed class StateDatabase : IDisposable
             );
             CREATE INDEX recent_files_last_opened ON recent_files (last_opened DESC);
             """;
+        cmd.ExecuteNonQuery();
+    }
+
+    // Per-file resume position. NULL means "no saved position" (the default for every existing v2 row and any new file before it accumulates a save). REAL because mpv's time-pos is sub-second; saving to integer seconds would round-trip lose precision the user might notice on a frame-accurate seek. No companion saved_at column — `last_opened` already records when we touched the row, and YAGNI on a stale-position-sweep until one is actually wanted.
+    private static void ApplyV3Schema(SqliteTransaction tx)
+    {
+        using var cmd = tx.Connection!.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "ALTER TABLE recent_files ADD COLUMN position_seconds REAL;";
         cmd.ExecuteNonQuery();
     }
 

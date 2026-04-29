@@ -67,4 +67,41 @@ public sealed class RecentFiles : IRecentFiles
         }
         return result;
     }
+
+    public void RecordPosition(string pathOrUri, double positionSeconds)
+    {
+        if (string.IsNullOrEmpty(pathOrUri))
+        {
+            throw new ArgumentException("pathOrUri must be non-empty", nameof(pathOrUri));
+        }
+        using var cmd = connection.CreateCommand();
+        // UPDATE-only (no INSERT-or-UPSERT): the row is established by Record() at OpenFile time, and reaching this method without a prior Record() means the VM's invariants are broken. Synthesising a phantom recents row from the position side channel would mask that bug.
+        cmd.CommandText = "UPDATE recent_files SET position_seconds = $p WHERE path_or_uri = $u;";
+        cmd.Parameters.AddWithValue("$p", positionSeconds);
+        cmd.Parameters.AddWithValue("$u", pathOrUri);
+        int rows = cmd.ExecuteNonQuery();
+        if (rows == 0)
+        {
+            // Per CLAUDE.md "silent error handling is banned" — report rather than swallow. Don't throw: this method is reachable from the dispatcher-driven PropertyChanged handler chain, where an exception would propagate out of the event handler and bring down the VM mid-tick.
+            Console.Error.WriteLine($"[vomplayer] recents: RecordPosition for '{pathOrUri}' affected 0 rows (file not in recents — VM invariant violation)");
+        }
+    }
+
+    public double? GetPosition(string pathOrUri)
+    {
+        if (string.IsNullOrEmpty(pathOrUri))
+        {
+            throw new ArgumentException("pathOrUri must be non-empty", nameof(pathOrUri));
+        }
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT position_seconds FROM recent_files WHERE path_or_uri = $u;";
+        cmd.Parameters.AddWithValue("$u", pathOrUri);
+        var raw = cmd.ExecuteScalar();
+        // Three states collapse to "no resume position": no row at all (raw=null), row with NULL column (raw=DBNull), and any other unreadable value. The first two are normal — a brand-new recents row hasn't accumulated a position yet — and there is no third in practice.
+        if (raw == null || raw is DBNull)
+        {
+            return null;
+        }
+        return Convert.ToDouble(raw);
+    }
 }

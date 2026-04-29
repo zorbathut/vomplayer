@@ -82,19 +82,13 @@ public sealed class TrackPreferences : ITrackPreferences
     // Resolves the directory key used as the row's identity from a path-or-URI. Returns null for any input that doesn't have a meaningful local-filesystem directory: empty strings, URI schemes other than file (http/https/smb/...), paths with no parent (a bare filename like "foo.mp4" with no leading directory), and paths that fail GetFullPath/GetDirectoryName for any reason. Returning null means "don't save and don't look up" — non-local sources just don't participate in the per-directory preference system.
     public static string? TryGetDirectoryKey(string? pathOrUri)
     {
-        if (string.IsNullOrEmpty(pathOrUri))
-        {
-            return null;
-        }
-        // Cheap scheme detection — anything that looks like `scheme://...` with the scheme up to ~10 chars is treated as a URI. Catches http://, https://, smb://, ftp://, sftp://, dvd://, bd://, etc. without needing a full URI parser. Bare Windows drive paths (`C:\foo`) survive because the colon isn't followed by `//`.
-        int colonSlashIdx = pathOrUri.IndexOf("://", StringComparison.Ordinal);
-        if (colonSlashIdx > 0 && colonSlashIdx <= 10)
+        if (!IsLocalFilesystemPath(pathOrUri))
         {
             return null;
         }
         try
         {
-            var full = Path.GetFullPath(pathOrUri);
+            var full = Path.GetFullPath(pathOrUri!);
             var dir = Path.GetDirectoryName(full);
             // Path.GetDirectoryName returns "" for paths with no directory component (after GetFullPath, this is unusual but defensive — and an empty string would crash Record's IsNullOrEmpty check rather than be skipped silently). Treat as non-savable.
             return string.IsNullOrEmpty(dir) ? null : dir;
@@ -104,5 +98,16 @@ public sealed class TrackPreferences : ITrackPreferences
             // Path.GetFullPath throws on invalid characters in some platforms; treat as non-savable rather than crashing the menu action that triggered the call.
             return null;
         }
+    }
+
+    // Cheap scheme detection — anything that looks like `scheme://...` with the scheme up to ~10 chars is treated as a URI. Catches http://, https://, smb://, ftp://, sftp://, dvd://, bd://, etc. without needing a full URI parser. Bare Windows drive paths (`C:\foo`) survive because the colon isn't followed by `//`. Shared with the per-file resume-position layer in ViewModelMain, which has the same "is this a persistable local path" question.
+    public static bool IsLocalFilesystemPath(string? pathOrUri)
+    {
+        if (string.IsNullOrEmpty(pathOrUri))
+        {
+            return false;
+        }
+        int colonSlashIdx = pathOrUri.IndexOf("://", StringComparison.Ordinal);
+        return colonSlashIdx <= 0 || colonSlashIdx > 10;
     }
 }
