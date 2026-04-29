@@ -685,6 +685,36 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             case HotkeyAction.ShowPreferences:
                 ShowHotkeysDialog();
                 return true;
+            case HotkeyAction.SeekBack5:
+                viewModel.SeekRelative(-5);
+                return true;
+            case HotkeyAction.SeekForward5:
+                viewModel.SeekRelative(5);
+                return true;
+            case HotkeyAction.SeekBack10:
+                viewModel.SeekRelative(-10);
+                return true;
+            case HotkeyAction.SeekForward10:
+                viewModel.SeekRelative(10);
+                return true;
+            case HotkeyAction.FrameStepBack:
+                viewModel.StepFrameBack();
+                return true;
+            case HotkeyAction.FrameStepForward:
+                viewModel.StepFrameForward();
+                return true;
+            case HotkeyAction.SeekStart:
+                viewModel.SeekTo(0);
+                return true;
+            case HotkeyAction.SeekEnd:
+                viewModel.SeekTo(1);
+                return true;
+            case HotkeyAction.ChapterPrev:
+                viewModel.StepChapter(-1);
+                return true;
+            case HotkeyAction.ChapterNext:
+                viewModel.StepChapter(1);
+                return true;
             default:
                 return false;
         }

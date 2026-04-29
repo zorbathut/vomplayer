@@ -16,6 +16,16 @@ public enum HotkeyAction
     ExitFullscreen,
     ToggleDiagnosticOverlay,
     ShowPreferences,
+    SeekBack5,
+    SeekForward5,
+    SeekBack10,
+    SeekForward10,
+    FrameStepBack,
+    FrameStepForward,
+    SeekStart,
+    SeekEnd,
+    ChapterPrev,
+    ChapterNext,
 }
 
 // A single input trigger — either a key combo or a mouse click. Stored as text in TOML, parsed at load.
@@ -252,6 +262,7 @@ public sealed class HotkeyMap
         m.Set(HotkeyAction.PlayPause, new Trigger[]
         {
             Trigger.MakeKey((uint)Gdk.Constants.KEY_space, 0),
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_k, 0),
         });
         m.Set(HotkeyAction.ToggleFullscreen, new Trigger[]
         {
@@ -266,6 +277,46 @@ public sealed class HotkeyMap
         });
         m.Set(HotkeyAction.ToggleDiagnosticOverlay, Array.Empty<Trigger>());
         m.Set(HotkeyAction.ShowPreferences, Array.Empty<Trigger>());
+        m.Set(HotkeyAction.SeekBack5, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_Left, 0),
+        });
+        m.Set(HotkeyAction.SeekForward5, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_Right, 0),
+        });
+        m.Set(HotkeyAction.SeekBack10, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_j, 0),
+        });
+        m.Set(HotkeyAction.SeekForward10, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_l, 0),
+        });
+        m.Set(HotkeyAction.FrameStepBack, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_comma, 0),
+        });
+        m.Set(HotkeyAction.FrameStepForward, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_period, 0),
+        });
+        m.Set(HotkeyAction.SeekStart, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_Home, 0),
+        });
+        m.Set(HotkeyAction.SeekEnd, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_End, 0),
+        });
+        m.Set(HotkeyAction.ChapterPrev, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_Left, Gdk.ModifierType.ControlMask),
+        });
+        m.Set(HotkeyAction.ChapterNext, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_Right, Gdk.ModifierType.ControlMask),
+        });
         return m;
     }
 
@@ -324,6 +375,16 @@ public sealed class HotkeyMap
             case HotkeyAction.ExitFullscreen: return "exit_fullscreen";
             case HotkeyAction.ToggleDiagnosticOverlay: return "toggle_diagnostic_overlay";
             case HotkeyAction.ShowPreferences: return "show_preferences";
+            case HotkeyAction.SeekBack5: return "seek_back_5";
+            case HotkeyAction.SeekForward5: return "seek_forward_5";
+            case HotkeyAction.SeekBack10: return "seek_back_10";
+            case HotkeyAction.SeekForward10: return "seek_forward_10";
+            case HotkeyAction.FrameStepBack: return "frame_step_back";
+            case HotkeyAction.FrameStepForward: return "frame_step_forward";
+            case HotkeyAction.SeekStart: return "seek_start";
+            case HotkeyAction.SeekEnd: return "seek_end";
+            case HotkeyAction.ChapterPrev: return "chapter_prev";
+            case HotkeyAction.ChapterNext: return "chapter_next";
             default: throw new ArgumentOutOfRangeException(nameof(action), action, null);
         }
     }
@@ -339,6 +400,16 @@ public sealed class HotkeyMap
             case "exit_fullscreen": action = HotkeyAction.ExitFullscreen; return true;
             case "toggle_diagnostic_overlay": action = HotkeyAction.ToggleDiagnosticOverlay; return true;
             case "show_preferences": action = HotkeyAction.ShowPreferences; return true;
+            case "seek_back_5": action = HotkeyAction.SeekBack5; return true;
+            case "seek_forward_5": action = HotkeyAction.SeekForward5; return true;
+            case "seek_back_10": action = HotkeyAction.SeekBack10; return true;
+            case "seek_forward_10": action = HotkeyAction.SeekForward10; return true;
+            case "frame_step_back": action = HotkeyAction.FrameStepBack; return true;
+            case "frame_step_forward": action = HotkeyAction.FrameStepForward; return true;
+            case "seek_start": action = HotkeyAction.SeekStart; return true;
+            case "seek_end": action = HotkeyAction.SeekEnd; return true;
+            case "chapter_prev": action = HotkeyAction.ChapterPrev; return true;
+            case "chapter_next": action = HotkeyAction.ChapterNext; return true;
             default: action = default; return false;
         }
     }
@@ -355,6 +426,16 @@ public sealed class HotkeyMap
             case HotkeyAction.ExitFullscreen: return "Exit Fullscreen";
             case HotkeyAction.ToggleDiagnosticOverlay: return "Diagnostic Overlay";
             case HotkeyAction.ShowPreferences: return "Preferences…";
+            case HotkeyAction.SeekBack5: return "Seek Back 5s";
+            case HotkeyAction.SeekForward5: return "Seek Forward 5s";
+            case HotkeyAction.SeekBack10: return "Seek Back 10s";
+            case HotkeyAction.SeekForward10: return "Seek Forward 10s";
+            case HotkeyAction.FrameStepBack: return "Step Back One Frame";
+            case HotkeyAction.FrameStepForward: return "Step Forward One Frame";
+            case HotkeyAction.SeekStart: return "Jump to Start";
+            case HotkeyAction.SeekEnd: return "Jump to End";
+            case HotkeyAction.ChapterPrev: return "Previous Chapter";
+            case HotkeyAction.ChapterNext: return "Next Chapter";
             default: return action.ToString();
         }
     }

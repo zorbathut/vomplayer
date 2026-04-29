@@ -65,6 +65,10 @@ public partial class ViewModelMainTests
         public List<int?> VideoSelections { get; } = new();
         public List<int?> AudioSelections { get; } = new();
         public List<int?> SubtitleSelections { get; } = new();
+        public List<double> RelativeSeeks { get; } = new();
+        public int FrameStepForwardCalls { get; private set; }
+        public int FrameStepBackCalls { get; private set; }
+        public List<int> ChapterSteps { get; } = new();
 
         public void Initialize()
         {
@@ -87,6 +91,26 @@ public partial class ViewModelMainTests
         public void Seek(double seconds)
         {
             LastSeekSeconds = seconds;
+        }
+
+        public void SeekRelative(double seconds)
+        {
+            RelativeSeeks.Add(seconds);
+        }
+
+        public void StepFrameForward()
+        {
+            FrameStepForwardCalls++;
+        }
+
+        public void StepFrameBack()
+        {
+            FrameStepBackCalls++;
+        }
+
+        public void StepChapter(int delta)
+        {
+            ChapterSteps.Add(delta);
         }
 
         public void LoadAudio(string path)
@@ -289,6 +313,38 @@ public partial class ViewModelMainTests
         vm.SeekTo(0.4);
 
         Assert.That(pb.LastSeekSeconds, Is.EqualTo(40));
+    }
+
+    [Test]
+    public void SeekRelativeForwardsToPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.SeekRelative(-5);
+        vm.SeekRelative(10);
+        Assert.That(pb.RelativeSeeks, Is.EqualTo(new[] { -5.0, 10.0 }));
+    }
+
+    [Test]
+    public void StepFrameForwardsToPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.StepFrameForward();
+        vm.StepFrameForward();
+        vm.StepFrameBack();
+        Assert.That(pb.FrameStepForwardCalls, Is.EqualTo(2));
+        Assert.That(pb.FrameStepBackCalls, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void StepChapterForwardsToPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.StepChapter(-1);
+        vm.StepChapter(1);
+        Assert.That(pb.ChapterSteps, Is.EqualTo(new[] { -1, 1 }));
     }
 
     [Test]

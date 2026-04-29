@@ -238,6 +238,26 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         playback.Seek(normalizedPosition * Duration.TotalSeconds);
     }
 
+    public void SeekRelative(double seconds)
+    {
+        playback.SeekRelative(seconds);
+    }
+
+    public void StepFrameForward()
+    {
+        playback.StepFrameForward();
+    }
+
+    public void StepFrameBack()
+    {
+        playback.StepFrameBack();
+    }
+
+    public void StepChapter(int delta)
+    {
+        playback.StepChapter(delta);
+    }
+
     private void OnPlaybackFileLoaded()
     {
         // Open the apply window for this file load, reset per-kind tracking, and apply immediately. mpv discovers tracks BEFORE firing FileLoaded — the only TracksReloaded that carries the new file's tracks lands ahead of FileLoaded, so waiting for "TracksReloaded after FileLoaded" misses it entirely. By FileLoaded time the VM mirror is populated; apply runs against it. The TracksReloaded retry path below still handles any post-FileLoaded track-list changes (e.g., a sub auto-loaded later, or the user adding one via menu — though the per-kind gate prevents re-applying kinds already settled).

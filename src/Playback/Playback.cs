@@ -235,6 +235,46 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.Post(h => h.Command("seek", target, "absolute"));
     }
 
+    // Same pre-load gate rationale as Seek (see that comment for the libmpv-abort rationale): relative seek shares the same crash hazard. Relative seeks pass the delta directly to mpv, which clamps at the file boundaries.
+    public void SeekRelative(double seconds)
+    {
+        if (DurationSeconds <= 0)
+        {
+            return;
+        }
+        var target = seconds.ToString("F3", CultureInfo.InvariantCulture);
+        dispatcher.Post(h => h.Command("seek", target, "relative"));
+    }
+
+    // DurationSeconds gate here is a UX no-op (do nothing when no file is loaded), not crash-defense — frame-step / add chapter don't have Seek's pre-load abort hazard. Kept for parity with Seek so all the per-frame/chapter inputs are uniformly inert pre-load.
+    public void StepFrameForward()
+    {
+        if (DurationSeconds <= 0)
+        {
+            return;
+        }
+        dispatcher.Post(h => h.Command("frame-step"));
+    }
+
+    public void StepFrameBack()
+    {
+        if (DurationSeconds <= 0)
+        {
+            return;
+        }
+        dispatcher.Post(h => h.Command("frame-back-step"));
+    }
+
+    public void StepChapter(int delta)
+    {
+        if (DurationSeconds <= 0)
+        {
+            return;
+        }
+        var deltaStr = delta.ToString(CultureInfo.InvariantCulture);
+        dispatcher.Post(h => h.Command("add", "chapter", deltaStr));
+    }
+
     // Hands the MpvDispatcher to a render-surface attacher. Consumers call CreateRenderContext on it (which runs on the caller's GL-owning thread) rather than accessing an MpvClient directly. Internal because MpvDispatcher is internal — this seam is for same-assembly render surfaces only.
     internal void AttachRenderSurface(Action<MpvDispatcher> attach)
     {

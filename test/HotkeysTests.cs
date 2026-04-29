@@ -96,8 +96,38 @@ public class HotkeysTests
         {
             Assert.That(map.Get(action), Is.Not.Null);
         }
-        Assert.That(map.Get(HotkeyAction.PlayPause), Has.Count.EqualTo(1));
+        Assert.That(map.Get(HotkeyAction.PlayPause), Has.Count.EqualTo(2));
         Assert.That(map.Get(HotkeyAction.ToggleFullscreen), Has.Count.EqualTo(4));
+    }
+
+    [TestCase("Left", HotkeyAction.SeekBack5)]
+    [TestCase("Right", HotkeyAction.SeekForward5)]
+    [TestCase("j", HotkeyAction.SeekBack10)]
+    [TestCase("l", HotkeyAction.SeekForward10)]
+    [TestCase("comma", HotkeyAction.FrameStepBack)]
+    [TestCase("period", HotkeyAction.FrameStepForward)]
+    [TestCase("Home", HotkeyAction.SeekStart)]
+    [TestCase("End", HotkeyAction.SeekEnd)]
+    [TestCase("<Primary>Left", HotkeyAction.ChapterPrev)]
+    [TestCase("<Primary>Right", HotkeyAction.ChapterNext)]
+    [TestCase("k", HotkeyAction.PlayPause)]
+    public void DefaultBindingResolvesToExpectedAction(string accelerator, HotkeyAction expected)
+    {
+        var map = HotkeyMap.Default();
+        var trigger = Trigger.TryParse(accelerator);
+        Assert.That(trigger, Is.Not.Null, $"failed to parse {accelerator}");
+        Assert.That(map.Lookup(trigger!), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void TomlRoundTripPreservesNewActionsBindings()
+    {
+        var src = HotkeyMap.Default();
+        var roundTripped = HotkeyMap.FromTomlForm(src.ToTomlForm(), _ => { });
+        foreach (HotkeyAction action in System.Enum.GetValues<HotkeyAction>())
+        {
+            Assert.That(roundTripped.Get(action), Is.EqualTo(src.Get(action)), $"mismatch for {action}");
+        }
     }
 
     [Test]
