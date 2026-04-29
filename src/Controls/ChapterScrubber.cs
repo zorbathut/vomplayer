@@ -13,7 +13,7 @@ namespace Vomplayer.Controls;
 //
 // Click routing: a Capture-phase Gtk.GestureClick on the scale watches every press. If the press lands within the trough's Y range (Gtk.Range.GetRangeRect), we don't claim — the scale's own internal click gesture sees the press and runs normal click-to-seek. If the press lands above or below the trough (i.e. inside the tick-mark region) AND is within ClickToleranceTpx of a chapter's X, we emit ChapterClicked and SetState(Claimed) to deny the scale's own gesture; trough-Y clicks are never claimed, so "click on the bar itself even right over a marker" cannot snap to a chapter. Off-marker clicks in the tick region don't claim either, so they fall through to the scale's normal seek-to-X — keeps full-width clickability of the scale intact.
 //
-// Hover affordance: a motion controller on the scale tracks the hovered chapter (the chapter under the cursor's X within tolerance, when the cursor's Y is in the tick region). While a chapter is hovered, the scale's cursor switches to "pointer" and the hovered chapter paints bright white (vs. the dim theme-fg default) — an "active marker" visual. The overlay is SetCanTarget(false) so clicks pass straight through to the scale.
+// Hover affordance: a motion controller on the scale tracks the hovered chapter (the chapter under the cursor's X within tolerance, when the cursor's Y is in the tick region). While a chapter is hovered, the scale's cursor switches to "pointer" — that's the only feedback. We deliberately don't change the tick's rendering on hover (earlier iterations brightened it but that read as "the tick vanishes" on light themes where the chosen highlight color blended into the background). The overlay is SetCanTarget(false) so clicks pass straight through to the scale.
 //
 // X math: chapter ticks are positioned at `effectiveLeft + V * effectiveWidth`, where the effective range is the trough's allocation rect (from Gtk.Widget.ComputeBounds) shrunk on each side by `trough.padding + trough.border + slider.padding + slider.border` (all from Gtk.StyleContext queries). Empirically (from a regression on 30+ logged sliderValue→slider.center pairs across the V range), GTK constrains the slider thumb's allocation such that its border-box fits inside the trough's content area — so the slider's center can never reach within `(trough.border+padding) + (slider.border+padding)` px of the trough's allocation edge. With Adwaita's `tBdr=(1,1) sBdr=(1,1)` that's 2 px on each side; with f3-formula residuals < 1px across V, vs the gtk_range_compute_slider_position-style documented formula which gave residuals up to ±7px, vs trough-padding-only which gave ±1.7px drifting linearly with V. The slider's CSS margin (typically negative on Adwaita: -9px each side) does NOT enter the position formula — it controls visual overhang of the rendered thumb beyond its allocation, not where the allocation sits. We deliberately don't use Gtk.Range.GetRangeRect / GetSliderRange: GetRangeRect coords are in a different coord space than the hoverLayer's Cairo coords (scale's CSS margin shifts them), and GetSliderRange has been observed to return zero/stale values during first paint. ComputeBounds gives the rendered rect directly in any target's coord space, so we ask for it in hoverLayer coords for paint and in scale coords for hit-test against motion-event args.X.
 public sealed class ChapterScrubber
@@ -64,18 +64,17 @@ public sealed class ChapterScrubber
         }
         this.scale = scale;
 
+        // Z-order: hoverLayer is the overlay's MAIN child (rendered first, behind), scale is the overlay child (rendered on top). This way the trough fill and slider thumb visually clip the chapter ticks where they intersect, instead of the ticks painting over the slider.
+        hoverLayer = Gtk.DrawingArea.New();
+        // CanTarget=false makes the layer invisible to pointer hit-testing. With the layer behind the scale this is mostly redundant (scale is on top, catches input first), but defensive — if scale's halign/valign ever leave gaps, clicks in those gaps shouldn't be caught by the layer either.
+        hoverLayer.SetCanTarget(false);
+        // Deliberately NO Hexpand/Vexpand on hoverLayer: as the overlay's main child it gets the full overlay content area regardless. Setting Vexpand=true here would propagate upward (Gtk.Overlay → controlsBox → rootBox), making the controls bar consume all available vertical space.
+        hoverLayer.SetDrawFunc(DrawHover);
+
         overlay = Gtk.Overlay.New();
         overlay.SetHexpand(true);
-        overlay.SetChild(scale);
-
-        hoverLayer = Gtk.DrawingArea.New();
-        // CanTarget=false makes the overlay invisible to pointer hit-testing — clicks/motion go straight to the scale beneath. Without this, the overlay would intercept everything and the scale would never see input.
-        hoverLayer.SetCanTarget(false);
-        // Hexpand/Vexpand are load-bearing: a default DrawingArea has 0x0 natural size, so without expansion Gtk.Overlay would allocate a minimum-sized child and the `height` passed to DrawHover would be a few pixels — clipping the Cairo lines to nearly nothing. Both expands force the overlay to size the layer to the full scale rectangle.
-        hoverLayer.SetHexpand(true);
-        hoverLayer.SetVexpand(true);
-        hoverLayer.SetDrawFunc(DrawHover);
-        overlay.AddOverlay(hoverLayer);
+        overlay.SetChild(hoverLayer);
+        overlay.AddOverlay(scale);
 
         // Capture phase: runs before the scale's internal click-to-seek gesture so we can claim the sequence and deny it. The legacy event controller already attached to the scale in MainWindow runs at Capture too but never claims (returns FALSE), so the two coexist.
         var click = Gtk.GestureClick.New();
@@ -189,7 +188,6 @@ public sealed class ChapterScrubber
         }
         hoveredChapterTime = time;
         scale.SetCursorFromName(time.HasValue ? "pointer" : null);
-        hoverLayer.QueueDraw();
     }
 
     private void OnScaleLeave(Gtk.EventControllerMotion sender, EventArgs args)
@@ -200,7 +198,6 @@ public sealed class ChapterScrubber
         }
         hoveredChapterTime = null;
         scale.SetCursorFromName(null);
-        hoverLayer.QueueDraw();
     }
 
     // Update the chapter set and the duration ticks are computed against. The actual tick rendering happens in DrawHover; this just stashes state and queues a redraw.
@@ -221,7 +218,7 @@ public sealed class ChapterScrubber
         hoverLayer.QueueDraw();
     }
 
-    // Paints every chapter as a 2-px-wide vertical Cairo line at the trough-relative X for that chapter's time. The line spans from a few pixels above the trough to a few pixels below — landing inside the scale's natural slider-thumb-height padding, so the bar's allocated height is unchanged. Non-hovered ticks use the scale's theme foreground color so they read correctly across light/dark themes. The hovered tick switches to bright white as the "active marker" feedback.
+    // Paints every chapter as TWO 2-px-wide vertical Cairo line segments at the trough-relative X for that chapter's time: one above the trough (from troughTop-10 to troughTop-4) and one below (from troughBottom+4 to troughBottom+10). The 4-px inner gap on each side gives the trough room to breathe so the marker reads as bracketing the trough rather than crossing it. Both segments land inside the scale's natural slider-thumb-height padding, so the bar's allocated height is unchanged. Ticks use the scale's theme foreground color at low alpha so they read correctly across light/dark themes without dominating the bar.
     private void DrawHover(Gtk.DrawingArea area, Cairo.Context cr, int width, int height)
     {
         if (durationSeconds <= 0 || chapters.Count == 0)
@@ -236,10 +233,14 @@ public sealed class ChapterScrubber
         {
             return;
         }
-        // Tick extends a few pixels above and below the trough. The scale's natural height accommodates the slider thumb (taller than the trough), so there's a few px of slack on each side of the trough we can paint into without growing the bar. Clamp to [0, height] in case the scale is unusually tight.
-        const double TickExtensionPx = 4.0;
-        double tickTop = Math.Max(0, troughTopInHoverPx - TickExtensionPx);
-        double tickBottom = Math.Min(height, troughTopInHoverPx + troughHeightInHoverPx + TickExtensionPx);
+        // Two segments per chapter: upper [troughTop-10, troughTop-4] and lower [troughBottom+4, troughBottom+10]. Clamp to [0, height] in case the scale is unusually tight; if a segment ends up zero-length the Cairo stroke is a harmless no-op.
+        const double TickInnerGapPx = 4.0;
+        const double TickOuterPx = 10.0;
+        double troughBottomInHover = troughTopInHoverPx + troughHeightInHoverPx;
+        double upperTop = Math.Max(0, troughTopInHoverPx - TickOuterPx);
+        double upperBottom = Math.Max(0, troughTopInHoverPx - TickInnerGapPx);
+        double lowerTop = Math.Min(height, troughBottomInHover + TickInnerGapPx);
+        double lowerBottom = Math.Min(height, troughBottomInHover + TickOuterPx);
         scale.GetStyleContext().GetColor(out var fg);
         double fgR = fg.Red;
         double fgG = fg.Green;
@@ -253,17 +254,14 @@ public sealed class ChapterScrubber
                 continue;
             }
             double x = effectiveLeft + (t / durationSeconds) * effectiveWidth;
-            bool hovered = hoveredChapterTime.HasValue && hoveredChapterTime.Value == t;
-            if (hovered)
-            {
-                cr.SetSourceRgba(1.0, 1.0, 1.0, 1.0);
-            }
-            else
-            {
-                cr.SetSourceRgba(fgR, fgG, fgB, 0.9);
-            }
-            cr.MoveTo(x, tickTop);
-            cr.LineTo(x, tickBottom);
+            // Snap to integer X for a sharp 2-px stroke: at integer X the stroke covers [X-1, X+1] — two pixels at full coverage. At half-integer X it would smear over three pixels at partial coverage. The sub-pixel rounding shifts the tick by ≤0.5 px from its mathematical position — invisible against the slider thumb, which itself rounds to integer pixels.
+            double sharpX = Math.Round(x);
+            cr.SetSourceRgba(fgR, fgG, fgB, 0.2);
+            cr.MoveTo(sharpX, upperTop);
+            cr.LineTo(sharpX, upperBottom);
+            cr.Stroke();
+            cr.MoveTo(sharpX, lowerTop);
+            cr.LineTo(sharpX, lowerBottom);
             cr.Stroke();
         }
     }
