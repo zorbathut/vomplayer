@@ -189,4 +189,83 @@ public class PlaybackTests
         Assert.That(fires, Is.EqualTo(new[] { true, false, true }));
     }
 
+    // Subtitle-track transitions exercise the same internal-method seam used elsewhere (UpdateSourceHdr / UpdateHwdecCurrent): no real mpv pump, just direct state writes that verify dedup semantics. The dedup matters because mpv's `track-list/count` observation fires for any track-type change (audio, video, sub), so a pure "audio track added" event would otherwise re-allocate and re-notify on the subtitle subset.
+    [Test]
+    public void SubtitleTracksDefaultsToEmpty()
+    {
+        using var pb = new Playback.Playback(a => a());
+        Assert.That(pb.SubtitleTracks, Is.Empty);
+    }
+
+    [Test]
+    public void SubtitleTracksUpdatesOnNewSnapshot()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var snapshot = new[] { new SubtitleTrack(1, "English", "eng", false) };
+        pb.UpdateSubtitleTracks(snapshot);
+        Assert.That(pb.SubtitleTracks, Is.EqualTo(snapshot));
+    }
+
+    [Test]
+    public void SubtitleTracksDedupsEqualSnapshots()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<int>();
+        pb.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Playback.Playback.SubtitleTracks))
+            {
+                fires.Add(pb.SubtitleTracks.Count);
+            }
+        };
+
+        var first = new[] { new SubtitleTrack(1, "English", "eng", false) };
+        var sameContent = new[] { new SubtitleTrack(1, "English", "eng", false) };
+        var different = new[] { new SubtitleTrack(2, "French", "fre", false) };
+
+        pb.UpdateSubtitleTracks(first);
+        pb.UpdateSubtitleTracks(sameContent); // record-equal contents → no PropertyChanged
+        pb.UpdateSubtitleTracks(different);
+
+        Assert.That(fires, Is.EqualTo(new[] { 1, 1 }));
+    }
+
+    [Test]
+    public void SubtitleTracksDedupsBackToEmpty()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<int>();
+        pb.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Playback.Playback.SubtitleTracks))
+            {
+                fires.Add(pb.SubtitleTracks.Count);
+            }
+        };
+
+        // Initial state is already empty; pushing another empty snapshot must not fire (defends against the spurious-track-list-count-fire case).
+        pb.UpdateSubtitleTracks(Array.Empty<SubtitleTrack>());
+        Assert.That(fires, Is.Empty);
+    }
+
+    [Test]
+    public void CurrentSubtitleIdTracksValue()
+    {
+        using var pb = new Playback.Playback(a => a());
+        var fires = new System.Collections.Generic.List<int?>();
+        pb.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Playback.Playback.CurrentSubtitleId))
+            {
+                fires.Add(pb.CurrentSubtitleId);
+            }
+        };
+
+        pb.UpdateCurrentSubtitleId(2);
+        pb.UpdateCurrentSubtitleId(2); // dedup (ObservableProperty same-value gate)
+        pb.UpdateCurrentSubtitleId(null);
+
+        Assert.That(fires, Is.EqualTo(new int?[] { 2, null }));
+    }
+
 }

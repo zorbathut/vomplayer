@@ -425,6 +425,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 }
                 PushVmSeekValueToScale();
                 break;
+            case nameof(ViewModelMain.SubtitleTracks):
+            case nameof(ViewModelMain.CurrentSubtitleId):
+                // Both notifications collapse into the same wholesale rebuild — the submenu reflects the cross-product of (current track list, current selection), so either changing means the visible items / radio glyph need to refresh.
+                RebuildSubtitleMenu();
+                break;
         }
     }
 

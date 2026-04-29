@@ -23,16 +23,32 @@ public sealed class FilePickerGtk : IFilePicker
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "ts", "mpg", "mpeg", "wmv", "flv",
     };
 
-    public async Task<string?> PickVideoFileAsync(string title)
+    // Common subtitle file extensions. Same KISS rationale as VideoExtensions: cover the formats users actually have on disk, leave "All files" as the escape hatch since mpv (via libass / its own demuxers) accepts more than this list (and even some non-subtitle files like .mkv can supply tracks via sub-add).
+    private static readonly string[] SubtitleExtensions =
+    {
+        "srt", "ass", "ssa", "vtt", "sub", "idx", "sup", "smi", "mks",
+    };
+
+    public Task<string?> PickVideoFileAsync(string title)
+    {
+        return PickAsync(title, "Video files", VideoExtensions);
+    }
+
+    public Task<string?> PickSubtitleFileAsync(string title)
+    {
+        return PickAsync(title, "Subtitle files", SubtitleExtensions);
+    }
+
+    private async Task<string?> PickAsync(string title, string typedFilterName, string[] extensions)
     {
         var dialog = Gtk.FileDialog.New();
         dialog.SetTitle(title);
 
-        var videoFilter = Gtk.FileFilter.New();
-        videoFilter.SetName("Video files");
-        foreach (var ext in VideoExtensions)
+        var typedFilter = Gtk.FileFilter.New();
+        typedFilter.SetName(typedFilterName);
+        foreach (var ext in extensions)
         {
-            videoFilter.AddSuffix(ext);
+            typedFilter.AddSuffix(ext);
         }
 
         var allFilter = Gtk.FileFilter.New();
@@ -41,10 +57,10 @@ public sealed class FilePickerGtk : IFilePicker
 
         // Gtk.FileDialog.SetFilters takes a Gio.ListModel; the standard pattern is a Gio.ListStore typed for Gtk.FileFilter.
         var filters = Gio.ListStore.New(Gtk.FileFilter.GetGType());
-        filters.Append(videoFilter);
+        filters.Append(typedFilter);
         filters.Append(allFilter);
         dialog.SetFilters(filters);
-        dialog.SetDefaultFilter(videoFilter);
+        dialog.SetDefaultFilter(typedFilter);
 
         try
         {

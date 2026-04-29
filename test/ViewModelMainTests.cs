@@ -29,6 +29,12 @@ public partial class ViewModelMainTests
         [ObservableProperty]
         private bool isCoreIdle = true;
 
+        [ObservableProperty]
+        private IReadOnlyList<SubtitleTrack> subtitleTracks = Array.Empty<SubtitleTrack>();
+
+        [ObservableProperty]
+        private int? currentSubtitleId;
+
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
 
@@ -37,6 +43,8 @@ public partial class ViewModelMainTests
         public int LoadFileCalls { get; private set; }
         public string? LastLoadedFile { get; private set; }
         public double? LastSeekSeconds { get; private set; }
+        public string? LastLoadedSubtitle { get; private set; }
+        public List<int?> SubtitleSelections { get; } = new();
 
         public void Initialize()
         {
@@ -61,6 +69,16 @@ public partial class ViewModelMainTests
             LastSeekSeconds = seconds;
         }
 
+        public void LoadSubtitle(string path)
+        {
+            LastLoadedSubtitle = path;
+        }
+
+        public void SetSubtitle(int? trackId)
+        {
+            SubtitleSelections.Add(trackId);
+        }
+
         public void RaiseFileLoaded()
         {
             FileLoaded?.Invoke();
@@ -79,12 +97,20 @@ public partial class ViewModelMainTests
     private sealed class FakeFilePicker : IFilePicker
     {
         public string? NextResult { get; set; }
+        public string? NextSubtitleResult { get; set; }
         public int Calls { get; private set; }
+        public int SubtitleCalls { get; private set; }
 
         public Task<string?> PickVideoFileAsync(string title)
         {
             Calls++;
             return Task.FromResult(NextResult);
+        }
+
+        public Task<string?> PickSubtitleFileAsync(string title)
+        {
+            SubtitleCalls++;
+            return Task.FromResult(NextSubtitleResult);
         }
     }
 
@@ -312,5 +338,61 @@ public partial class ViewModelMainTests
         vm.Dispose();
         pb.PositionSeconds = 99;
         Assert.That(vm.Position, Is.EqualTo(beforeDispose));
+    }
+
+    [Test]
+    public void SubtitleTracksMirrorsPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var tracks = new[] { new SubtitleTrack(1, "English", "eng", false) };
+        pb.SubtitleTracks = tracks;
+        Assert.That(vm.SubtitleTracks, Is.SameAs(tracks));
+    }
+
+    [Test]
+    public void CurrentSubtitleIdMirrorsPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        pb.CurrentSubtitleId = 2;
+        Assert.That(vm.CurrentSubtitleId, Is.EqualTo(2));
+        pb.CurrentSubtitleId = null;
+        Assert.That(vm.CurrentSubtitleId, Is.Null);
+    }
+
+    [Test]
+    public void SelectSubtitlePassesIdToPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        vm.SelectSubtitle(3);
+        vm.SelectSubtitle(null);
+        Assert.That(pb.SubtitleSelections, Is.EqualTo(new int?[] { 3, null }));
+    }
+
+    [Test]
+    public async Task LoadSubtitleCommandLoadsPickedFile()
+    {
+        var pb = new FakePlayback();
+        var picker = new FakeFilePicker { NextSubtitleResult = "/path/to/track.srt" };
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles());
+        await vm.LoadSubtitleCommand.ExecuteAsync(null);
+        Assert.That(picker.SubtitleCalls, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedSubtitle, Is.EqualTo("/path/to/track.srt"));
+    }
+
+    [Test]
+    public async Task LoadSubtitleCommandIgnoresCancelledPicker()
+    {
+        var pb = new FakePlayback();
+        var picker = new FakeFilePicker { NextSubtitleResult = null };
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, picker, recents);
+        await vm.LoadSubtitleCommand.ExecuteAsync(null);
+        Assert.That(picker.SubtitleCalls, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedSubtitle, Is.Null);
+        // Subtitles aren't user-opened media; cancellation must not record into recents.
+        Assert.That(recents.RecordedPaths, Is.Empty);
     }
 }

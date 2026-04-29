@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -27,6 +28,13 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     [ObservableProperty]
     private double seekValue;
+
+    // Mirrors of IPlayback subtitle state. The view (MainWindow) subscribes to PropertyChanged on these to rebuild the Subtitles submenu — the menu itself isn't a widget tree we can data-bind, it's a Gio.Menu rebuilt wholesale, so going through normal VM mirrors keeps the cross-thread story uniform with everything else (playback fires PropertyChanged on the main thread, view rebuilds menu on the main thread).
+    [ObservableProperty]
+    private IReadOnlyList<SubtitleTrack> subtitleTracks = Array.Empty<SubtitleTrack>();
+
+    [ObservableProperty]
+    private int? currentSubtitleId;
 
     public string? InitialFile { get; set; }
 
@@ -60,6 +68,23 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         recentFiles.Record(path);
         playback.LoadFile(path);
+    }
+
+    [RelayCommand]
+    private async Task LoadSubtitleAsync()
+    {
+        var path = await filePicker.PickSubtitleFileAsync("Open subtitle file");
+        if (path == null)
+        {
+            return;
+        }
+        playback.LoadSubtitle(path);
+    }
+
+    // Direct-call entrypoint for the Subtitles submenu items. RelayCommand-with-parameter would have worked, but the menu's Gio.SimpleAction surface is already wired through ExecuteAction in MainWindow — going through a plain method keeps the action handler tight.
+    public void SelectSubtitle(int? trackId)
+    {
+        playback.SetSubtitle(trackId);
     }
 
     // Direct path/URI load, bypassing the file picker. Used by drag-and-drop. Accepts whatever libmpv accepts: a local filesystem path, or a remote URI (http://, https://, smb://, …).
@@ -116,6 +141,12 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
                 break;
             case nameof(IPlayback.IsPaused):
                 IsPaused = playback.IsPaused;
+                break;
+            case nameof(IPlayback.SubtitleTracks):
+                SubtitleTracks = playback.SubtitleTracks;
+                break;
+            case nameof(IPlayback.CurrentSubtitleId):
+                CurrentSubtitleId = playback.CurrentSubtitleId;
                 break;
         }
     }
