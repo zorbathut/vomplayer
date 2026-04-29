@@ -31,6 +31,12 @@ public partial class ViewModelMainTests
         private bool isCoreIdle = true;
 
         [ObservableProperty]
+        private double volume = 100;
+
+        [ObservableProperty]
+        private bool isMuted;
+
+        [ObservableProperty]
         private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
 
         [ObservableProperty]
@@ -69,6 +75,9 @@ public partial class ViewModelMainTests
         public int FrameStepForwardCalls { get; private set; }
         public int FrameStepBackCalls { get; private set; }
         public List<int> ChapterSteps { get; } = new();
+        public List<double> VolumeWrites { get; } = new();
+        public List<double> VolumeAdjustments { get; } = new();
+        public int ToggleMuteCalls { get; private set; }
 
         public void Initialize()
         {
@@ -136,6 +145,25 @@ public partial class ViewModelMainTests
         public void SetSubtitle(int? trackId)
         {
             SubtitleSelections.Add(trackId);
+        }
+
+        // Mirror real Playback's behavior at the fake's seam: SetVolume tracks the request and applies it to the observable so VM mirrors update synchronously. AdjustVolume logs the delta separately so tests can distinguish "user dragged the slider" (SetVolume) from "user pressed VolumeUp" (AdjustVolume).
+        public void SetVolume(double percent)
+        {
+            VolumeWrites.Add(percent);
+            Volume = percent;
+        }
+
+        // Real Playback.AdjustVolume issues mpv's `add volume <delta>` command — no local read-modify-write, so the cached `Volume` doesn't change here either. Tests that want to observe the post-adjust value should set `Volume` themselves to simulate the mpv echo.
+        public void AdjustVolume(double deltaPercent)
+        {
+            VolumeAdjustments.Add(deltaPercent);
+        }
+
+        public void ToggleMute()
+        {
+            ToggleMuteCalls++;
+            IsMuted = !IsMuted;
         }
 
         public void RaiseFileLoaded()
@@ -1230,6 +1258,53 @@ public partial class ViewModelMainTests
         {
             Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
         }
+    }
+
+    [Test]
+    public void VolumeMirrorsPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        pb.Volume = 42;
+        Assert.That(vm.Volume, Is.EqualTo(42));
+    }
+
+    [Test]
+    public void IsMutedMirrorsPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        pb.IsMuted = true;
+        Assert.That(vm.IsMuted, Is.True);
+    }
+
+    [Test]
+    public void SetVolumeForwardsToPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.SetVolume(75);
+        Assert.That(pb.VolumeWrites, Is.EqualTo(new[] { 75.0 }));
+    }
+
+    [Test]
+    public void AdjustVolumeForwardsToPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.AdjustVolume(-5);
+        vm.AdjustVolume(10);
+        Assert.That(pb.VolumeAdjustments, Is.EqualTo(new[] { -5.0, 10.0 }));
+    }
+
+    [Test]
+    public void ToggleMuteForwardsToPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.ToggleMute();
+        vm.ToggleMute();
+        Assert.That(pb.ToggleMuteCalls, Is.EqualTo(2));
     }
 
     [Test]

@@ -19,6 +19,10 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Mirror of mpv's `core-idle` property: true when the playback core isn't actively advancing — paused, at EOF with keep-open, or no file loaded. Differs from IsPaused (which is just the user-facing pause flag), and that's the point — IsPaused stays false at EOF with keep-open=yes, but IsCoreIdle correctly flips back to true. Used to gate side-effects that should track "actually playing right now" (e.g. screensaver inhibit).
     bool IsCoreIdle { get; }
 
+    // mpv's `volume` property (percent — typical range 0..100, mpv allows up to volume-max which defaults to 130). Mute is independent of volume: muting doesn't reset Volume to 0, so unmuting restores the prior level.
+    double Volume { get; }
+    bool IsMuted { get; }
+
     // Snapshots of the source's tracks per kind (embedded + external). Replaced wholesale on track-list changes; consumers should treat them as immutable and re-read on PropertyChanged. Empty when no file is loaded or the file has no tracks of that kind.
     IReadOnlyList<MediaTrack> VideoTracks { get; }
     IReadOnlyList<MediaTrack> AudioTracks { get; }
@@ -53,4 +57,9 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     void SetVideo(int? trackId);
     void SetAudio(int? trackId);
     void SetSubtitle(int? trackId);
+    // Absolute volume in percent. Caller is responsible for clamping; the mpv property accepts 0..volume-max and refuses out-of-range values.
+    void SetVolume(double percent);
+    // Relative volume change in percent points (e.g. +5 / -5). Implementations clamp against 0 and the active volume-max.
+    void AdjustVolume(double deltaPercent);
+    void ToggleMute();
 }

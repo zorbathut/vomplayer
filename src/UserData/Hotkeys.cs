@@ -26,6 +26,9 @@ public enum HotkeyAction
     SeekEnd,
     ChapterPrev,
     ChapterNext,
+    VolumeUp,
+    VolumeDown,
+    ToggleMute,
 }
 
 // A single input trigger — either a key combo or a mouse click. Stored as text in TOML, parsed at load.
@@ -317,6 +320,18 @@ public sealed class HotkeyMap
         {
             Trigger.MakeKey((uint)Gdk.Constants.KEY_Right, Gdk.ModifierType.ControlMask),
         });
+        m.Set(HotkeyAction.VolumeUp, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_Up, 0),
+        });
+        m.Set(HotkeyAction.VolumeDown, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_Down, 0),
+        });
+        m.Set(HotkeyAction.ToggleMute, new Trigger[]
+        {
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_m, 0),
+        });
         return m;
     }
 
@@ -385,6 +400,9 @@ public sealed class HotkeyMap
             case HotkeyAction.SeekEnd: return "seek_end";
             case HotkeyAction.ChapterPrev: return "chapter_prev";
             case HotkeyAction.ChapterNext: return "chapter_next";
+            case HotkeyAction.VolumeUp: return "volume_up";
+            case HotkeyAction.VolumeDown: return "volume_down";
+            case HotkeyAction.ToggleMute: return "toggle_mute";
             default: throw new ArgumentOutOfRangeException(nameof(action), action, null);
         }
     }
@@ -410,6 +428,9 @@ public sealed class HotkeyMap
             case "seek_end": action = HotkeyAction.SeekEnd; return true;
             case "chapter_prev": action = HotkeyAction.ChapterPrev; return true;
             case "chapter_next": action = HotkeyAction.ChapterNext; return true;
+            case "volume_up": action = HotkeyAction.VolumeUp; return true;
+            case "volume_down": action = HotkeyAction.VolumeDown; return true;
+            case "toggle_mute": action = HotkeyAction.ToggleMute; return true;
             default: action = default; return false;
         }
     }
@@ -436,6 +457,9 @@ public sealed class HotkeyMap
             case HotkeyAction.SeekEnd: return "Jump to End";
             case HotkeyAction.ChapterPrev: return "Previous Chapter";
             case HotkeyAction.ChapterNext: return "Next Chapter";
+            case HotkeyAction.VolumeUp: return "Volume Up";
+            case HotkeyAction.VolumeDown: return "Volume Down";
+            case HotkeyAction.ToggleMute: return "Mute / Unmute";
             default: return action.ToString();
         }
     }

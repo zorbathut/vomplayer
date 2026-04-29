@@ -111,6 +111,9 @@ public class HotkeysTests
     [TestCase("<Primary>Left", HotkeyAction.ChapterPrev)]
     [TestCase("<Primary>Right", HotkeyAction.ChapterNext)]
     [TestCase("k", HotkeyAction.PlayPause)]
+    [TestCase("Up", HotkeyAction.VolumeUp)]
+    [TestCase("Down", HotkeyAction.VolumeDown)]
+    [TestCase("m", HotkeyAction.ToggleMute)]
     public void DefaultBindingResolvesToExpectedAction(string accelerator, HotkeyAction expected)
     {
         var map = HotkeyMap.Default();

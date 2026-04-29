@@ -63,6 +63,12 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     [ObservableProperty]
     private double seekValue;
 
+    [ObservableProperty]
+    private double volume = 100;
+
+    [ObservableProperty]
+    private bool isMuted;
+
     // Mirrors of IPlayback per-kind track state. The view (MainWindow) subscribes to PropertyChanged on these to rebuild the per-kind submenus — the menus themselves aren't widget trees we can data-bind, they're Gio.Menus rebuilt wholesale, so going through normal VM mirrors keeps the cross-thread story uniform with everything else (playback fires PropertyChanged on the main thread, view rebuilds menus on the main thread).
     [ObservableProperty]
     private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
@@ -258,6 +264,21 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         playback.StepChapter(delta);
     }
 
+    public void SetVolume(double percent)
+    {
+        playback.SetVolume(percent);
+    }
+
+    public void AdjustVolume(double deltaPercent)
+    {
+        playback.AdjustVolume(deltaPercent);
+    }
+
+    public void ToggleMute()
+    {
+        playback.ToggleMute();
+    }
+
     private void OnPlaybackFileLoaded()
     {
         // Open the apply window for this file load, reset per-kind tracking, and apply immediately. mpv discovers tracks BEFORE firing FileLoaded — the only TracksReloaded that carries the new file's tracks lands ahead of FileLoaded, so waiting for "TracksReloaded after FileLoaded" misses it entirely. By FileLoaded time the VM mirror is populated; apply runs against it. The TracksReloaded retry path below still handles any post-FileLoaded track-list changes (e.g., a sub auto-loaded later, or the user adding one via menu — though the per-kind gate prevents re-applying kinds already settled).
@@ -431,6 +452,12 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
                 break;
             case nameof(IPlayback.CurrentSubtitleId):
                 CurrentSubtitleId = playback.CurrentSubtitleId;
+                break;
+            case nameof(IPlayback.Volume):
+                Volume = playback.Volume;
+                break;
+            case nameof(IPlayback.IsMuted):
+                IsMuted = playback.IsMuted;
                 break;
         }
     }

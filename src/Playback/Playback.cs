@@ -29,6 +29,13 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private bool isCoreIdle = true;
 
+    // mpv reports `volume` in percent. Default 100 mirrors mpv's own default so the slider lands at full pre-Initialize and the first synthesized observe fire (which carries the real value) doesn't visibly jump.
+    [ObservableProperty]
+    private double volume = 100;
+
+    [ObservableProperty]
+    private bool isMuted;
+
     // Decoder mpv actually selected, as reported by the `hwdec-current` property. Authoritative: if a hwdec backend fails to initialize for a given file mpv falls back to software and updates this to "no", so the value reflects the real decode path, not the requested one. Empty string or "no" ⇒ software; names like "vaapi", "nvdec", "videotoolbox", "d3d11va" ⇒ hardware.
     [ObservableProperty]
     private string? hwdecCurrent;
@@ -102,6 +109,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
             // auto-safe is mpv's curated set of hwdec backends that are known to work with GL interop on the current platform/driver combination — includes vaapi, nvdec, videotoolbox, d3d11va, plus their copy-back variants where the zero-copy path is unavailable. Unlike "auto" it excludes blacklisted driver/backend combos; unlike hand-picking a backend it degrades gracefully to software when nothing is available. Must be set before Initialize(); runtime changes also work but the startup path is simpler. Fallback is automatic — if the selected backend fails on a specific file mpv drops to software and updates hwdec-current accordingly.
             h.SetOption("hwdec", "auto-safe");
 
+            // Pin volume-max to 100 so the [0, 100] slider range is the authoritative contract: any `add volume +5` past 100 clamps in mpv (rather than letting mpv's default 130 amplify past what the UI can display, which would produce silent gain-above-1 the user couldn't see). If a future per-source amplification feature wants headroom, raise volume-max and widen the slider together.
+            h.SetOption("volume-max", "100");
+
             // VOMPL_LOG_MPV=<path> routes mpv's full log to that file at -v level. Needed for debugging hwdec negotiation (which backends were tried, why they were rejected) and anything else mpv normally prints to its terminal — we run with terminal=no, so there's no other way to see this output. Path is taken literally; no ~ expansion. Value must be a writable path; mpv errors out if it isn't.
             var mpvLogPath = Environment.GetEnvironmentVariable("VOMPL_LOG_MPV");
             if (!string.IsNullOrEmpty(mpvLogPath))
@@ -116,6 +126,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("duration", MpvFormat.Double);
             h.ObserveProperty("pause", MpvFormat.Flag);
             h.ObserveProperty("seeking", MpvFormat.Flag);
+            // Volume + mute are user-controlled but also writable from anywhere (CLI keybinds, lua scripts, mpv's own ao-volume tracking) — observe so the UI follows external changes too. The synthesized initial fire lands with mpv's real defaults (volume=100, mute=no).
+            h.ObserveProperty("volume", MpvFormat.Double);
+            h.ObserveProperty("mute", MpvFormat.Flag);
             // core-idle differs from `pause` precisely at end-of-file with keep-open=yes: pause stays no, but the playback core stops advancing. Consumers that need "actually decoding/displaying right now" (e.g. screensaver inhibit) should track this rather than IsPaused.
             h.ObserveProperty("core-idle", MpvFormat.Flag);
             // Sub-property path observation: video-params is a Node map, but mpv exposes each scalar inside it (primaries, gamma, sig-peak, …) as its own string-typed observable when addressed via the "<parent>/<key>" syntax. This sidesteps MpvClient.ReadPropertyValue not knowing how to unpack node-map payloads. Initial synthesized fire lands with null (no file loaded yet), which IsHdrGamma classifies as SDR — no spurious transition.
@@ -180,6 +193,25 @@ public sealed partial class Playback : ObservableObject, IPlayback
     {
         bool pausedNow = IsPaused;
         dispatcher.Post(h => h.SetProperty("pause", pausedNow ? "no" : "yes"));
+    }
+
+    public void SetVolume(double percent)
+    {
+        var value = percent.ToString("F2", CultureInfo.InvariantCulture);
+        dispatcher.Post(h => h.SetProperty("volume", value));
+    }
+
+    // Relative volume change. Routed through mpv's `add volume <delta>` command, not a cached read-modify-write here, so rapid VolumeUp keypresses don't race against mpv's property echo: each `add` is RMW-atomic inside mpv's playback loop and accumulates at full delta. Clamping happens inside mpv against [0, volume-max] (we pin volume-max=100 in Initialize).
+    public void AdjustVolume(double deltaPercent)
+    {
+        var delta = deltaPercent.ToString("F2", CultureInfo.InvariantCulture);
+        dispatcher.Post(h => h.Command("add", "volume", delta));
+    }
+
+    public void ToggleMute()
+    {
+        bool mutedNow = IsMuted;
+        dispatcher.Post(h => h.SetProperty("mute", mutedNow ? "no" : "yes"));
     }
 
     public void LoadAudio(string path)
@@ -303,6 +335,12 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 break;
             case "core-idle":
                 IsCoreIdle = change.Value.AsFlag ?? true;
+                break;
+            case "volume":
+                UpdateVolume(change.Value.AsDouble);
+                break;
+            case "mute":
+                UpdateMute(change.Value.AsFlag);
                 break;
             case "video-params/gamma":
                 UpdateSourceHdr(change.Value.AsString);
@@ -574,6 +612,17 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
         HwdecCurrent = normalized;
         Console.Error.WriteLine($"[vomplayer] hwdec: {normalized ?? "(none)"}");
+    }
+
+    // Internal test seam mirroring UpdateHwdecCurrent etc. — null fallback to mpv's default (100) matches the constant-fallback pattern used throughout OnMpvPropertyChanged. mpv shouldn't ever fire null for `volume` (it's a process-level property, not file-bound), but if it does we land at the documented default rather than carrying a stale value forward.
+    internal void UpdateVolume(double? value)
+    {
+        Volume = value ?? 100;
+    }
+
+    internal void UpdateMute(bool? value)
+    {
+        IsMuted = value ?? false;
     }
 
     // Internal so PlaybackTests can drive transition behavior directly without spinning up mpv's event pump (see test file comment). Keeps the higher-level dispatcher (OnMpvPropertyChanged) private — only the minimum transition surface is exposed.

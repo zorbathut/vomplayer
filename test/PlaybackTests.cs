@@ -41,6 +41,58 @@ public class PlaybackTests
         Assert.That(pb.IsCoreIdle, Is.True);
     }
 
+    // Volume defaults to 100 so the slider lands at full pre-Initialize and the synthesized first observe fire (which carries mpv's real default of 100) doesn't visibly jump on screen.
+    [Test]
+    public void VolumeDefaultsToHundred()
+    {
+        using var pb = new Playback.Playback(a => a());
+        Assert.That(pb.Volume, Is.EqualTo(100));
+    }
+
+    [Test]
+    public void IsMutedDefaultsFalse()
+    {
+        using var pb = new Playback.Playback(a => a());
+        Assert.That(pb.IsMuted, Is.False);
+    }
+
+    [Test]
+    public void UpdateVolumeTracksValue()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateVolume(42);
+        Assert.That(pb.Volume, Is.EqualTo(42));
+    }
+
+    [Test]
+    public void UpdateVolumeNullCoalescesToHundred()
+    {
+        // mpv shouldn't fire null for `volume` (not a file-bound property), but if it does we land at the documented default rather than carrying a stale value forward — symmetric with the existing time-pos/duration ?? 0 pattern.
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateVolume(50);
+        pb.UpdateVolume(null);
+        Assert.That(pb.Volume, Is.EqualTo(100));
+    }
+
+    [Test]
+    public void UpdateMuteTracksValue()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateMute(true);
+        Assert.That(pb.IsMuted, Is.True);
+        pb.UpdateMute(false);
+        Assert.That(pb.IsMuted, Is.False);
+    }
+
+    [Test]
+    public void UpdateMuteNullCoalescesToFalse()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateMute(true);
+        pb.UpdateMute(null);
+        Assert.That(pb.IsMuted, Is.False);
+    }
+
     // Regression: libmpv aborts the host process with `free(): invalid pointer` if a `seek` command runs before any file has been loaded. User-visible symptom was the seek slider crashing the player when clicked with no media open. Sleeps bracket the Seek call to give the dispatcher's worker thread time to drain the posted action — without them the test could reach Dispose before the seek even reaches mpv, masking the abort. Reaching the end of this test without the test host being killed is the assertion; reverting the gate in Playback.Seek causes this test to abort the entire test run.
     [Test]
     public void SeekBeforeLoadFileIsSafe()

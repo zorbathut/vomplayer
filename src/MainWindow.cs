@@ -46,6 +46,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Gtk.Label positionLabel;
     private readonly Gtk.Label durationLabel;
     private readonly Gtk.Button playPauseButton;
+    private readonly Gtk.Button muteButton;
+    private readonly Gtk.Scale volumeScale;
     private readonly Gtk.Box controlsBox;
     private readonly Gtk.Box rootBox;
     private readonly Gtk.Overlay videoOverlay;
@@ -80,6 +82,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     // Screensaver/idle inhibit cookie returned by Gtk.Application.Inhibit. 0 ⇒ not currently inhibited (Gtk uses 0 as the failure / not-applied sentinel). Held while mpv reports core-idle=false (i.e. actually decoding/displaying); released on every transition back to idle (pause, EOF with keep-open, no file loaded) so we don't keep the system awake when playback parks at end-of-file.
     private uint screensaverInhibitCookie;
     private bool updatingFromVm;
+    // Mirror of updatingFromVm but for the volume scale: VM PropertyChanged → SetValue must not bounce back through OnVolumeScaleValueChanged and re-call SetVolume, which would race mpv's echo and produce flicker. Same idea, separate flag so seek-scale settle logic can't accidentally swallow a volume update.
+    private bool updatingVolumeFromVm;
     // Seek-scale state machine. idle = both false; holding = userHolding; settling = awaitingSeekSettle (post-release, waiting for mpv's in-flight seek to report a time-pos distinct from the pre-release one). `seekValueAtRelease` is the baseline we wait to move away from — gating on "time-pos has actually advanced" avoids a race where mpv fires `seeking=false` before its `time-pos` update, which would otherwise let a stale SeekValue push flicker the scale.
     private bool userHolding;
     private bool awaitingSeekSettle;
@@ -189,6 +193,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         durationLabel.AddCssClass("vompl-time-label");
         positionLabel.SetXalign(1.0f);
 
+        muteButton = Gtk.Button.NewFromIconName("audio-volume-high");
+        muteButton.SetTooltipText("Mute");
+        muteButton.AddCssClass("flat");
+
+        // 0..100 matches the volume-max we pin on mpv at Initialize, so the slider is the authoritative range. Step of 1 gives one-percent granularity for fine drag adjustments — every value-change posts a SetVolume to mpv via the dispatcher (no per-pixel dedup), but the round-trip is cheap and mpv coalesces. Hotkey-driven VolumeUp/Down uses a coarser step (5) deliberately: mouse drag wants finer precision than a key tap. Width-request keeps the widget compact in the controls bar.
+        volumeScale = Gtk.Scale.NewWithRange(Gtk.Orientation.Horizontal, 0.0, 100.0, 1.0);
+        volumeScale.SetDrawValue(false);
+        volumeScale.SetValue(viewModel.Volume);
+        volumeScale.SetSizeRequest(100, -1);
+        volumeScale.SetTooltipText("Volume");
+        RemoveScaleLongPressGesture(volumeScale);
+
         controlsBox = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
         // Spacing around the bar comes from CSS padding on .vompl-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges. vompl-chrome gives it the theme bg; vompl-controls-bar adds the padding. Split so the fullscreen OSD swap (below) only touches the background/padding pair and leaves vompl-chrome off (OSD has its own semi-transparent fill).
         controlsBox.AddCssClass("vompl-chrome");
@@ -197,6 +213,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         controlsBox.Append(positionLabel);
         controlsBox.Append(chapterScrubber.Widget);
         controlsBox.Append(durationLabel);
+        controlsBox.Append(muteButton);
+        controlsBox.Append(volumeScale);
 
         // Video sits inside an Overlay so fullscreen can move the controls on top of the video (valign=End + "osd" style class) without taking space in the layout. In windowed mode the overlay has no overlay children — controls are packed below in rootBox as usual.
         videoOverlay = Gtk.Overlay.New();
@@ -226,6 +244,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         SetChild(rootBox);
 
         playPauseButton.OnClicked += (_, _) => viewModel.PlayPauseCommand.Execute(null);
+        muteButton.OnClicked += (_, _) => viewModel.ToggleMute();
+        volumeScale.OnValueChanged += OnVolumeScaleValueChanged;
 
         seekScale.OnValueChanged += OnSeekScaleValueChanged;
 
@@ -272,6 +292,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         playback.PropertyChanged += OnPlaybackPropertyChangedForSeekSettle;
         playback.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
         OnCloseRequest += OnWindowCloseRequest;
+
+        RefreshMuteButton();
+    }
+
+    // VM-pushed updates set `updatingVolumeFromVm` to short-circuit the round-trip. User-driven changes (drag, click, scroll wheel) push straight into the VM, which routes to mpv; mpv's echo lands on the next OnViewModelPropertyChanged → and is suppressed if the value matches the scale's own (the ObservableProperty same-value gate covers the equal-value case, but a tiny float drift could re-fire — accepted, the only effect is a redundant SetVolume).
+    private void OnVolumeScaleValueChanged(Gtk.Range sender, EventArgs e)
+    {
+        if (updatingVolumeFromVm)
+        {
+            return;
+        }
+        viewModel.SetVolume(volumeScale.GetValue());
     }
 
     // Seek on every user-driven change; `updatingFromVm` breaks the VM→scale→VM loop; `lastUserSeek` dedupes repeated emissions at the same value (see field comment). Scroll-wheel and keyboard Arrow keys take this path too — no press/release, so `userHolding` stays false and the standard VM-push flow resumes after each seek.
@@ -458,7 +490,40 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 // Each pair of notifications collapses into the same wholesale rebuild for its kind — the submenu reflects the cross-product of (current track list, current selection), so either changing means the visible items / radio glyph need to refresh.
                 RebuildSubtitleMenu();
                 break;
+            case nameof(ViewModelMain.Volume):
+                updatingVolumeFromVm = true;
+                volumeScale.SetValue(viewModel.Volume);
+                updatingVolumeFromVm = false;
+                RefreshMuteButton();
+                break;
+            case nameof(ViewModelMain.IsMuted):
+                RefreshMuteButton();
+                break;
         }
+    }
+
+    // Pick the freedesktop volume icon. The button is purely a mute toggle, so the icon reflects mute state alone — at vol=0-but-not-muted the unmuted-low icon stays so a user clicking the button gets a Mute/Unmute toggle (not a confusing "icon says muted but click toggles to muted"). Three non-mute steps follow the GNOME / Plasma icon-theme convention: <34 = low, 34–66 = medium, 67+ = high.
+    private void RefreshMuteButton()
+    {
+        string icon;
+        if (viewModel.IsMuted)
+        {
+            icon = "audio-volume-muted";
+        }
+        else if (viewModel.Volume < 34)
+        {
+            icon = "audio-volume-low";
+        }
+        else if (viewModel.Volume < 67)
+        {
+            icon = "audio-volume-medium";
+        }
+        else
+        {
+            icon = "audio-volume-high";
+        }
+        muteButton.SetIconName(icon);
+        muteButton.SetTooltipText(viewModel.IsMuted ? "Unmute" : "Mute");
     }
 
     // Wayland path: pre-stage the SDR image description on the subsurface synchronously, before any frame can render. Necessary to cover three paths that ApplyHdrPolicy alone doesn't reach: (a) `--sdr` mode, where the policy event subscriptions are skipped entirely; (b) first-SDR-file in a fresh process, where the source-gamma observation arrives as null→bt.1886 and never crosses isSourceHdr's transition gate, so SourceHdrChanged never fires; (c) any compositor whose first wl_surface.enter races ahead of our bridge subscription (the comment in TryCreateRenderContext acknowledges the first enter is often missed). In all three, without this kickoff the subsurface stays untagged and KWin's HDR-aware compositor blows out gamma22 SDR output the same way the original bug did. We deliberately do NOT touch mpv's target-* options here — that interacts badly with mpv's auto resolution (tried, reverted) and ApplyHdrPolicy will set them appropriately when it does run for HDR sources.
@@ -715,10 +780,22 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             case HotkeyAction.ChapterNext:
                 viewModel.StepChapter(1);
                 return true;
+            case HotkeyAction.VolumeUp:
+                viewModel.AdjustVolume(VolumeStepPercent);
+                return true;
+            case HotkeyAction.VolumeDown:
+                viewModel.AdjustVolume(-VolumeStepPercent);
+                return true;
+            case HotkeyAction.ToggleMute:
+                viewModel.ToggleMute();
+                return true;
             default:
                 return false;
         }
     }
+
+    // Percent points per VolumeUp / VolumeDown press. 5 matches YouTube's keyboard step and lines up with the SeekBack5/Forward5 cadence.
+    private const double VolumeStepPercent = 5;
 
     // Shared between the menu's stateful action and the hotkey-bound action. Reads the action's current state and toggles via ChangeState so the menu's check glyph stays in sync regardless of which path triggered the toggle. Throws if BuildMenuBar hasn't run yet — control flow today guarantees menu construction precedes the controllers that can fire ExecuteAction, but a future refactor that breaks that ordering should fail loud rather than make a hotkey silently no-op (CLAUDE.md bans silent error handling).
     private void ToggleDiagnosticOverlay()
