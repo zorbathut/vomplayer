@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Mpv;
 
@@ -66,6 +67,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     public event Action? FileLoaded;
     public event Action<int>? FileEnded;
+    public event Action? TracksReloaded;
     // Fires on the main thread (via the same postToMainThread pump as other mpv property changes) whenever the source's HDR status flips. Reset to false on LoadFile and FileEnded so every file starts in a known SDR-safe state; the observer upgrades to true once mpv reports a `pq` or `hlg` gamma.
     public event Action<bool>? SourceHdrChanged;
 
@@ -297,6 +299,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 UpdateVideoTracks(snapshot.Video);
                 UpdateAudioTracks(snapshot.Audio);
                 UpdateSubtitleTracks(snapshot.Subtitle);
+                // Fire after the three updates land so consumers that need "all three settled" (the per-directory preferences applier) only do work once per re-walk. Per-kind PropertyChanged would over-fire (one per kind that changed) AND under-fire (the dedup gate suppresses empty→empty, so a kind with no tracks emits nothing).
+                TracksReloaded?.Invoke();
             });
         });
     }
@@ -359,7 +363,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
             var title = h.GetPropertyString($"track-list/{i}/title");
             var lang = h.GetPropertyString($"track-list/{i}/lang");
             var external = h.GetPropertyFlag($"track-list/{i}/external") == true;
-            bucket.Add(new MediaTrack(id, NullIfEmpty(title), NullIfEmpty(lang), external));
+            // External-filename is the full path mpv loaded the sidecar from. We strip to the basename so the per-directory matcher can compare across siblings ("commentary.ac3" in /a vs /b is "the same kind of file"); the directory part will diverge by definition for any cross-file lookup.
+            var externalFilename = external ? Path.GetFileName(h.GetPropertyString($"track-list/{i}/external-filename")) : null;
+            bucket.Add(new MediaTrack(id, NullIfEmpty(title), NullIfEmpty(lang), external, NullIfEmpty(externalFilename)));
         }
         return new TrackSnapshot(
             (IReadOnlyList<MediaTrack>?)video ?? empty,
@@ -414,6 +420,12 @@ public sealed partial class Playback : ObservableObject, IPlayback
             }
         }
         return true;
+    }
+
+    // Internal test seam for verifying TracksReloaded subscription wiring without spinning up mpv. Production fires TracksReloaded only from inside ReloadTracks's main-thread callback, which can't run in tests; tests drive Update*Tracks directly and then ping the event through here.
+    internal void RaiseTracksReloadedForTest()
+    {
+        TracksReloaded?.Invoke();
     }
 
     // Internal so PlaybackTests can drive the property without spinning up mpv. The ObservableProperty setter already dedups same-value writes, so the gate here is purely for documentation symmetry with the Update*Tracks methods / UpdateHwdecCurrent.
@@ -479,6 +491,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         // Null our own event invocation lists so a subscriber we forward to can't fire into a torn-down state. Dispose of the dispatcher — its Dispose drops subscriptions to the underlying MpvClient, drains the queue, joins the worker, and tears down mpv.
         FileLoaded = null;
         FileEnded = null;
+        TracksReloaded = null;
         SourceHdrChanged = null;
         dispatcher.Dispose();
     }

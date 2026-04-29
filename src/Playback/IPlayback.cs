@@ -4,8 +4,8 @@ using System.ComponentModel;
 
 namespace Vomplayer.Playback;
 
-// Snapshot of one of mpv's tracks (video, audio, or subtitle — same record shape covers all three since the relevant fields are identical). Id matches mpv's track id (the value passed to the kind-specific property — vid/aid/sid — to select it). Title and Lang are nullable because mpv reports them as property-unavailable when the source container didn't provide them. External=true marks tracks loaded via `*-add` (or auto) rather than embedded in the primary file. Plain readonly record so the snapshot can be replaced wholesale on each track-list change without consumers worrying about partial mutation.
-public sealed record MediaTrack(int Id, string? Title, string? Lang, bool External);
+// Snapshot of one of mpv's tracks (video, audio, or subtitle — same record shape covers all three since the relevant fields are identical). Id matches mpv's track id (the value passed to the kind-specific property — vid/aid/sid — to select it). Title and Lang are nullable because mpv reports them as property-unavailable when the source container didn't provide them. External=true marks tracks loaded via `*-add` (or auto) rather than embedded in the primary file; ExternalFilename is the basename of the source file when external (null for embedded tracks) — used by the per-directory preferences matcher to identify "this is the same external file across directory siblings". Plain readonly record so the snapshot can be replaced wholesale on each track-list change without consumers worrying about partial mutation.
+public sealed record MediaTrack(int Id, string? Title, string? Lang, bool External, string? ExternalFilename);
 
 public interface IPlayback : INotifyPropertyChanged, IDisposable
 {
@@ -27,6 +27,8 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
 
     event Action? FileLoaded;
     event Action<int>? FileEnded;
+    // Fires once per dispatcher-level track-list re-walk, AFTER the three per-kind properties (VideoTracks / AudioTracks / SubtitleTracks) have been updated on the main thread. Distinct from PropertyChanged on the lists individually because consumers (like the directory-preferences applier) need an "all three are settled" signal — relying on PropertyChanged for one specific kind misses files where that kind is empty (no notification fires for an empty→empty update due to the dedup gate). FileLoaded alone isn't enough either: FileLoaded fires before the dispatcher has finished re-walking and pushing the new lists.
+    event Action? TracksReloaded;
 
     void Initialize();
     void LoadFile(string path);

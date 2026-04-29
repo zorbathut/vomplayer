@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Playback;
@@ -49,6 +50,7 @@ public partial class ViewModelMainTests
 
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
+        public event Action? TracksReloaded;
 
         public int InitializeCalls { get; private set; }
         public int TogglePauseCalls { get; private set; }
@@ -119,6 +121,11 @@ public partial class ViewModelMainTests
             FileEnded?.Invoke(reason);
         }
 
+        public void RaiseTracksReloaded()
+        {
+            TracksReloaded?.Invoke();
+        }
+
         public void Dispose()
         {
         }
@@ -167,29 +174,50 @@ public partial class ViewModelMainTests
         }
     }
 
+    private sealed class FakeTrackPreferences : ITrackPreferences
+    {
+        // Order-preserving log of (directory, kind, preference) to make assertion-by-equality easy in save tests.
+        public List<(string Dir, MediaKind Kind, TrackPreference Pref)> RecordedPrefs { get; } = new();
+        // Pre-seeded responses for Get; tests put a value here to simulate "this directory has a saved preference for this kind".
+        public Dictionary<(string Dir, MediaKind Kind), TrackPreference> Stored { get; } = new();
+        public List<(string Dir, MediaKind Kind)> GetCalls { get; } = new();
+
+        public void Record(string directory, MediaKind kind, TrackPreference preference)
+        {
+            RecordedPrefs.Add((directory, kind, preference));
+            Stored[(directory, kind)] = preference;
+        }
+
+        public TrackPreference? Get(string directory, MediaKind kind)
+        {
+            GetCalls.Add((directory, kind));
+            return Stored.TryGetValue((directory, kind), out var p) ? p : null;
+        }
+    }
+
     [Test]
     public void NullPlaybackThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(null!, new FakeFilePicker(), new FakeRecentFiles()));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(null!, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences()));
     }
 
     [Test]
     public void NullFilePickerThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), null!, new FakeRecentFiles()));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), null!, new FakeRecentFiles(), new FakeTrackPreferences()));
     }
 
     [Test]
     public void NullRecentFilesThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), new FakeFilePicker(), null!));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), new FakeFilePicker(), null!, new FakeTrackPreferences()));
     }
 
     [Test]
     public void PositionMirrorsPlaybackPositionSeconds()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.PositionSeconds = 12.5;
         Assert.That(vm.Position, Is.EqualTo(TimeSpan.FromSeconds(12.5)));
     }
@@ -198,7 +226,7 @@ public partial class ViewModelMainTests
     public void DurationMirrorsPlaybackDurationSeconds()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.DurationSeconds = 60;
         Assert.That(vm.Duration, Is.EqualTo(TimeSpan.FromSeconds(60)));
     }
@@ -207,7 +235,7 @@ public partial class ViewModelMainTests
     public void IsPausedMirrorsPlayback()
     {
         var pb = new FakePlayback { IsPaused = true };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.IsPaused = false;
         Assert.That(vm.IsPaused, Is.False);
     }
@@ -216,7 +244,7 @@ public partial class ViewModelMainTests
     public void SeekValueTracksPlaybackWhenNotDragging()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.DurationSeconds = 100;
         pb.PositionSeconds = 25;
         Assert.That(vm.SeekValue, Is.EqualTo(0.25));
@@ -226,7 +254,7 @@ public partial class ViewModelMainTests
     public void SeekToSeeksToNormalizedPositionScaledByDuration()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.DurationSeconds = 100;
 
         vm.SeekTo(0.4);
@@ -238,7 +266,7 @@ public partial class ViewModelMainTests
     public void SeekValueTracksPlaybackPosition()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.DurationSeconds = 100;
 
         pb.PositionSeconds = 75;
@@ -250,7 +278,7 @@ public partial class ViewModelMainTests
     public void PlayPauseCommandTogglesPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.DurationSeconds = 60;
         vm.PlayPauseCommand.Execute(null);
         Assert.That(pb.TogglePauseCalls, Is.EqualTo(1));
@@ -260,7 +288,7 @@ public partial class ViewModelMainTests
     public void PlayPauseCommandIsNoopBeforeFileLoad()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         vm.PlayPauseCommand.Execute(null);
         Assert.That(pb.TogglePauseCalls, Is.EqualTo(0));
     }
@@ -270,7 +298,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = "/path/to/video.mp4" };
-        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences());
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(picker.Calls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/video.mp4"));
@@ -282,7 +310,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = "/path/to/video.mp4" };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences());
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/path/to/video.mp4" }));
     }
@@ -293,7 +321,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = null };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences());
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(picker.Calls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.Null);
@@ -305,7 +333,7 @@ public partial class ViewModelMainTests
     public void OpenFileLoadsTheTarget()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         vm.OpenFile("/path/to/dropped.mp4");
         Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/dropped.mp4"));
@@ -316,7 +344,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
         vm.OpenFile("/path/to/dropped.mp4");
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/path/to/dropped.mp4" }));
     }
@@ -326,7 +354,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
         vm.OpenFile("https://example.com/stream.m3u8");
         Assert.That(pb.LastLoadedFile, Is.EqualTo("https://example.com/stream.m3u8"));
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "https://example.com/stream.m3u8" }));
@@ -337,7 +365,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents)
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences())
         {
             InitialFile = "/path/to/initial.mp4",
         };
@@ -359,7 +387,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
         vm.OnRenderContextReady();
         Assert.That(pb.LastLoadedFile, Is.Null);
         Assert.That(recents.RecordedPaths, Is.Empty);
@@ -369,7 +397,7 @@ public partial class ViewModelMainTests
     public void DisposeUnsubscribesFromPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.PositionSeconds = 5;
         var beforeDispose = vm.Position;
 
@@ -382,10 +410,10 @@ public partial class ViewModelMainTests
     public void TrackListsMirrorPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
-        var video = new[] { new MediaTrack(1, null, null, false) };
-        var audio = new[] { new MediaTrack(1, null, "eng", false), new MediaTrack(2, null, "fre", false) };
-        var subs = new[] { new MediaTrack(1, "English", "eng", false) };
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        var video = new[] { new MediaTrack(1, null, null, false, null) };
+        var audio = new[] { new MediaTrack(1, null, "eng", false, null), new MediaTrack(2, null, "fre", false, null) };
+        var subs = new[] { new MediaTrack(1, "English", "eng", false, null) };
         pb.VideoTracks = video;
         pb.AudioTracks = audio;
         pb.SubtitleTracks = subs;
@@ -398,7 +426,7 @@ public partial class ViewModelMainTests
     public void CurrentIdsMirrorPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         pb.CurrentVideoId = 1;
         pb.CurrentAudioId = 2;
         pb.CurrentSubtitleId = 3;
@@ -417,7 +445,7 @@ public partial class ViewModelMainTests
     public void SelectMethodsRouteToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
         vm.SelectVideo(7);
         vm.SelectAudio(8);
         vm.SelectSubtitle(9);
@@ -434,7 +462,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextAudioResult = "/path/to/track.flac" };
-        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences());
         await vm.LoadAudioCommand.ExecuteAsync(null);
         Assert.That(picker.AudioCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedAudio, Is.EqualTo("/path/to/track.flac"));
@@ -446,7 +474,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextAudioResult = null };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences());
         await vm.LoadAudioCommand.ExecuteAsync(null);
         Assert.That(picker.AudioCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedAudio, Is.Null);
@@ -458,7 +486,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextSubtitleResult = "/path/to/track.srt" };
-        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles());
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences());
         await vm.LoadSubtitleCommand.ExecuteAsync(null);
         Assert.That(picker.SubtitleCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedSubtitle, Is.EqualTo("/path/to/track.srt"));
@@ -470,11 +498,328 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextSubtitleResult = null };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences());
         await vm.LoadSubtitleCommand.ExecuteAsync(null);
         Assert.That(picker.SubtitleCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedSubtitle, Is.Null);
         // Subtitles aren't user-opened media; cancellation must not record into recents.
         Assert.That(recents.RecordedPaths, Is.Empty);
+    }
+
+    // --- Per-directory track preferences: save-on-explicit-choice + apply-on-load ---
+
+    private static string LocalPathInTemp(string filename)
+    {
+        // Build a path that survives TryGetDirectoryKey (i.e., a real local-filesystem path with a real parent dir).
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-vm-prefs-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, filename);
+    }
+
+    [Test]
+    public async Task OpenCommandFromPickerEnablesPreferencePersistence()
+    {
+        // Regression: the picker's OpenAsync used to bypass OpenFile and load the path directly, leaving currentDirectoryKey unset. As a result, every subsequent SelectXxx hit the SaveTrackPreference early-return (null directory key) and nothing was saved. Drag-and-drop and command-line invocation went through OpenFile and worked fine, but the menu's File → Open… item silently failed to persist anything.
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var path = LocalPathInTemp("movie.mkv");
+        var picker = new FakeFilePicker { NextResult = path };
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), prefs);
+        try
+        {
+            await vm.OpenCommand.ExecuteAsync(null);
+            // Set tracks now that the VM has subscribed to the playback mirror.
+            pb.AudioTracks = new[] { new MediaTrack(7, "English", "eng", false, null) };
+
+            vm.SelectAudio(7);
+
+            Assert.That(prefs.RecordedPrefs, Has.Count.EqualTo(1));
+            Assert.That(prefs.RecordedPrefs[0].Dir, Is.EqualTo(Path.GetDirectoryName(path)));
+            Assert.That(prefs.RecordedPrefs[0].Pref.Title, Is.EqualTo("English"));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void SelectAudioRecordsPreferenceForLocalFile()
+    {
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+        // Set tracks AFTER VM construction so the PropertyChanged → mirror flow runs and vm.AudioTracks reflects the test's setup.
+        pb.AudioTracks = new[]
+        {
+            new MediaTrack(1, "First", "eng", false, null),
+            new MediaTrack(7, "Commentary", "eng", true, "commentary.ac3"),
+        };
+        var path = LocalPathInTemp("movie.mkv");
+        var dir = Path.GetDirectoryName(path);
+        try
+        {
+            vm.OpenFile(path);
+            vm.SelectAudio(7);
+
+            Assert.That(prefs.RecordedPrefs, Has.Count.EqualTo(1));
+            var (recordedDir, kind, pref) = prefs.RecordedPrefs[0];
+            Assert.That(recordedDir, Is.EqualTo(dir));
+            Assert.That(kind, Is.EqualTo(MediaKind.Audio));
+            Assert.That(pref.IsNone, Is.False);
+            Assert.That(pref.Title, Is.EqualTo("Commentary"));
+            Assert.That(pref.Lang, Is.EqualTo("eng"));
+            Assert.That(pref.External, Is.True);
+            Assert.That(pref.ExternalFilename, Is.EqualTo("commentary.ac3"));
+            Assert.That(pref.IndexInKind, Is.EqualTo(1));
+
+            // The forwarding to playback still happens.
+            Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 7 }));
+        }
+        finally
+        {
+            Directory.Delete(dir!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void SelectSubtitleNullRecordsIsNonePreference()
+    {
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+        pb.SubtitleTracks = new[] { new MediaTrack(1, "English", "eng", false, null) };
+        var path = LocalPathInTemp("show.mkv");
+        try
+        {
+            vm.OpenFile(path);
+            vm.SelectSubtitle(null);
+
+            Assert.That(prefs.RecordedPrefs, Has.Count.EqualTo(1));
+            Assert.That(prefs.RecordedPrefs[0].Pref.IsNone, Is.True);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void SelectIsNoopForRecordingWhenSourceIsUri()
+    {
+        // URI sources have no useful directory key; preferences must not be saved (and the playback call must still happen so the user's pick takes effect for the current session).
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+        pb.AudioTracks = new[] { new MediaTrack(1, "Foo", "eng", false, null) };
+        vm.OpenFile("https://example.com/stream.m3u8");
+
+        vm.SelectAudio(1);
+
+        Assert.That(prefs.RecordedPrefs, Is.Empty);
+        Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 1 }));
+    }
+
+    [Test]
+    public void SelectIsNoopForRecordingWhenChosenIdNotInTracklist()
+    {
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+        pb.AudioTracks = new[] { new MediaTrack(1, "Foo", "eng", false, null) };
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            vm.OpenFile(path);
+            // Race: user clicks track 99 but the list has changed since the menu was rendered. Skip the save.
+            vm.SelectAudio(99);
+
+            Assert.That(prefs.RecordedPrefs, Is.Empty);
+            // playback still receives the call — let mpv decide what to do with an unknown id.
+            Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 99 }));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ApplyHappensOnFileLoaded()
+    {
+        // mpv fires `track-list/count` (and we marshal it as TracksReloaded) BEFORE FileLoaded — the lists are populated by the time FileLoaded lands. So apply fires from FileLoaded itself, not from a subsequent TracksReloaded. Verified empirically against real mpv via VOMPL_LOG_PREFS traces.
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var path = LocalPathInTemp("movie.mkv");
+        var dir = Path.GetDirectoryName(path)!;
+        prefs.Stored[(dir, MediaKind.Audio)] = new TrackPreference(false, null, "fre", false, null, null);
+        prefs.Stored[(dir, MediaKind.Subtitle)] = new TrackPreference(true, null, null, false, null, null);
+
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+            // Tracks set after VM construction so the PropertyChanged → mirror path runs and ApplyTrackPreferences sees them via vm.AudioTracks etc. In real mpv, the TracksReloaded fire that produces the populated lists happens before FileLoaded — so by the time FileLoaded fires, mirrors are populated.
+            pb.AudioTracks = new[] { new MediaTrack(11, "English", "eng", false, null), new MediaTrack(12, "French", "fre", false, null) };
+            pb.SubtitleTracks = new[] { new MediaTrack(21, "English", "eng", false, null) };
+            vm.OpenFile(path);
+
+            // Before FileLoaded fires, no apply.
+            Assert.That(pb.AudioSelections, Is.Empty);
+
+            pb.RaiseFileLoaded();
+            // Apply runs immediately: French audio (lang match) → 12; subtitles → null (IsNone).
+            Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 12 }));
+            Assert.That(pb.SubtitleSelections, Is.EqualTo(new int?[] { null }));
+
+            // A subsequent TracksReloaded must NOT re-apply (e.g., the user adds a sub via Add Subtitle File later in the session). The per-kind applied gate enforces this.
+            pb.RaiseTracksReloaded();
+            Assert.That(pb.AudioSelections, Has.Count.EqualTo(1));
+            Assert.That(pb.SubtitleSelections, Has.Count.EqualTo(1));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ApplyDoesNotReSavePreference()
+    {
+        // The apply path goes through playback.SetXxx directly, bypassing vm.SelectXxx — otherwise an immediate read-back-and-save loop would constantly rewrite the same row on every file load. Verify by counting Record calls before and after the apply.
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var path = LocalPathInTemp("movie.mkv");
+        var dir = Path.GetDirectoryName(path)!;
+        prefs.Stored[(dir, MediaKind.Audio)] = new TrackPreference(false, null, "eng", false, null, null);
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+            pb.AudioTracks = new[] { new MediaTrack(1, null, "eng", false, null) };
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            pb.RaiseTracksReloaded();
+
+            // playback got its SetAudio call for the matched track…
+            Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 1 }));
+            // …but Record was NOT called from the apply path.
+            Assert.That(prefs.RecordedPrefs, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ApplySkipsWhenNoPreferenceStored()
+    {
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var path = LocalPathInTemp("movie.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+            pb.AudioTracks = new[] { new MediaTrack(1, null, "eng", false, null) };
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            pb.RaiseTracksReloaded();
+            Assert.That(pb.AudioSelections, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ApplyRetriesPerKindUntilEachSucceeds()
+    {
+        // Realistic scenario: subtitle preference is for an external sub mpv hasn't auto-loaded yet. First TracksReloaded only has the embedded set (no match for sub). A second TracksReloaded later includes the lazy external sub. The retry loop applies it.
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var path = LocalPathInTemp("movie.mkv");
+        var dir = Path.GetDirectoryName(path)!;
+        prefs.Stored[(dir, MediaKind.Subtitle)] = new TrackPreference(false, "Forced", null, false, null, null);
+        prefs.Stored[(dir, MediaKind.Audio)] = new TrackPreference(false, null, "eng", false, null, null);
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+            // Initial track-list: matches audio (eng) but NOT subtitle (no track titled "Forced").
+            pb.AudioTracks = new[] { new MediaTrack(11, null, "eng", false, null) };
+            pb.SubtitleTracks = new[] { new MediaTrack(21, "English", "eng", false, null) };
+            vm.OpenFile(path);
+
+            pb.RaiseFileLoaded();
+            pb.RaiseTracksReloaded();
+            // Audio applied (matched by lang). Subtitle did NOT apply (no "Forced" title in the list).
+            Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 11 }));
+            Assert.That(pb.SubtitleSelections, Is.Empty);
+
+            // Second TracksReloaded — mpv has now lazy-loaded the forced-subs sidecar.
+            pb.SubtitleTracks = new[]
+            {
+                new MediaTrack(21, "English", "eng", false, null),
+                new MediaTrack(22, "Forced", "eng", true, "forced.srt"),
+            };
+            pb.RaiseTracksReloaded();
+            // Audio is NOT re-applied (already done on the first pass).
+            Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 11 }));
+            // Subtitle IS now applied (the matching track appeared).
+            Assert.That(pb.SubtitleSelections, Is.EqualTo(new int?[] { 22 }));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ApplyDoesNotReFireOnPostApplyTracksReloaded()
+    {
+        // Once a kind has been applied, a later TracksReloaded (e.g., user adds an external sub via menu) must NOT re-apply the same preference and clobber the user's just-added sub.
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var path = LocalPathInTemp("movie.mkv");
+        var dir = Path.GetDirectoryName(path)!;
+        prefs.Stored[(dir, MediaKind.Subtitle)] = new TrackPreference(false, null, "eng", false, null, null);
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+            pb.SubtitleTracks = new[] { new MediaTrack(21, null, "eng", false, null) };
+            vm.OpenFile(path);
+            pb.RaiseFileLoaded();
+            pb.RaiseTracksReloaded();
+
+            Assert.That(pb.SubtitleSelections, Is.EqualTo(new int?[] { 21 }));
+
+            // Simulate user adding an external sub: track-list grows, TracksReloaded fires again.
+            pb.SubtitleTracks = new[]
+            {
+                new MediaTrack(21, null, "eng", false, null),
+                new MediaTrack(22, "External", "eng", true, "added.srt"),
+            };
+            pb.RaiseTracksReloaded();
+
+            // Critical: NO re-apply. Subtitle stays at the user's now-current pick (which would be 22 in the real flow; the fake doesn't auto-select).
+            Assert.That(pb.SubtitleSelections, Is.EqualTo(new int?[] { 21 }));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ApplySkipsForUriSources()
+    {
+        var pb = new FakePlayback();
+        var prefs = new FakeTrackPreferences();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs);
+        pb.AudioTracks = new[] { new MediaTrack(1, null, "eng", false, null) };
+        vm.OpenFile("https://example.com/stream.m3u8");
+        pb.RaiseFileLoaded();
+        pb.RaiseTracksReloaded();
+        Assert.That(pb.AudioSelections, Is.Empty);
+        Assert.That(prefs.GetCalls, Is.Empty);
     }
 }

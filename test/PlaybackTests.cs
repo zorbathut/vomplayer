@@ -203,9 +203,9 @@ public class PlaybackTests
     public void TrackListsUpdateOnNewSnapshot()
     {
         using var pb = new Playback.Playback(a => a());
-        var video = new[] { new MediaTrack(1, null, null, false) };
-        var audio = new[] { new MediaTrack(1, null, "eng", false) };
-        var subs = new[] { new MediaTrack(1, "English", "eng", false) };
+        var video = new[] { new MediaTrack(1, null, null, false, null) };
+        var audio = new[] { new MediaTrack(1, null, "eng", false, null) };
+        var subs = new[] { new MediaTrack(1, "English", "eng", false, null) };
         pb.UpdateVideoTracks(video);
         pb.UpdateAudioTracks(audio);
         pb.UpdateSubtitleTracks(subs);
@@ -229,9 +229,9 @@ public class PlaybackTests
             }
         };
 
-        var first = new[] { new MediaTrack(1, "English", "eng", false) };
-        var sameContent = new[] { new MediaTrack(1, "English", "eng", false) };
-        var different = new[] { new MediaTrack(2, "French", "fre", false) };
+        var first = new[] { new MediaTrack(1, "English", "eng", false, null) };
+        var sameContent = new[] { new MediaTrack(1, "English", "eng", false, null) };
+        var different = new[] { new MediaTrack(2, "French", "fre", false, null) };
 
         pb.UpdateSubtitleTracks(first);
         pb.UpdateSubtitleTracks(sameContent); // record-equal → no PropertyChanged
@@ -271,6 +271,21 @@ public class PlaybackTests
         pb.UpdateAudioTracks(Array.Empty<MediaTrack>());
         pb.UpdateSubtitleTracks(Array.Empty<MediaTrack>());
         Assert.That(fires, Is.Empty);
+    }
+
+    [Test]
+    public void TracksReloadedFiresAfterAllThreeUpdates()
+    {
+        // Drives the Update*Tracks methods directly (the same seam ReloadTracks's main-thread post calls). TracksReloaded itself fires inside ReloadTracks's lambda — not inside Update*Tracks — so this test exercises the event subscription hookup, not the firing site directly. The firing-site test would need the dispatcher worker, which is mpv-bound.
+        using var pb = new Playback.Playback(a => a());
+        int fires = 0;
+        pb.TracksReloaded += () => fires++;
+
+        // No automatic firing on Update*Tracks (those just set the property + fire PropertyChanged); TracksReloaded fires only from the ReloadTracks main-thread callback. Drive it explicitly via the test seam.
+        pb.RaiseTracksReloadedForTest();
+        pb.RaiseTracksReloadedForTest();
+
+        Assert.That(fires, Is.EqualTo(2));
     }
 
     [Test]

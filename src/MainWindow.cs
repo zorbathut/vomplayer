@@ -90,7 +90,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private ulong seekLegacyHandlerId;
     private IntPtr seekLegacyControllerHandle;
 
-    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, UserConfig userConfig, string configPath, string? initialFile, bool forceSdr)
+    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile, bool forceSdr)
     {
         if (app == null)
         {
@@ -103,6 +103,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         if (recentFiles == null)
         {
             throw new ArgumentNullException(nameof(recentFiles));
+        }
+        if (trackPreferences == null)
+        {
+            throw new ArgumentNullException(nameof(trackPreferences));
         }
         if (userConfig == null)
         {
@@ -127,7 +131,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         InstallVomplCss();
 
         var filePicker = new FilePickerGtk(this);
-        viewModel = new ViewModelMain(playback, filePicker, recentFiles);
+        viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences);
         viewModel.InitialFile = initialFile;
 
         Gtk.Widget videoWidget;
