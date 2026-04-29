@@ -32,11 +32,23 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private string? hwdecCurrent;
 
-    // Snapshot of mpv's subtitle tracks. Replaced wholesale (not mutated) so PropertyChanged on SubtitleTracks signals "re-read everything". Driven by an observation on `track-list/count` — every add/remove of any track type fires the count change, and we re-walk track-list/N/* on the dispatcher thread. Filtering to type=="sub" happens during the walk.
+    // Snapshots of mpv's tracks per kind. Replaced wholesale (not mutated) so PropertyChanged signals "re-read everything". Driven by an observation on `track-list/count` — every add/remove of any track kind fires the count change, and we re-walk track-list/N/* on the dispatcher thread. A single dispatcher post drives the read so the three per-kind buckets come out of one walk, avoiding three round-trip passes that would each re-open the mid-walk-reorder window described on ReadTracksFromMpv. (Per-kind UI consumers still see the three property updates land sequentially on the main thread, not atomically — the comment used to claim otherwise.)
     [ObservableProperty]
-    private IReadOnlyList<SubtitleTrack> subtitleTracks = Array.Empty<SubtitleTrack>();
+    private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
 
-    // Mirror of mpv's `current-tracks/sub/id`. Null when no subtitle is active (sid=no or no file loaded). Observed independently of track-list/count so the radio selection in the menu can update the moment the user picks a different track without waiting for a track-list change.
+    [ObservableProperty]
+    private IReadOnlyList<MediaTrack> audioTracks = Array.Empty<MediaTrack>();
+
+    [ObservableProperty]
+    private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
+
+    // Mirrors of mpv's `current-tracks/{video,audio,sub}/id`. Null when no track of that kind is active. Observed independently of track-list/count so the radio selection in each menu can update the moment the user picks a different track without waiting for a track-list change.
+    [ObservableProperty]
+    private int? currentVideoId;
+
+    [ObservableProperty]
+    private int? currentAudioId;
+
     [ObservableProperty]
     private int? currentSubtitleId;
 
@@ -104,9 +116,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("video-params/gamma", MpvFormat.String);
             // Observe the actual decoder mpv selected, not the requested one. Fires on FileLoaded (mpv resolves hwdec after probing the file) and again if negotiation falls back mid-playback. The synthesized initial event lands with "no" or empty before any file loads.
             h.ObserveProperty("hwdec-current", MpvFormat.String);
-            // track-list/count fires for any track add/remove (audio, video, sub) — a slight overshoot for our subs-only consumer, but cheap enough that filtering downstream is simpler than maintaining separate observations per type. ReloadSubtitleTracks below re-walks the list under the dispatcher.
+            // track-list/count fires for any track add/remove (audio, video, sub). One observation drives the re-walk for all three kinds — ReloadTracks below classifies entries by type in a single pass.
             h.ObserveProperty("track-list/count", MpvFormat.Int64);
-            // current-tracks/sub/id fires whenever the active sub-track changes — including from `sub-add` selecting the new track, an explicit `sid` write, or the file-load auto-selection. Property-unavailable (no sub active) lands as null AsInt64.
+            // current-tracks/{video,audio,sub}/id fires whenever the active track of that kind changes — including from a *-add command selecting the new track, an explicit vid/aid/sid write, or the file-load auto-selection. Property-unavailable (no track of that kind active) lands as null AsInt64.
+            h.ObserveProperty("current-tracks/video/id", MpvFormat.Int64);
+            h.ObserveProperty("current-tracks/audio/id", MpvFormat.Int64);
             h.ObserveProperty("current-tracks/sub/id", MpvFormat.Int64);
         });
     }
@@ -158,6 +172,16 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.Post(h => h.SetProperty("pause", pausedNow ? "no" : "yes"));
     }
 
+    public void LoadAudio(string path)
+    {
+        if (path == null)
+        {
+            throw new ArgumentNullException(nameof(path));
+        }
+        // mpv's `audio-add` defaults to flag=select, mirroring sub-add's behavior — the new track activates and the usual track-list / current-tracks observations fire.
+        dispatcher.Post(h => h.Command("audio-add", path));
+    }
+
     public void LoadSubtitle(string path)
     {
         if (path == null)
@@ -168,11 +192,26 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.Post(h => h.Command("sub-add", path));
     }
 
+    public void SetVideo(int? trackId)
+    {
+        SetTrackProperty("vid", trackId);
+    }
+
+    public void SetAudio(int? trackId)
+    {
+        SetTrackProperty("aid", trackId);
+    }
+
     public void SetSubtitle(int? trackId)
     {
-        // mpv accepts integer ids and the symbolic "no" / "auto" for the sid property; we only emit the explicit forms (id or "no") so toggling subtitles is deterministic with respect to the current track-list.
+        SetTrackProperty("sid", trackId);
+    }
+
+    // mpv accepts integer ids and the symbolic "no" / "auto" for the vid/aid/sid properties; we only emit the explicit forms (id or "no") so toggling tracks is deterministic with respect to the current track-list.
+    private void SetTrackProperty(string property, int? trackId)
+    {
         var value = trackId.HasValue ? trackId.Value.ToString(CultureInfo.InvariantCulture) : "no";
-        dispatcher.Post(h => h.SetProperty("sid", value));
+        dispatcher.Post(h => h.SetProperty(property, value));
     }
 
     public void Seek(double seconds)
@@ -222,8 +261,14 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 UpdateHwdecCurrent(change.Value.AsString);
                 break;
             case "track-list/count":
-                // OnMpvPropertyChanged runs on the main thread (the dispatcher's PropertyChanged is forwarded through postToMainThread upstream in the constructor). Re-walking the track-list requires mpv client-API calls, which are pinned to the dispatcher worker — so ReloadSubtitleTracks Post()s back onto the worker for the read, then re-marshals the snapshot to the main thread for the property assignment.
-                ReloadSubtitleTracks();
+                // OnMpvPropertyChanged runs on the main thread (the dispatcher's PropertyChanged is forwarded through postToMainThread upstream in the constructor). Re-walking the track-list requires mpv client-API calls, which are pinned to the dispatcher worker — so ReloadTracks Post()s back onto the worker for the read, then re-marshals the snapshot to the main thread for the property assignment.
+                ReloadTracks();
+                break;
+            case "current-tracks/video/id":
+                UpdateCurrentVideoId((int?)change.Value.AsInt64);
+                break;
+            case "current-tracks/audio/id":
+                UpdateCurrentAudioId((int?)change.Value.AsInt64);
                 break;
             case "current-tracks/sub/id":
                 UpdateCurrentSubtitleId((int?)change.Value.AsInt64);
@@ -241,58 +286,85 @@ public sealed partial class Playback : ObservableObject, IPlayback
         return gamma == "pq" || gamma == "hlg";
     }
 
-    // Posts a track-list re-walk onto the dispatcher worker (the only thread allowed to touch mpv client-API methods), then hands the snapshot back to the main thread for the UpdateSubtitleTracks property assignment so PropertyChanged subscribers stay on the UI thread. We re-walk the whole list rather than diff-ing because mpv's per-track ids can be reordered after a `sub-remove`, and the list is small (typically <10 tracks).
-    private void ReloadSubtitleTracks()
+    // Posts a track-list re-walk onto the dispatcher worker (the only thread allowed to touch mpv client-API methods), then hands the snapshot back to the main thread for the per-kind property assignments so PropertyChanged subscribers stay on the UI thread. We re-walk the whole list rather than diff-ing because mpv's per-track ids can be reordered after a *-remove, and the list is small (typically <10 tracks per kind).
+    private void ReloadTracks()
     {
         dispatcher.Post(h =>
         {
-            var snapshot = ReadSubtitleTracksFromMpv(h);
-            postToMainThread(() => UpdateSubtitleTracks(snapshot));
+            var snapshot = ReadTracksFromMpv(h);
+            postToMainThread(() =>
+            {
+                UpdateVideoTracks(snapshot.Video);
+                UpdateAudioTracks(snapshot.Audio);
+                UpdateSubtitleTracks(snapshot.Subtitle);
+            });
         });
     }
 
-    // Walks mpv's track-list via the per-index scalar accessors (track-list/N/...) so we don't need NodeArray support in MpvClient.ReadPropertyValue. count read as a string and parsed because the scalar reads return strings anyway — keeps a single code path.
+    // Per-kind buckets for a single track-list walk. Keeping them as one struct lets ReloadTracks avoid three separate dispatcher Posts (and their associated mid-walk races).
+    private readonly record struct TrackSnapshot(IReadOnlyList<MediaTrack> Video, IReadOnlyList<MediaTrack> Audio, IReadOnlyList<MediaTrack> Subtitle);
+
+    // Walks mpv's track-list via the per-index scalar accessors (track-list/N/...) so we don't need NodeArray support in MpvClient.ReadPropertyValue. count read as a string and parsed because the scalar reads return strings anyway — keeps a single code path. One walk classifies entries into three lists by their `type` field.
     //
-    // Known non-atomicity: each property read sees mpv's live state, not a snapshot, so a track add/remove that races us mid-walk can produce a single SubtitleTrack with mismatched fields (id from one slot, title from another that just shifted in). Self-healing — mpv fires another track-list/count change for the mutation, which re-walks. Acceptable for KISS until it actually surfaces; the fix would be NodeArray support to read track-list as a single snapshot.
-    private static IReadOnlyList<SubtitleTrack> ReadSubtitleTracksFromMpv(MpvHandle h)
+    // Known non-atomicity: each property read sees mpv's live state, not a snapshot, so a track add/remove that races us mid-walk can produce a single MediaTrack with mismatched fields (id from one slot, title from another that just shifted in). Self-healing — mpv fires another track-list/count change for the mutation, which re-walks. Acceptable for KISS until it actually surfaces; the fix would be NodeArray support to read track-list as a single snapshot.
+    private static TrackSnapshot ReadTracksFromMpv(MpvHandle h)
     {
+        var empty = Array.Empty<MediaTrack>();
         var countStr = h.GetPropertyString("track-list/count");
         if (countStr == null)
         {
             // Pre-initialize / shutdown race; treat as empty without logging — common on the synthesized initial fire.
-            return Array.Empty<SubtitleTrack>();
+            return new TrackSnapshot(empty, empty, empty);
         }
         if (!int.TryParse(countStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out int count))
         {
             // mpv documents track-list/count as int — a non-parseable value here means mpv broke its contract or returned an unexpected form. Log loudly per CLAUDE.md (silent error handling banned) and treat as empty.
-            Console.Error.WriteLine($"[vomplayer] subtitle: unparseable track-list/count='{countStr}'");
-            return Array.Empty<SubtitleTrack>();
+            Console.Error.WriteLine($"[vomplayer] tracks: unparseable track-list/count='{countStr}'");
+            return new TrackSnapshot(empty, empty, empty);
         }
         if (count <= 0)
         {
-            return Array.Empty<SubtitleTrack>();
+            return new TrackSnapshot(empty, empty, empty);
         }
-        var list = new List<SubtitleTrack>();
+        List<MediaTrack>? video = null;
+        List<MediaTrack>? audio = null;
+        List<MediaTrack>? subtitle = null;
         for (int i = 0; i < count; i++)
         {
             var type = h.GetPropertyString($"track-list/{i}/type");
-            if (type != "sub")
+            List<MediaTrack> bucket;
+            if (type == "video")
+            {
+                bucket = video ??= new List<MediaTrack>();
+            }
+            else if (type == "audio")
+            {
+                bucket = audio ??= new List<MediaTrack>();
+            }
+            else if (type == "sub")
+            {
+                bucket = subtitle ??= new List<MediaTrack>();
+            }
+            else
             {
                 continue;
             }
             var idStr = h.GetPropertyString($"track-list/{i}/id");
             if (!int.TryParse(idStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
             {
-                // Every mpv track has an id; missing or unparseable on a sub-typed entry means we hit the mid-walk race or mpv broke its contract. Log and skip rather than silently drop.
-                Console.Error.WriteLine($"[vomplayer] subtitle: unparseable track-list/{i}/id='{idStr}', skipping");
+                // Every mpv track has an id; missing or unparseable on a typed entry means we hit the mid-walk race or mpv broke its contract. Log and skip rather than silently drop.
+                Console.Error.WriteLine($"[vomplayer] tracks: unparseable track-list/{i}/id='{idStr}' (type={type}), skipping");
                 continue;
             }
             var title = h.GetPropertyString($"track-list/{i}/title");
             var lang = h.GetPropertyString($"track-list/{i}/lang");
             var external = h.GetPropertyFlag($"track-list/{i}/external") == true;
-            list.Add(new SubtitleTrack(id, NullIfEmpty(title), NullIfEmpty(lang), external));
+            bucket.Add(new MediaTrack(id, NullIfEmpty(title), NullIfEmpty(lang), external));
         }
-        return list;
+        return new TrackSnapshot(
+            (IReadOnlyList<MediaTrack>?)video ?? empty,
+            (IReadOnlyList<MediaTrack>?)audio ?? empty,
+            (IReadOnlyList<MediaTrack>?)subtitle ?? empty);
     }
 
     private static string? NullIfEmpty(string? s)
@@ -300,8 +372,26 @@ public sealed partial class Playback : ObservableObject, IPlayback
         return string.IsNullOrEmpty(s) ? null : s;
     }
 
-    // Internal so PlaybackTests can drive snapshot replacement without spinning up mpv's event pump. Sequence-equality dedup keeps PropertyChanged from firing for spurious track-list/count notifications that don't actually change the subtitle subset (e.g., audio track add/remove also fires count).
-    internal void UpdateSubtitleTracks(IReadOnlyList<SubtitleTrack> snapshot)
+    // Internal so PlaybackTests can drive snapshot replacement without spinning up mpv's event pump. Sequence-equality dedup keeps PropertyChanged from firing for spurious track-list/count notifications that don't actually change the per-kind subset (e.g., a sub track add/remove also fires count, which would otherwise re-notify Video and Audio consumers for nothing).
+    internal void UpdateVideoTracks(IReadOnlyList<MediaTrack> snapshot)
+    {
+        if (TracksEqual(VideoTracks, snapshot))
+        {
+            return;
+        }
+        VideoTracks = snapshot;
+    }
+
+    internal void UpdateAudioTracks(IReadOnlyList<MediaTrack> snapshot)
+    {
+        if (TracksEqual(AudioTracks, snapshot))
+        {
+            return;
+        }
+        AudioTracks = snapshot;
+    }
+
+    internal void UpdateSubtitleTracks(IReadOnlyList<MediaTrack> snapshot)
     {
         if (TracksEqual(SubtitleTracks, snapshot))
         {
@@ -310,7 +400,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         SubtitleTracks = snapshot;
     }
 
-    private static bool TracksEqual(IReadOnlyList<SubtitleTrack> a, IReadOnlyList<SubtitleTrack> b)
+    private static bool TracksEqual(IReadOnlyList<MediaTrack> a, IReadOnlyList<MediaTrack> b)
     {
         if (a.Count != b.Count)
         {
@@ -326,7 +416,17 @@ public sealed partial class Playback : ObservableObject, IPlayback
         return true;
     }
 
-    // Internal so PlaybackTests can drive the property without spinning up mpv. The ObservableProperty setter already dedups same-value writes, so the gate here is purely for documentation symmetry with UpdateSubtitleTracks / UpdateHwdecCurrent.
+    // Internal so PlaybackTests can drive the property without spinning up mpv. The ObservableProperty setter already dedups same-value writes, so the gate here is purely for documentation symmetry with the Update*Tracks methods / UpdateHwdecCurrent.
+    internal void UpdateCurrentVideoId(int? value)
+    {
+        CurrentVideoId = value;
+    }
+
+    internal void UpdateCurrentAudioId(int? value)
+    {
+        CurrentAudioId = value;
+    }
+
     internal void UpdateCurrentSubtitleId(int? value)
     {
         CurrentSubtitleId = value;

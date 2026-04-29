@@ -29,9 +29,21 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     [ObservableProperty]
     private double seekValue;
 
-    // Mirrors of IPlayback subtitle state. The view (MainWindow) subscribes to PropertyChanged on these to rebuild the Subtitles submenu — the menu itself isn't a widget tree we can data-bind, it's a Gio.Menu rebuilt wholesale, so going through normal VM mirrors keeps the cross-thread story uniform with everything else (playback fires PropertyChanged on the main thread, view rebuilds menu on the main thread).
+    // Mirrors of IPlayback per-kind track state. The view (MainWindow) subscribes to PropertyChanged on these to rebuild the per-kind submenus — the menus themselves aren't widget trees we can data-bind, they're Gio.Menus rebuilt wholesale, so going through normal VM mirrors keeps the cross-thread story uniform with everything else (playback fires PropertyChanged on the main thread, view rebuilds menus on the main thread).
     [ObservableProperty]
-    private IReadOnlyList<SubtitleTrack> subtitleTracks = Array.Empty<SubtitleTrack>();
+    private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
+
+    [ObservableProperty]
+    private IReadOnlyList<MediaTrack> audioTracks = Array.Empty<MediaTrack>();
+
+    [ObservableProperty]
+    private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
+
+    [ObservableProperty]
+    private int? currentVideoId;
+
+    [ObservableProperty]
+    private int? currentAudioId;
 
     [ObservableProperty]
     private int? currentSubtitleId;
@@ -71,6 +83,17 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     }
 
     [RelayCommand]
+    private async Task LoadAudioAsync()
+    {
+        var path = await filePicker.PickAudioFileAsync("Open audio file");
+        if (path == null)
+        {
+            return;
+        }
+        playback.LoadAudio(path);
+    }
+
+    [RelayCommand]
     private async Task LoadSubtitleAsync()
     {
         var path = await filePicker.PickSubtitleFileAsync("Open subtitle file");
@@ -81,7 +104,17 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         playback.LoadSubtitle(path);
     }
 
-    // Direct-call entrypoint for the Subtitles submenu items. RelayCommand-with-parameter would have worked, but the menu's Gio.SimpleAction surface is already wired through ExecuteAction in MainWindow — going through a plain method keeps the action handler tight.
+    // Direct-call entrypoints for the per-kind submenu radio items. RelayCommand-with-parameter would have worked, but the menu's Gio.SimpleAction surface is already wired through ExecuteAction in MainWindow — going through plain methods keeps the action handlers tight.
+    public void SelectVideo(int? trackId)
+    {
+        playback.SetVideo(trackId);
+    }
+
+    public void SelectAudio(int? trackId)
+    {
+        playback.SetAudio(trackId);
+    }
+
     public void SelectSubtitle(int? trackId)
     {
         playback.SetSubtitle(trackId);
@@ -142,8 +175,20 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             case nameof(IPlayback.IsPaused):
                 IsPaused = playback.IsPaused;
                 break;
+            case nameof(IPlayback.VideoTracks):
+                VideoTracks = playback.VideoTracks;
+                break;
+            case nameof(IPlayback.AudioTracks):
+                AudioTracks = playback.AudioTracks;
+                break;
             case nameof(IPlayback.SubtitleTracks):
                 SubtitleTracks = playback.SubtitleTracks;
+                break;
+            case nameof(IPlayback.CurrentVideoId):
+                CurrentVideoId = playback.CurrentVideoId;
+                break;
+            case nameof(IPlayback.CurrentAudioId):
+                CurrentAudioId = playback.CurrentAudioId;
                 break;
             case nameof(IPlayback.CurrentSubtitleId):
                 CurrentSubtitleId = playback.CurrentSubtitleId;

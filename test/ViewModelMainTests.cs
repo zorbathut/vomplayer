@@ -30,7 +30,19 @@ public partial class ViewModelMainTests
         private bool isCoreIdle = true;
 
         [ObservableProperty]
-        private IReadOnlyList<SubtitleTrack> subtitleTracks = Array.Empty<SubtitleTrack>();
+        private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
+
+        [ObservableProperty]
+        private IReadOnlyList<MediaTrack> audioTracks = Array.Empty<MediaTrack>();
+
+        [ObservableProperty]
+        private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
+
+        [ObservableProperty]
+        private int? currentVideoId;
+
+        [ObservableProperty]
+        private int? currentAudioId;
 
         [ObservableProperty]
         private int? currentSubtitleId;
@@ -43,7 +55,10 @@ public partial class ViewModelMainTests
         public int LoadFileCalls { get; private set; }
         public string? LastLoadedFile { get; private set; }
         public double? LastSeekSeconds { get; private set; }
+        public string? LastLoadedAudio { get; private set; }
         public string? LastLoadedSubtitle { get; private set; }
+        public List<int?> VideoSelections { get; } = new();
+        public List<int?> AudioSelections { get; } = new();
         public List<int?> SubtitleSelections { get; } = new();
 
         public void Initialize()
@@ -69,9 +84,24 @@ public partial class ViewModelMainTests
             LastSeekSeconds = seconds;
         }
 
+        public void LoadAudio(string path)
+        {
+            LastLoadedAudio = path;
+        }
+
         public void LoadSubtitle(string path)
         {
             LastLoadedSubtitle = path;
+        }
+
+        public void SetVideo(int? trackId)
+        {
+            VideoSelections.Add(trackId);
+        }
+
+        public void SetAudio(int? trackId)
+        {
+            AudioSelections.Add(trackId);
         }
 
         public void SetSubtitle(int? trackId)
@@ -97,14 +127,22 @@ public partial class ViewModelMainTests
     private sealed class FakeFilePicker : IFilePicker
     {
         public string? NextResult { get; set; }
+        public string? NextAudioResult { get; set; }
         public string? NextSubtitleResult { get; set; }
         public int Calls { get; private set; }
+        public int AudioCalls { get; private set; }
         public int SubtitleCalls { get; private set; }
 
         public Task<string?> PickVideoFileAsync(string title)
         {
             Calls++;
             return Task.FromResult(NextResult);
+        }
+
+        public Task<string?> PickAudioFileAsync(string title)
+        {
+            AudioCalls++;
+            return Task.FromResult(NextAudioResult);
         }
 
         public Task<string?> PickSubtitleFileAsync(string title)
@@ -341,34 +379,78 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public void SubtitleTracksMirrorsPlayback()
+    public void TrackListsMirrorPlayback()
     {
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
-        var tracks = new[] { new SubtitleTrack(1, "English", "eng", false) };
-        pb.SubtitleTracks = tracks;
-        Assert.That(vm.SubtitleTracks, Is.SameAs(tracks));
+        var video = new[] { new MediaTrack(1, null, null, false) };
+        var audio = new[] { new MediaTrack(1, null, "eng", false), new MediaTrack(2, null, "fre", false) };
+        var subs = new[] { new MediaTrack(1, "English", "eng", false) };
+        pb.VideoTracks = video;
+        pb.AudioTracks = audio;
+        pb.SubtitleTracks = subs;
+        Assert.That(vm.VideoTracks, Is.SameAs(video));
+        Assert.That(vm.AudioTracks, Is.SameAs(audio));
+        Assert.That(vm.SubtitleTracks, Is.SameAs(subs));
     }
 
     [Test]
-    public void CurrentSubtitleIdMirrorsPlayback()
+    public void CurrentIdsMirrorPlayback()
     {
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
-        pb.CurrentSubtitleId = 2;
-        Assert.That(vm.CurrentSubtitleId, Is.EqualTo(2));
+        pb.CurrentVideoId = 1;
+        pb.CurrentAudioId = 2;
+        pb.CurrentSubtitleId = 3;
+        Assert.That(vm.CurrentVideoId, Is.EqualTo(1));
+        Assert.That(vm.CurrentAudioId, Is.EqualTo(2));
+        Assert.That(vm.CurrentSubtitleId, Is.EqualTo(3));
+        pb.CurrentVideoId = null;
+        pb.CurrentAudioId = null;
         pb.CurrentSubtitleId = null;
+        Assert.That(vm.CurrentVideoId, Is.Null);
+        Assert.That(vm.CurrentAudioId, Is.Null);
         Assert.That(vm.CurrentSubtitleId, Is.Null);
     }
 
     [Test]
-    public void SelectSubtitlePassesIdToPlayback()
+    public void SelectMethodsRouteToPlayback()
     {
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles());
-        vm.SelectSubtitle(3);
+        vm.SelectVideo(7);
+        vm.SelectAudio(8);
+        vm.SelectSubtitle(9);
+        vm.SelectVideo(null);
+        vm.SelectAudio(null);
         vm.SelectSubtitle(null);
-        Assert.That(pb.SubtitleSelections, Is.EqualTo(new int?[] { 3, null }));
+        Assert.That(pb.VideoSelections, Is.EqualTo(new int?[] { 7, null }));
+        Assert.That(pb.AudioSelections, Is.EqualTo(new int?[] { 8, null }));
+        Assert.That(pb.SubtitleSelections, Is.EqualTo(new int?[] { 9, null }));
+    }
+
+    [Test]
+    public async Task LoadAudioCommandLoadsPickedFile()
+    {
+        var pb = new FakePlayback();
+        var picker = new FakeFilePicker { NextAudioResult = "/path/to/track.flac" };
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles());
+        await vm.LoadAudioCommand.ExecuteAsync(null);
+        Assert.That(picker.AudioCalls, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedAudio, Is.EqualTo("/path/to/track.flac"));
+    }
+
+    [Test]
+    public async Task LoadAudioCommandIgnoresCancelledPicker()
+    {
+        var pb = new FakePlayback();
+        var picker = new FakeFilePicker { NextAudioResult = null };
+        var recents = new FakeRecentFiles();
+        var vm = new ViewModelMain(pb, picker, recents);
+        await vm.LoadAudioCommand.ExecuteAsync(null);
+        Assert.That(picker.AudioCalls, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedAudio, Is.Null);
+        Assert.That(recents.RecordedPaths, Is.Empty);
     }
 
     [Test]

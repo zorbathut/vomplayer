@@ -23,6 +23,12 @@ public sealed class FilePickerGtk : IFilePicker
         "mp4", "mkv", "webm", "mov", "avi", "m4v", "ts", "mpg", "mpeg", "wmv", "flv",
     };
 
+    // Common audio container extensions for external audio loading via mpv's `audio-add`. Same KISS rationale as the other lists.
+    private static readonly string[] AudioExtensions =
+    {
+        "mp3", "flac", "wav", "ogg", "oga", "opus", "m4a", "aac", "ac3", "dts", "wma", "mka",
+    };
+
     // Common subtitle file extensions. Same KISS rationale as VideoExtensions: cover the formats users actually have on disk, leave "All files" as the escape hatch since mpv (via libass / its own demuxers) accepts more than this list (and even some non-subtitle files like .mkv can supply tracks via sub-add).
     private static readonly string[] SubtitleExtensions =
     {
@@ -32,6 +38,11 @@ public sealed class FilePickerGtk : IFilePicker
     public Task<string?> PickVideoFileAsync(string title)
     {
         return PickAsync(title, "Video files", VideoExtensions);
+    }
+
+    public Task<string?> PickAudioFileAsync(string title)
+    {
+        return PickAsync(title, "Audio files", AudioExtensions);
     }
 
     public Task<string?> PickSubtitleFileAsync(string title)

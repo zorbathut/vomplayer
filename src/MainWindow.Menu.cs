@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using Vomplayer.Playback;
@@ -11,11 +12,15 @@ public sealed partial class MainWindow
     // Parent menus plus the index at which we re-insert each item — Gio.MenuItem is a snapshot, not live-bound to its parent, so updating the displayed accel means recreating the item and replacing it at the same slot. Recorded once during BuildMenuBar; RefreshMenuAccels iterates this without needing to know the menu structure.
     private (Gio.Menu Menu, int Index, string Label, string Action, HotkeyAction Hotkey)[] menuAccelSlots = Array.Empty<(Gio.Menu, int, string, string, HotkeyAction)>();
 
-    // Subtitles submenu and its backing stateful action. The menu is rebuilt wholesale (RemoveAll + repopulate) on every PropertyChanged for SubtitleTracks/CurrentSubtitleId — small N (typically 0–10) makes diffing not worth the bookkeeping. The action is stateful with parameter type "s" because the radio glyph rendering requires per-item targets matched against the action's state ("none" or the stringified track id).
+    // Per-kind track submenus and their backing stateful actions. Each menu is rebuilt wholesale (RemoveAll + repopulate) on every PropertyChanged for the matching track-list / current-id pair — small N (typically 0–10) makes diffing not worth the bookkeeping. Each action is stateful with parameter type "s" because the radio glyph rendering requires per-item targets matched against the action's state ("none" or the stringified track id).
+    private Gio.Menu? videoMenu;
+    private Gio.Menu? audioMenu;
     private Gio.Menu? subtitleMenu;
+    private Gio.SimpleAction? videoAction;
+    private Gio.SimpleAction? audioAction;
     private Gio.SimpleAction? subtitleAction;
-    // Sentinel state value for "no subtitle selected". Using "none" rather than the empty string keeps the action state human-readable in any future debug print and matches mpv's "no" symbolic value semantically.
-    private const string SubtitleStateNone = "none";
+    // Sentinel state value for "no track selected" in any track-kind action. Using "none" rather than the empty string keeps the action state human-readable in any future debug print and matches mpv's "no" symbolic value semantically.
+    private const string TrackStateNone = "none";
 
     // Menu bar construction. Gio.SimpleAction per item, registered on the window (ApplicationWindow implements Gio.ActionMap). Menu items carry a display-only `accel` attribute; the actual key→action mapping is the window's capture-phase EventControllerKey driven by HotkeyMap. We intentionally do NOT call Gtk.Application.SetAccelsForAction — that would set up a parallel binding path competing with the HotkeyMap, and Space (bound to play_pause by default) would double-fire with focused Gtk.Buttons.
     private Gtk.PopoverMenuBar BuildMenuBar(Gtk.Application app)
@@ -40,36 +45,14 @@ public sealed partial class MainWindow
         aboutAction.OnActivate += (_, _) => ShowAboutDialog();
         AddAction(aboutAction);
 
-        // Stateful string action backing the radio items in the Subtitles submenu. State holds the currently-selected track id stringified, or "none" when no track is selected. ChangeState fires when the user picks an item; we convert the target back to int? and route to viewModel.SelectSubtitle, then SetState (GirCore's SimpleAction does not auto-apply requested state — same caveat as toggle-diagnostic).
-        subtitleAction = Gio.SimpleAction.NewStateful(
-            "subtitle",
-            parameterType: GLib.VariantType.New("s"),
-            state: GLib.Variant.NewString(SubtitleStateNone));
-        subtitleAction.OnChangeState += (_, args) =>
-        {
-            if (args.Value == null)
-            {
-                throw new InvalidOperationException("subtitle change-state signal fired with null args.Value");
-            }
-            string newState = args.Value.GetString(out var _length);
-            subtitleAction.SetState(args.Value);
-            int? trackId;
-            if (newState == SubtitleStateNone)
-            {
-                trackId = null;
-            }
-            else if (int.TryParse(newState, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                trackId = id;
-            }
-            else
-            {
-                Console.Error.WriteLine($"[vompl] subtitle: ignoring unparseable target '{newState}'");
-                return;
-            }
-            viewModel.SelectSubtitle(trackId);
-        };
-        AddAction(subtitleAction);
+        // Stateful string actions backing the radio items in the per-kind track submenus. State holds the currently-selected track id stringified, or "none" when no track is selected. ChangeState fires when the user picks an item; the shared OnTrackActionChangeState handler converts the target back to int? and routes to the right VM Select method. Three actions exist because each submenu has its own state and rendering.
+        videoAction = CreateTrackAction("video", viewModel.SelectVideo);
+        audioAction = CreateTrackAction("audio", viewModel.SelectAudio);
+        subtitleAction = CreateTrackAction("subtitle", viewModel.SelectSubtitle);
+
+        var addAudioAction = Gio.SimpleAction.New("add-audio", null);
+        addAudioAction.OnActivate += (_, _) => viewModel.LoadAudioCommand.Execute(null);
+        AddAction(addAudioAction);
 
         var addSubtitleAction = Gio.SimpleAction.New("add-subtitle", null);
         addSubtitleAction.OnActivate += (_, _) => viewModel.LoadSubtitleCommand.Execute(null);
@@ -114,8 +97,12 @@ public sealed partial class MainWindow
         var playbackMenu = Gio.Menu.New();
         playbackMenu.InsertItem(-1, Gio.MenuItem.New("Play / Pause", "win.play-pause"));
 
-        // The submenu contents are rebuilt on every PropertyChanged for SubtitleTracks/CurrentSubtitleId — the parent submenu reference here is what AppendSubmenu wires into the menubar; we mutate its child items in place via RemoveAll + repopulate (Gio.Menu mutations propagate to the live PopoverMenuBar without rebinding).
+        // Per-kind submenu containers — populated by RebuildTrackMenu. The parent submenu references here are what AppendSubmenu wires into the menubar; we mutate their child items in place via RemoveAll + repopulate (Gio.Menu mutations propagate to the live PopoverMenuBar without rebinding).
+        videoMenu = Gio.Menu.New();
+        audioMenu = Gio.Menu.New();
         subtitleMenu = Gio.Menu.New();
+        RebuildVideoMenu();
+        RebuildAudioMenu();
         RebuildSubtitleMenu();
 
         var viewMenu = Gio.Menu.New();
@@ -144,6 +131,8 @@ public sealed partial class MainWindow
         root.AppendSubmenu("File", fileMenu);
         root.AppendSubmenu("Edit", editMenu);
         root.AppendSubmenu("Playback", playbackMenu);
+        root.AppendSubmenu("Video", videoMenu);
+        root.AppendSubmenu("Audio", audioMenu);
         root.AppendSubmenu("Subtitles", subtitleMenu);
         root.AppendSubmenu("View", viewMenu);
         root.AppendSubmenu("Help", helpMenu);
@@ -154,37 +143,98 @@ public sealed partial class MainWindow
         return bar;
     }
 
-    // Rebuilds the Subtitles submenu from viewModel.SubtitleTracks + viewModel.CurrentSubtitleId. Called once during BuildMenuBar (after subtitleMenu and subtitleAction are constructed) and again on every PropertyChanged for either of those properties (wired in MainWindow.cs's OnViewModelPropertyChanged, which is subscribed AFTER BuildMenuBar runs). Throws if either field is null — that's a control-flow invariant, and silently no-op'ing here would hide a refactor that broke the constructor ordering (CLAUDE.md bans silent error handling). Layout: "None" radio item, one radio per sub track, separator, "Add Subtitle File…". The "None" item is always present so the user can always disable subs even when no tracks are listed. RemoveAll + repopulate is the documented Gio.Menu mutation pattern for wholesale rebuilds.
-    private void RebuildSubtitleMenu()
+    // Factory for the per-kind stateful track action. Registers it on the window's ActionMap and wires the OnChangeState handler to parse the chosen target back to int? and dispatch through the supplied select callback. Initial state is "none" — RebuildTrackMenu re-syncs it whenever the VM's CurrentXxxId moves. GirCore's SimpleAction does not auto-apply requested state on change-state, so the handler explicitly SetState's (same caveat documented on diagnosticAction below).
+    private Gio.SimpleAction CreateTrackAction(string actionName, Action<int?> select)
     {
-        if (subtitleMenu == null || subtitleAction == null)
+        var action = Gio.SimpleAction.NewStateful(
+            actionName,
+            parameterType: GLib.VariantType.New("s"),
+            state: GLib.Variant.NewString(TrackStateNone));
+        action.OnChangeState += (_, args) =>
         {
-            throw new InvalidOperationException("RebuildSubtitleMenu invoked before BuildMenuBar constructed subtitleMenu/subtitleAction");
-        }
-        subtitleMenu.RemoveAll();
-
-        var noneItem = Gio.MenuItem.New("None", null);
-        noneItem.SetActionAndTargetValue("win.subtitle", GLib.Variant.NewString(SubtitleStateNone));
-        subtitleMenu.AppendItem(noneItem);
-
-        foreach (var track in viewModel.SubtitleTracks)
-        {
-            var item = Gio.MenuItem.New(FormatSubtitleLabel(track), null);
-            item.SetActionAndTargetValue("win.subtitle", GLib.Variant.NewString(track.Id.ToString(CultureInfo.InvariantCulture)));
-            subtitleMenu.AppendItem(item);
-        }
-
-        // Section break renders as a separator with no header text. AppendSection takes a MenuModel — a one-item Gio.Menu holding the "Add Subtitle File…" entry.
-        var addSection = Gio.Menu.New();
-        addSection.InsertItem(-1, Gio.MenuItem.New("Add Subtitle File…", "win.add-subtitle"));
-        subtitleMenu.AppendSection(null!, addSection);
-
-        // Sync the action's state to the current VM selection so the radio glyph lands on the right item. SetState here is purely visual — it doesn't fire ChangeState.
-        subtitleAction.SetState(GLib.Variant.NewString(FormatSubtitleState(viewModel.CurrentSubtitleId)));
+            if (args.Value == null)
+            {
+                throw new InvalidOperationException($"{actionName} change-state signal fired with null args.Value");
+            }
+            string newState = args.Value.GetString(out var _length);
+            action.SetState(args.Value);
+            int? trackId;
+            if (newState == TrackStateNone)
+            {
+                trackId = null;
+            }
+            else if (int.TryParse(newState, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
+            {
+                trackId = id;
+            }
+            else
+            {
+                Console.Error.WriteLine($"[vompl] {actionName}: ignoring unparseable target '{newState}'");
+                return;
+            }
+            select(trackId);
+        };
+        AddAction(action);
+        return action;
     }
 
-    // Builds the human-readable label for a subtitle track. Track ids are stable per-source but meaningless to users, so the label leads with title or language; both null falls back to "Track #<id>". External tracks (loaded via sub-add) get an "(external)" suffix to distinguish from embedded ones — useful when a user has loaded a sidecar file alongside an embedded track of the same language.
-    private static string FormatSubtitleLabel(SubtitleTrack track)
+    // Per-kind rebuild entrypoints. Three thin wrappers — each one passes its kind-specific knobs to RebuildTrackMenu and, where applicable, tacks on a separator + "Add … File…" section. Called once during BuildMenuBar (after the menu/action fields are constructed) and again on every PropertyChanged for the matching track-list / current-id pair (wired in MainWindow.cs's OnViewModelPropertyChanged, which is subscribed AFTER BuildMenuBar runs).
+    private void RebuildVideoMenu()
+    {
+        // allowNone:false — `vid=no` freezes the last decoded frame with no recovery UX (subsurface stays allocated, no audio-only mode), so we don't expose the "off" choice. Multi-video sources can switch directly between video tracks without going through "None". No "Add Video File…" entry either — multi-angle external video is rare enough not to justify the surface; an external video would arrive via the command line or scripted entry and still appear in the track list.
+        RebuildTrackMenu(videoMenu, videoAction, "win.video", allowNone: false, viewModel.VideoTracks, viewModel.CurrentVideoId);
+    }
+
+    private void RebuildAudioMenu()
+    {
+        // allowNone:true — disabling audio (aid=no) is a benign UX outcome: the video keeps playing and the user can re-enable any track from the same menu.
+        RebuildTrackMenu(audioMenu, audioAction, "win.audio", allowNone: true, viewModel.AudioTracks, viewModel.CurrentAudioId);
+        AppendAddTrackSection(audioMenu!, "Add Audio File…", "win.add-audio");
+    }
+
+    private void RebuildSubtitleMenu()
+    {
+        RebuildTrackMenu(subtitleMenu, subtitleAction, "win.subtitle", allowNone: true, viewModel.SubtitleTracks, viewModel.CurrentSubtitleId);
+        AppendAddTrackSection(subtitleMenu!, "Add Subtitle File…", "win.add-subtitle");
+    }
+
+    // Wholesale rebuild of one track-kind's submenu. Layout: optional "None" radio item, one radio per track in the list. Wrappers append any add-section themselves after this returns. RemoveAll + repopulate is the documented Gio.Menu mutation pattern for wholesale rebuilds. Throws if the menu/action haven't been constructed yet — that's a control-flow invariant (BuildMenuBar runs them before any rebuild can fire) and silently no-op'ing here would hide a refactor that broke the constructor ordering (CLAUDE.md bans silent error handling).
+    private static void RebuildTrackMenu(Gio.Menu? menu, Gio.SimpleAction? action, string detailedActionName, bool allowNone, IReadOnlyList<MediaTrack> tracks, int? currentId)
+    {
+        if (menu == null || action == null)
+        {
+            throw new InvalidOperationException("RebuildTrackMenu invoked before BuildMenuBar constructed menu/action");
+        }
+        menu.RemoveAll();
+
+        if (allowNone)
+        {
+            var noneItem = Gio.MenuItem.New("None", null);
+            noneItem.SetActionAndTargetValue(detailedActionName, GLib.Variant.NewString(TrackStateNone));
+            menu.AppendItem(noneItem);
+        }
+
+        foreach (var track in tracks)
+        {
+            var item = Gio.MenuItem.New(FormatTrackLabel(track), null);
+            item.SetActionAndTargetValue(detailedActionName, GLib.Variant.NewString(track.Id.ToString(CultureInfo.InvariantCulture)));
+            menu.AppendItem(item);
+        }
+
+        // Sync the action's state to the current VM selection so the radio glyph lands on the right item. SetState here is purely visual — it doesn't fire ChangeState.
+        action.SetState(GLib.Variant.NewString(FormatTrackState(currentId)));
+    }
+
+    // Section break renders as a separator with no header text. AppendSection takes a MenuModel — a one-item Gio.Menu holding the "Add … File…" entry.
+    private static void AppendAddTrackSection(Gio.Menu menu, string label, string detailedAction)
+    {
+        var addSection = Gio.Menu.New();
+        addSection.InsertItem(-1, Gio.MenuItem.New(label, detailedAction));
+        menu.AppendSection(null!, addSection);
+    }
+
+    // Builds the human-readable label for a track. Track ids are stable per-source but meaningless to users, so the label leads with title or language; both null falls back to "Track #<id>". External tracks (loaded via *-add) get an "(external)" suffix to distinguish from embedded ones — useful when a user has loaded a sidecar file alongside an embedded track of the same language.
+    private static string FormatTrackLabel(MediaTrack track)
     {
         string main;
         if (!string.IsNullOrEmpty(track.Title) && !string.IsNullOrEmpty(track.Lang))
@@ -206,9 +256,9 @@ public sealed partial class MainWindow
         return track.External ? $"{main} (external)" : main;
     }
 
-    private static string FormatSubtitleState(int? trackId)
+    private static string FormatTrackState(int? trackId)
     {
-        return trackId.HasValue ? trackId.Value.ToString(CultureInfo.InvariantCulture) : SubtitleStateNone;
+        return trackId.HasValue ? trackId.Value.ToString(CultureInfo.InvariantCulture) : TrackStateNone;
     }
 
     // Refresh the accel labels on tracked menu items after the hotkey map changes. Gio.MenuItem isn't bound live to its parent — to update the displayed accel we re-create the item with the new attribute and replace the parent's slot. Without this, the displayed shortcuts in the menu would lag behind the user's edits in the preferences dialog. Picks the first Key trigger bound to the action; mouse triggers are skipped because the menu's accel label can't render "double-click" sensibly. If no key binding exists, the item gets no accel attribute and renders as a plain row.
