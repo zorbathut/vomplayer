@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -31,6 +32,12 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     private readonly IFilePicker filePicker;
     private readonly IRecentFiles recentFiles;
     private readonly ITrackPreferences trackPreferences;
+    private readonly IUrlDownloader urlDownloader;
+    private readonly IUrlPrompt urlPrompt;
+    // URLs that came in through the Open URL flow (or were expanded from a YouTube playlist via the same flow). LoadCurrentItem checks this set to decide whether to route an item through yt-dlp or hand it straight to mpv. Drag-drop / command-line URLs are NOT added here in v1, so they continue to go directly to mpv (which generally fails for YouTube but works for direct streams). Documented v1 gap; if drag-drop YouTube URLs become a feature ask, the right fix is a discriminated PlaylistItem type rather than growing this set.
+    private readonly HashSet<string> urlsRequiringDownload = new();
+    // CTS for the in-flight URL download (if any). LoadCurrentItem cancels and replaces this synchronously before mutating any per-load state, so a stale download A racing a new load B can't clobber B's playback. The cancellation observer in LoadUrlAsync also re-checks this field is still its CTS at completion time — defense in depth against the cancel-callback racing the LoadFile call.
+    private CancellationTokenSource? activeDownloadCts;
     private bool initialFileLoaded;
     // The directory key (per TrackPreferences.TryGetDirectoryKey) for the most recent OpenFile target. Null when the latest file isn't a local-filesystem path (URI sources don't participate in per-directory preferences). Mutated only on OpenFile and read on Select* (save) and the FileLoaded/TracksReloaded apply path.
     //
@@ -98,7 +105,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Owned playlist model. The view (PlaylistPanel) subscribes to Playlist.Changed and rebuilds rows wholesale; LoadPaths / PlayPlaylistItem / the auto-advance handler are the only mutators. Public so the panel can read Items / CurrentIndex on every Changed fire — Playlist itself is a plain class, no GTK dependency, fully unit-testable.
     public Playlist Playlist { get; } = new Playlist();
 
-    public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences)
+    public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt)
     {
         if (playback == null)
         {
@@ -116,10 +123,20 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             throw new ArgumentNullException(nameof(trackPreferences));
         }
+        if (urlDownloader == null)
+        {
+            throw new ArgumentNullException(nameof(urlDownloader));
+        }
+        if (urlPrompt == null)
+        {
+            throw new ArgumentNullException(nameof(urlPrompt));
+        }
         this.playback = playback;
         this.filePicker = filePicker;
         this.recentFiles = recentFiles;
         this.trackPreferences = trackPreferences;
+        this.urlDownloader = urlDownloader;
+        this.urlPrompt = urlPrompt;
         this.playback.PropertyChanged += OnPlaybackPropertyChanged;
         this.playback.FileLoaded += OnPlaybackFileLoaded;
         this.playback.TracksReloaded += OnPlaybackTracksReloaded;
@@ -135,6 +152,55 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         // Route through OpenFile so the picker path goes through the same recents-record + currentDirectoryKey-resolve dance as drag-and-drop and command-line invocation. Without this, picker-opened files don't get a directory key set, and SaveTrackPreference silently no-ops on every menu pick.
         OpenFile(path);
+    }
+
+    [RelayCommand]
+    private async Task OpenUrlAsync()
+    {
+        // Gate before prompting. yt-dlp not available is a hard stop for this flow — we don't have a sensible fallback (mpv-direct doesn't handle YouTube), so the right UX is a clear "install yt-dlp" message rather than letting the user type a URL and *then* failing.
+        if (!urlDownloader.IsAvailable())
+        {
+            urlPrompt.ShowError(
+                "yt-dlp not found",
+                "Install yt-dlp to play URLs (e.g. `pip install yt-dlp`, or your distribution's package manager). Once installed, retry without restarting Vomplayer.");
+            return;
+        }
+        var url = await urlPrompt.PromptForUrlAsync("Open URL");
+        if (string.IsNullOrEmpty(url))
+        {
+            return;
+        }
+        IReadOnlyList<string> entries;
+        // Cap the probe at 30 seconds. yt-dlp's --flat-playlist usually returns in well under a second; a hung probe (network outage, extractor regression, mid-download server stall) shouldn't leave the UI stuck with no recovery. Cancellation tears down the spawned yt-dlp via YtDlpDownloader.ProbeAsync's existing kill-on-cancel path.
+        using (var probeCts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        {
+            try
+            {
+                entries = await urlDownloader.ProbeAsync(url, probeCts.Token);
+            }
+            catch (OperationCanceledException) when (probeCts.IsCancellationRequested)
+            {
+                urlPrompt.ShowError("Failed to open URL", "Probe timed out after 30 seconds. The URL may be unreachable or the extractor may be hanging.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                urlPrompt.ShowError("Failed to open URL", ex.Message);
+                return;
+            }
+        }
+        if (entries.Count == 0)
+        {
+            urlPrompt.ShowError("Failed to open URL", "yt-dlp returned no entries for this URL.");
+            return;
+        }
+        // Reset the routing set to exactly the URLs from this OpenUrl invocation. Bounds the set's size to the current playlist (post-probe) so it doesn't grow over the session, and prevents a previously-OpenUrl'd URL from re-entering the download path if the user later types it as a local file string. (See urlsRequiringDownload field comment for the broader v1-gap rationale.)
+        urlsRequiringDownload.Clear();
+        foreach (var u in entries)
+        {
+            urlsRequiringDownload.Add(u);
+        }
+        LoadPaths(entries, replace: true);
     }
 
     [RelayCommand]
@@ -257,6 +323,15 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         string pathOrUri = Playlist.Items[Playlist.CurrentIndex];
 
+        // Cancel any in-flight URL download from a previous LoadCurrentItem before mutating per-load state. If the user clicks a different playlist row mid-download, we don't want the late completion of the old download to call playback.LoadFile against the new file's slot. CTS swap is synchronous, so by the time we set currentFilePath below the previous download's continuation will have observed cancellation. Dispose is idempotent on CTS — LoadUrlAsync's `finally` also disposes its CTS, but a second Dispose is a guaranteed no-op so we don't need to guard against the double call.
+        var previousCts = activeDownloadCts;
+        activeDownloadCts = null;
+        if (previousCts != null)
+        {
+            previousCts.Cancel();
+            previousCts.Dispose();
+        }
+
         SaveCurrentPositionIfEligible();
 
         recentFiles.Record(pathOrUri);
@@ -270,7 +345,58 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         // Look up the saved position only for local files. URI sources don't accumulate positions, so skipping the GetPosition call also keeps test fakes' GetPositionCalls clean.
         pendingResumePosition = TrackPreferences.IsLocalFilesystemPath(pathOrUri) ? recentFiles.GetPosition(pathOrUri) : null;
         PrefsLog($"LoadCurrentItem: pathOrUri={pathOrUri} → directoryKey={currentDirectoryKey ?? "<null>"}, resumePos={(pendingResumePosition?.ToString() ?? "<null>")}");
+
+        if (urlsRequiringDownload.Contains(pathOrUri))
+        {
+            // Async path — yt-dlp downloads to local cache, then mpv loads the file. The CTS we install here is the handle the user's Cancel button binds to in the progress dialog.
+            var cts = new CancellationTokenSource();
+            activeDownloadCts = cts;
+            // Fire-and-forget — exceptions are caught inside LoadUrlAsync and surfaced via the prompt's ShowError. Keeping LoadCurrentItem synchronous matches every existing caller (LoadPaths, PlayPlaylistItem, the auto-advance handler) which can't await.
+            _ = LoadUrlAsync(pathOrUri, cts);
+            return;
+        }
         playback.LoadFile(pathOrUri);
+    }
+
+    private async Task LoadUrlAsync(string url, CancellationTokenSource cts)
+    {
+        UrlProgressHandle? progressHandle = null;
+        try
+        {
+            progressHandle = urlPrompt.ShowDownloadProgress("Downloading", cts);
+            string localPath = await urlDownloader.DownloadAsync(url, progressHandle.Progress, cts.Token);
+
+            // Race guard (see "CTS swap" comment in LoadCurrentItem). If the user advanced to another row during the download, currentFilePath has moved and our late LoadFile would clobber the new playback. The activeDownloadCts identity check catches the same case if currentFilePath happens to equal the URL again (e.g., user re-loads the same URL).
+            if (cts.Token.IsCancellationRequested
+                || !ReferenceEquals(activeDownloadCts, cts)
+                || currentFilePath != url)
+            {
+                return;
+            }
+            playback.LoadFile(localPath);
+        }
+        catch (OperationCanceledException)
+        {
+            // User clicked Cancel, or a newer LoadCurrentItem cancelled us. Either way, no playback to start.
+        }
+        catch (Exception ex)
+        {
+            // Show only if we're still the active load — a stale download's failure shouldn't pop up after the user has moved on.
+            if (ReferenceEquals(activeDownloadCts, cts))
+            {
+                urlPrompt.ShowError("Download failed", ex.Message);
+            }
+        }
+        finally
+        {
+            progressHandle?.Closer.Dispose();
+            // Only clear the field if we're still its CTS — a newer LoadCurrentItem may have already swapped in its own.
+            if (ReferenceEquals(activeDownloadCts, cts))
+            {
+                activeDownloadCts = null;
+            }
+            cts.Dispose();
+        }
     }
 
     [RelayCommand]
@@ -543,6 +669,19 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     {
         // Final position save before tear-down. Window-close path runs viewModel.Dispose() before playback.Dispose() (see MainWindow.OnWindowCloseRequest), and the SQLite connection lives in Program.cs's `using var stateDb` which outlives both — so the DB call here is safe.
         SaveCurrentPositionIfEligible();
+        // Cancel any in-flight URL download so the spawned yt-dlp process exits before the GTK main loop tears down. LoadUrlAsync's finally block disposes the CTS — we only call Cancel here.
+        var cts = activeDownloadCts;
+        activeDownloadCts = null;
+        if (cts != null)
+        {
+            try
+            {
+                cts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
         playback.PropertyChanged -= OnPlaybackPropertyChanged;
         playback.FileLoaded -= OnPlaybackFileLoaded;
         playback.TracksReloaded -= OnPlaybackTracksReloaded;

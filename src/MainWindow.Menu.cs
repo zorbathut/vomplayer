@@ -29,6 +29,10 @@ public sealed partial class MainWindow
         openAction.OnActivate += (_, _) => viewModel.OpenCommand.Execute(null);
         AddAction(openAction);
 
+        var openUrlAction = Gio.SimpleAction.New("open-url", null);
+        openUrlAction.OnActivate += (_, _) => viewModel.OpenUrlCommand.Execute(null);
+        AddAction(openUrlAction);
+
         var quitAction = Gio.SimpleAction.New("quit", null);
         quitAction.OnActivate += (_, _) => Close();
         AddAction(quitAction);
@@ -106,7 +110,8 @@ public sealed partial class MainWindow
 
         var fileMenu = Gio.Menu.New();
         // GirCore 0.7.0 doesn't expose gtk_menu_append_item as AppendItem, only the position-based InsertItem. Passing -1 as position appends per the gmenu contract.
-        fileMenu.InsertItem(-1, Gio.MenuItem.New("Open…", "win.open"));
+        fileMenu.InsertItem(-1, Gio.MenuItem.New("Open File…", "win.open"));
+        fileMenu.InsertItem(-1, Gio.MenuItem.New("Open URL…", "win.open-url"));
         var fileQuitSection = Gio.Menu.New();
         fileQuitSection.InsertItem(-1, Gio.MenuItem.New("Quit", "win.quit"));
         fileMenu.AppendSection(null!, fileQuitSection);
@@ -133,10 +138,11 @@ public sealed partial class MainWindow
         helpMenu.InsertItem(-1, Gio.MenuItem.New("Diagnostic Overlay", "win.toggle-diagnostic"));
         helpMenu.InsertItem(-1, Gio.MenuItem.New("About", "win.about"));
 
-        // Track the (parent menu, position) for each item that gets a hotkey-driven accel label. RefreshMenuAccels iterates this to rebuild items in place. Position 0 in each menu because every tracked item is the first (and often only) entry of its (sub)menu — the Quit accel slot is inside fileQuitSection, not fileMenu, so the position is still 0.
+        // Track the (parent menu, position) for each item that gets a hotkey-driven accel label. RefreshMenuAccels iterates this to rebuild items in place. The Open File / Open URL pair sit at positions 0 and 1 in fileMenu; Quit lives in fileQuitSection at position 0; everything else in its own (sub)menu at position 0.
         menuAccelSlots = new[]
         {
-            (fileMenu,       0, "Open…",              "win.open",              HotkeyAction.Open),
+            (fileMenu,       0, "Open File…",         "win.open",              HotkeyAction.Open),
+            (fileMenu,       1, "Open URL…",          "win.open-url",          HotkeyAction.OpenUrl),
             (fileQuitSection,0, "Quit",               "win.quit",              HotkeyAction.Quit),
             (playbackMenu,   0, "Play / Pause",       "win.play-pause",        HotkeyAction.PlayPause),
             (viewMenu,       0, "Fullscreen",         "win.fullscreen",        HotkeyAction.ToggleFullscreen),

@@ -1,0 +1,60 @@
+using NUnit.Framework;
+using Vomplayer.Services;
+
+namespace Vomplayer.Tests;
+
+// Only the line-parsing surface is unit-testable here — anything that spawns the actual binary belongs in integration tests / manual smoke. TryParseProgress is internal and reachable via InternalsVisibleTo.
+[TestFixture]
+public class YtDlpDownloaderTests
+{
+    [Test]
+    public void TryParseProgressParsesNumericFields()
+    {
+        bool ok = YtDlpDownloader.TryParseProgress("VOMPLPROG 1234 5678 downloading", out var p);
+        Assert.That(ok, Is.True);
+        Assert.That(p.DownloadedBytes, Is.EqualTo(1234));
+        Assert.That(p.TotalBytes, Is.EqualTo(5678));
+        Assert.That(p.Status, Is.EqualTo("downloading"));
+    }
+
+    [Test]
+    public void TryParseProgressTreatsNAAsNullTotal()
+    {
+        bool ok = YtDlpDownloader.TryParseProgress("VOMPLPROG 4096 NA downloading", out var p);
+        Assert.That(ok, Is.True);
+        Assert.That(p.DownloadedBytes, Is.EqualTo(4096));
+        Assert.That(p.TotalBytes, Is.Null);
+    }
+
+    [Test]
+    public void TryParseProgressRejectsLineWithoutPrefix()
+    {
+        bool ok = YtDlpDownloader.TryParseProgress("[download] 12.3% of 100MiB", out _);
+        Assert.That(ok, Is.False);
+    }
+
+    [Test]
+    public void TryParseProgressRejectsTooFewFields()
+    {
+        bool ok = YtDlpDownloader.TryParseProgress("VOMPLPROG 1234", out _);
+        Assert.That(ok, Is.False);
+    }
+
+    [Test]
+    public void TryParseProgressTreatsUnparseableDownloadedAsZero()
+    {
+        // NA-as-downloaded happens early in the connection phase before yt-dlp knows the size. We map to 0 so the dialog renders as 0% rather than crashing.
+        bool ok = YtDlpDownloader.TryParseProgress("VOMPLPROG NA 9999 downloading", out var p);
+        Assert.That(ok, Is.True);
+        Assert.That(p.DownloadedBytes, Is.EqualTo(0));
+        Assert.That(p.TotalBytes, Is.EqualTo(9999));
+    }
+
+    [Test]
+    public void TryParseProgressHandlesFinishedStatus()
+    {
+        bool ok = YtDlpDownloader.TryParseProgress("VOMPLPROG 50000 50000 finished", out var p);
+        Assert.That(ok, Is.True);
+        Assert.That(p.Status, Is.EqualTo("finished"));
+    }
+}

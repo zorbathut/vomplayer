@@ -9,6 +9,7 @@ namespace Vomplayer.UserData;
 public enum HotkeyAction
 {
     Open,
+    OpenUrl,
     Quit,
     PlayPause,
     ToggleFullscreen,
@@ -258,6 +259,11 @@ public sealed class HotkeyMap
         {
             Trigger.MakeKey((uint)Gdk.Constants.KEY_o, Gdk.ModifierType.ControlMask),
         });
+        m.Set(HotkeyAction.OpenUrl, new Trigger[]
+        {
+            // Ctrl+L matches the universal "URL bar" muscle memory from browsers — most users typing a URL into a media player will reach for it instinctively.
+            Trigger.MakeKey((uint)Gdk.Constants.KEY_l, Gdk.ModifierType.ControlMask),
+        });
         m.Set(HotkeyAction.Quit, new Trigger[]
         {
             Trigger.MakeKey((uint)Gdk.Constants.KEY_q, Gdk.ModifierType.ControlMask),
@@ -384,6 +390,7 @@ public sealed class HotkeyMap
         switch (action)
         {
             case HotkeyAction.Open: return "open";
+            case HotkeyAction.OpenUrl: return "open_url";
             case HotkeyAction.Quit: return "quit";
             case HotkeyAction.PlayPause: return "play_pause";
             case HotkeyAction.ToggleFullscreen: return "toggle_fullscreen";
@@ -412,6 +419,7 @@ public sealed class HotkeyMap
         switch (key)
         {
             case "open": action = HotkeyAction.Open; return true;
+            case "open_url": action = HotkeyAction.OpenUrl; return true;
             case "quit": action = HotkeyAction.Quit; return true;
             case "play_pause": action = HotkeyAction.PlayPause; return true;
             case "toggle_fullscreen": action = HotkeyAction.ToggleFullscreen; return true;
@@ -441,6 +449,7 @@ public sealed class HotkeyMap
         switch (action)
         {
             case HotkeyAction.Open: return "Open File";
+            case HotkeyAction.OpenUrl: return "Open URL";
             case HotkeyAction.Quit: return "Quit";
             case HotkeyAction.PlayPause: return "Play / Pause";
             case HotkeyAction.ToggleFullscreen: return "Toggle Fullscreen";

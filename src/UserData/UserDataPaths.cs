@@ -40,6 +40,23 @@ public static class UserDataPaths
         }
     }
 
+    // Cache for ephemeral, regenerable artifacts (yt-dlp downloads etc). Per the freedesktop spec the right slot is XDG_CACHE_HOME (~/.cache); .NET has no SpecialFolder for that on Linux either, so we use LocalApplicationData with a "cache" suffix — a defensible match in the same spirit as StateDir's compromise. VOMPL_CACHE_DIR overrides for tests / portable installs.
+    public static string CacheDir
+    {
+        get
+        {
+            var ov = Environment.GetEnvironmentVariable("VOMPL_CACHE_DIR");
+            if (!string.IsNullOrEmpty(ov))
+            {
+                return ov;
+            }
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                AppDirName,
+                "cache");
+        }
+    }
+
     public static string ConfigFile
     {
         get { return Path.Combine(ConfigDir, ConfigFileName); }
@@ -48,5 +65,11 @@ public static class UserDataPaths
     public static string StateDb
     {
         get { return Path.Combine(StateDir, StateDbFileName); }
+    }
+
+    // Per-URL yt-dlp download cache root. Sits under CacheDir so the override env var (VOMPL_CACHE_DIR) catches it for tests / portable installs without a separate variable. Symmetric with ConfigFile / StateDb — exposing the full path here keeps the literal "url-downloads" out of consumer call sites.
+    public static string UrlDownloadCacheRoot
+    {
+        get { return Path.Combine(CacheDir, "url-downloads"); }
     }
 }
