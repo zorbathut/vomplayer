@@ -29,6 +29,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private bool isCoreIdle = true;
 
+    // Mirror of mpv's `eof-reached`. Reset synchronously in LoadFile (preempting a stale carry-over from the prior file) so the playlist auto-advance handler's rising-edge gate is meaningful across file boundaries.
+    [ObservableProperty]
+    private bool isEofReached;
+
     // mpv reports `volume` in percent. Default 100 mirrors mpv's own default so the slider lands at full pre-Initialize and the first synthesized observe fire (which carries the real value) doesn't visibly jump.
     [ObservableProperty]
     private double volume = 100;
@@ -131,6 +135,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("mute", MpvFormat.Flag);
             // core-idle differs from `pause` precisely at end-of-file with keep-open=yes: pause stays no, but the playback core stops advancing. Consumers that need "actually decoding/displaying right now" (e.g. screensaver inhibit) should track this rather than IsPaused.
             h.ObserveProperty("core-idle", MpvFormat.Flag);
+            // eof-reached observed for playlist auto-advance — see IPlayback.IsEofReached. With keep-open=yes mpv doesn't fire MPV_EVENT_END_FILE on natural EOF, so this property (which DOES flip true at EOF regardless of keep-open) is the reliable signal.
+            h.ObserveProperty("eof-reached", MpvFormat.Flag);
             // Sub-property path observation: video-params is a Node map, but mpv exposes each scalar inside it (primaries, gamma, sig-peak, …) as its own string-typed observable when addressed via the "<parent>/<key>" syntax. This sidesteps MpvClient.ReadPropertyValue not knowing how to unpack node-map payloads. Initial synthesized fire lands with null (no file loaded yet), which IsHdrGamma classifies as SDR — no spurious transition.
             h.ObserveProperty("video-params/gamma", MpvFormat.String);
             // Observe the actual decoder mpv selected, not the requested one. Fires on FileLoaded (mpv resolves hwdec after probing the file) and again if negotiation falls back mid-playback. The synthesized initial event lands with "no" or empty before any file loads.
@@ -156,6 +162,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         UpdateSourceHdr(null);
         // Preemptive chapter clear: drop any chapters from the previous file before the new file's count event lands, so a chapter-less follow-up can't render with stale markers in the gap between LoadFile and the first chapter-list/count fire.
         UpdateChapters(Array.Empty<MediaChapter>());
+        // Preemptive eof-reached clear: same race rationale as the chapter clear. The previous file's eof-reached=true could otherwise survive past LoadFile and trip the playlist auto-advance handler's rising-edge gate against the just-loaded file.
+        UpdateIsEofReached(false);
         dispatcher.Post(h =>
         {
             h.Command("loadfile", path);
@@ -335,6 +343,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 break;
             case "core-idle":
                 IsCoreIdle = change.Value.AsFlag ?? true;
+                break;
+            case "eof-reached":
+                UpdateIsEofReached(change.Value.AsFlag);
                 break;
             case "volume":
                 UpdateVolume(change.Value.AsDouble);
@@ -625,6 +636,12 @@ public sealed partial class Playback : ObservableObject, IPlayback
         IsMuted = value ?? false;
     }
 
+    // Internal test seam mirroring UpdateMute. Null falls back to false (mpv shouldn't report null for eof-reached on a loaded file, but the synthesized initial-fire is null pre-Initialize / on shutdown). The ObservableProperty setter dedups same-value writes already; the explicit method just normalizes null.
+    internal void UpdateIsEofReached(bool? value)
+    {
+        IsEofReached = value ?? false;
+    }
+
     // Internal so PlaybackTests can drive transition behavior directly without spinning up mpv's event pump (see test file comment). Keeps the higher-level dispatcher (OnMpvPropertyChanged) private — only the minimum transition surface is exposed.
     internal void UpdateSourceHdr(string? gamma)
     {
@@ -649,6 +666,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         UpdateSourceHdr(null);
         // Drop chapters so the controls stop drawing markers as soon as playback ends. Mirrors the SDR reset above.
         UpdateChapters(Array.Empty<MediaChapter>());
+        // Symmetry with the LoadFile reset — see comment there. Stale eof-reached carry-over could otherwise survive past a file-end into whatever loads next.
+        UpdateIsEofReached(false);
         FileEnded?.Invoke(reason);
     }
 

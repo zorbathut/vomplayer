@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Vomplayer.Controls;
@@ -22,6 +23,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     // Explicit SONAMEs: `libgtk-4.so.1` / `libgobject-2.0.so.0` are the runtime-installed libraries. The bare `libgtk-4.so` / `libgobject-2.0.so` names only exist as dev-package symlinks and would fail NativeLibrary resolution on runtime-only hosts.
     private const string GObjectLib = "libgobject-2.0.so.0";
     private const string GtkLib = "libgtk-4.so.1";
+    private const string GLibLib = "libglib-2.0.so.0";
+    private const string GioLib = "libgio-2.0.so.0";
 
     [LibraryImport(GObjectLib, EntryPoint = "g_signal_connect_data", StringMarshalling = StringMarshalling.Utf8)]
     private static partial ulong SignalConnectData(IntPtr instance, string detailedSignal, IntPtr cHandler, IntPtr data, IntPtr destroyData, int connectFlags);
@@ -31,6 +34,22 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
     [LibraryImport(GtkLib, EntryPoint = "gdk_event_get_event_type")]
     private static partial int GdkEventGetEventType(IntPtr evt);
+
+    // GdkFileList accessors. GirCore 0.7.0 binds GdkFileList.NewFromArray / NewFromList but NOT gdk_file_list_get_files (the only way to walk the contents from C#). Raw P/Invoke matches the established style for things GirCore doesn't bind cleanly (cf. g_signal_connect_data above). gdk symbols ship inside libgtk-4.so.1 on every target we care about (GTK doesn't split libgdk on its modern release line).
+    [LibraryImport(GtkLib, EntryPoint = "gdk_file_list_get_files")]
+    private static partial IntPtr GdkFileListGetFiles(IntPtr fileList);
+
+    [LibraryImport(GioLib, EntryPoint = "g_file_get_path")]
+    private static partial IntPtr GFileGetPath(IntPtr gfile);
+
+    [LibraryImport(GioLib, EntryPoint = "g_file_get_uri")]
+    private static partial IntPtr GFileGetUri(IntPtr gfile);
+
+    [LibraryImport(GLibLib, EntryPoint = "g_free")]
+    private static partial void GFree(IntPtr ptr);
+
+    [LibraryImport(GLibLib, EntryPoint = "g_slist_free")]
+    private static partial void GSListFree(IntPtr list);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int SeekLegacyEventCallback(IntPtr sender, IntPtr evt, IntPtr userData);
@@ -53,6 +72,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Gtk.Overlay videoOverlay;
     private readonly Gtk.Box noVideoBg;
     private readonly Gtk.PopoverMenuBar menuBar;
+    private readonly Controls.PlaylistPanel playlistPanel;
+    // Stateful action backing "View → Playlist". Held as a field so the auto-show-on-multi-drop path can flip the action's state in lockstep with playlistPanel.SetVisible — keeps the menu's check glyph honest.
+    private Gio.SimpleAction? playlistVisibleAction;
     private readonly bool forceSdr;
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
@@ -235,11 +257,22 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         diagnosticOverlay = new DiagnosticOverlay(playback, videoSurface, () => hdrActiveState == HdrActiveState.Hdr);
         videoOverlay.AddOverlay(diagnosticOverlay.Widget);
 
+        // Playlist panel sits to the right of the video. Hidden by default; toggled by "View → Playlist" or auto-shown when a multi-file drop populates the playlist (so first-time users see the result of their drop without hunting through menus). Wholesale-rebuild on Playlist.Changed.
+        playlistPanel = new Controls.PlaylistPanel(viewModel.Playlist, viewModel.PlayPlaylistItem);
+        playlistPanel.Widget.SetVisible(false);
+
+        // Wrap video + playlist in a horizontal row so they share the middle layout slot. videoOverlay still hexpand/vexpand so the video region grows to fill remaining space when the panel is visible.
+        var videoAndPlaylistRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 0);
+        videoAndPlaylistRow.Append(videoOverlay);
+        videoAndPlaylistRow.Append(playlistPanel.Widget);
+        videoAndPlaylistRow.SetHexpand(true);
+        videoAndPlaylistRow.SetVexpand(true);
+
         menuBar = BuildMenuBar(app);
 
         rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         rootBox.Append(menuBar);
-        rootBox.Append(videoOverlay);
+        rootBox.Append(videoAndPlaylistRow);
         rootBox.Append(controlsBox);
         SetChild(rootBox);
 
@@ -280,10 +313,15 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         clickGesture.OnPressed += OnVideoClickPressed;
         videoWidget.AddController(clickGesture);
 
-        // Drag-and-drop loading. Register a Gio.File drop target — GTK's content-format negotiation has built-in deserializers from text/uri-list (which file managers and browsers universally offer) to a single GFile, taking the first URI. We don't register Gdk.FileList because GirCore 0.7.0 doesn't expose its element accessor; in practice every common DnD source also offers text/uri-list, so the GFile path matches. Accept Copy|Move|Link because Wayland/X11 sources negotiate the action set with the destination — we read the file either way, so refusing Move would just reject otherwise-valid drops. Attached to the window so drops anywhere — including over chrome — are accepted; the user shouldn't have to aim at the video region.
-        var dropTarget = Gtk.DropTarget.New(Gio.FileHelper.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
-        dropTarget.OnDrop += OnFileDrop;
+        // Drag-and-drop loading. Register a Gdk.FileList drop target — both single- and multi-file drags deserialize into a 1-or-N element FileList from any file-manager / browser source that offers text/uri-list (universal). GirCore 0.7.0 doesn't bind GdkFileList.GetFiles, so we walk the underlying GSList ourselves via P/Invoke (see GdkFileListGetFiles + ExtractAndExpandPaths). Window-level target REPLACES the playlist; the panel-level target wired below APPENDS. GTK4's drop dispatch picks the topmost widget under the pointer that matches the offered formats, so a drop on the panel triggers ONLY the panel's target — replace and append are properly disjoint without a propagation dance. Copy|Move|Link is accepted because Wayland/X11 sources negotiate the action set with the destination; we read the file either way.
+        var dropTarget = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
+        dropTarget.OnDrop += OnWindowFileDrop;
         AddController(dropTarget);
+
+        // Panel-level append target. Same FileList GType, attached to the panel's drop area (the inner ListBox, so drops on the scrollbar don't accidentally consume). Only matched when the user drops onto the panel itself.
+        var panelDropTarget = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
+        panelDropTarget.OnDrop += OnPanelFileDrop;
+        playlistPanel.DropArea.AddController(panelDropTarget);
 
         // Mirror the real fullscreen state rather than treating a local bool as authority. Covers compositor/WM-initiated un-fullscreen that bypasses our key/gesture paths.
         OnNotify += OnWindowNotify;
@@ -637,7 +675,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private static void InstallVomplCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; }");
+        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
@@ -689,20 +727,82 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         ArmControlsHideTimer();
     }
 
-    // GTK delivers a Gio.File for the matched format. Prefer GetPath() (local filesystem) and fall back to GetUri() so remote URIs (smb://, http://, …) flow through to mpv, which handles those natively. Returning false signals GTK to draw the rejected-drop cursor; per CLAUDE.md (silent error handling banned) we also log so a future "DnD didn't work" report has something to chase.
-    private bool OnFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
+    private bool OnWindowFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
     {
-        if (args.Value.GetObject() is Gio.File file)
+        var paths = ExtractAndExpandPaths(args.Value);
+        if (paths.Count == 0)
         {
-            string? target = file.GetPath() ?? file.GetUri();
-            if (!string.IsNullOrEmpty(target))
-            {
-                viewModel.OpenFile(target);
-                return true;
-            }
+            // Empty payload (typically: a directory drop that had no recognized video files inside). Don't orphan currently-playing media. Return false so the drag source sees the drop as rejected; per CLAUDE.md (silent error handling banned) log when the input itself was malformed (no files at all in the FileList) but stay quiet for the legitimate zero-match case.
+            return false;
         }
-        Console.Error.WriteLine("[vompl] dnd: dropped value did not yield a usable path or URI; ignoring");
-        return false;
+        viewModel.LoadPaths(paths, replace: true);
+        // Auto-show the panel for multi-item playlists so first-time users see the result of their drop. Single-file drops don't reveal — the user already sees their file playing.
+        if (viewModel.Playlist.Items.Count >= 2)
+        {
+            ShowPlaylistPanel();
+        }
+        return true;
+    }
+
+    private bool OnPanelFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
+    {
+        var paths = ExtractAndExpandPaths(args.Value);
+        if (paths.Count == 0)
+        {
+            return false;
+        }
+        viewModel.LoadPaths(paths, replace: false);
+        return true;
+    }
+
+    // Pulls a flat list of paths (or URIs for non-local sources) out of a Gdk.FileList GValue, then expands any local-directory entries to their recursive video-file contents (extension-filtered). Direct file entries are kept as-is — the user's explicit drop is authoritative for "is this playable?", we don't second-guess by extension. URIs (where g_file_get_path returned NULL and we fell back to g_file_get_uri) skip the directory-expansion check entirely.
+    //
+    // GdkFileList is a boxed type, so args.Value.GetBoxed() returns the IntPtr to the boxed payload (NOT GetObject(), which is GObject-only and would return null here). gdk_file_list_get_files returns (transfer container) — the GSList container is caller-owned (g_slist_free), the GFile elements are owned by the FileList.
+    private List<string> ExtractAndExpandPaths(GObject.Value value)
+    {
+        var raw = new List<string>();
+        IntPtr fileListPtr = value.GetBoxed();
+        if (fileListPtr == IntPtr.Zero)
+        {
+            Console.Error.WriteLine("[vompl] dnd: dropped value's boxed payload was null; ignoring");
+            return new List<string>();
+        }
+        IntPtr gslist = GdkFileListGetFiles(fileListPtr);
+        IntPtr node = gslist;
+        while (node != IntPtr.Zero)
+        {
+            IntPtr gfile = Marshal.ReadIntPtr(node, 0);                    // GSList.data
+            if (gfile != IntPtr.Zero)
+            {
+                IntPtr pathPtr = GFileGetPath(gfile);
+                if (pathPtr != IntPtr.Zero)
+                {
+                    var p = Marshal.PtrToStringUTF8(pathPtr);
+                    GFree(pathPtr);
+                    if (!string.IsNullOrEmpty(p))
+                    {
+                        raw.Add(p);
+                    }
+                }
+                else
+                {
+                    IntPtr uriPtr = GFileGetUri(gfile);
+                    if (uriPtr != IntPtr.Zero)
+                    {
+                        var u = Marshal.PtrToStringUTF8(uriPtr);
+                        GFree(uriPtr);
+                        if (!string.IsNullOrEmpty(u))
+                        {
+                            raw.Add(u);
+                        }
+                    }
+                }
+            }
+            node = Marshal.ReadIntPtr(node, IntPtr.Size);                  // GSList.next
+        }
+        GSListFree(gslist);
+
+        return MediaExtensions.ExpandPaths(raw, msg => Console.Error.WriteLine($"[vompl] dnd: {msg}"));
     }
 
     private void OnVideoClickPressed(Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
@@ -797,6 +897,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     // Percent points per VolumeUp / VolumeDown press. 5 matches YouTube's keyboard step and lines up with the SeekBack5/Forward5 cadence.
     private const double VolumeStepPercent = 5;
 
+    // Auto-show entry from OnWindowFileDrop. Flips the menu action's state so the check glyph stays in sync with the panel's actual visibility — the action's OnChangeState handler is responsible for the SetVisible call. Idempotent: if the panel is already visible, the same-state ChangeState is a no-op (GirCore's SetState dedups on equality).
+    private void ShowPlaylistPanel()
+    {
+        if (playlistVisibleAction == null)
+        {
+            // Defensive: pre-BuildMenuBar callers shouldn't exist (the only caller is OnWindowFileDrop which fires post-Present), but log loud rather than silently NRE.
+            Console.Error.WriteLine("[vompl] playlist: ShowPlaylistPanel before menu was built");
+            return;
+        }
+        playlistVisibleAction.ChangeState(GLib.Variant.NewBoolean(true));
+    }
+
     // Shared between the menu's stateful action and the hotkey-bound action. Reads the action's current state and toggles via ChangeState so the menu's check glyph stays in sync regardless of which path triggered the toggle. Throws if BuildMenuBar hasn't run yet — control flow today guarantees menu construction precedes the controllers that can fire ExecuteAction, but a future refactor that breaks that ordering should fail loud rather than make a hotkey silently no-op (CLAUDE.md bans silent error handling).
     private void ToggleDiagnosticOverlay()
     {
@@ -862,6 +974,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         ApplyFullscreenState(on);
     }
 
+    // Snapshot of the playlist panel's visibility at fullscreen-enter, restored on fullscreen-exit. Hiding the panel in fullscreen prevents it from squeezing the video region; restoring on exit means a user who had it visible in windowed mode doesn't have to re-toggle every time.
+    private bool playlistPanelVisibleBeforeFullscreen;
+
     // Reparent controlsBox between rootBox (windowed, stacked below video) and videoOverlay (fullscreen, floating over the bottom of the video). Toggling visibility on the overlay child doesn't resize the video widget, so controls appearing/disappearing during auto-hide don't cause the video to rescale. The background/padding class pair swaps at the same time: windowed uses vompl-chrome + vompl-controls-bar (opaque theme bg + 6px padding); fullscreen uses osd (GTK's built-in semi-transparent dark over video). Parent-guarded: if ApplyFullscreenState ever runs twice for the same state (e.g., from our toggle and again from notify::fullscreened after a compositor-initiated transition racing with our own), the double-remove/double-add would fault on a non-child widget.
     private void ApplyFullscreenState(bool on)
     {
@@ -872,6 +987,16 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         armPositionY = double.NaN;
         // Asymmetric with controlsBox, which reparents into videoOverlay as an OSD in fullscreen. Menu bars don't OSD well, so we just hide unconditionally; users can still use F11/f/Escape/double-click and the action accelerators (Ctrl+O, Ctrl+Q) while fullscreen.
         menuBar.SetVisible(!on);
+        if (on)
+        {
+            // Snapshot the panel's pre-fullscreen visibility on entry only — re-entering fullscreen while already fullscreen would otherwise lose the original windowed-mode state.
+            playlistPanelVisibleBeforeFullscreen = playlistPanel.Widget.GetVisible();
+            playlistPanel.Widget.SetVisible(false);
+        }
+        else
+        {
+            playlistPanel.Widget.SetVisible(playlistPanelVisibleBeforeFullscreen);
+        }
         if (on)
         {
             if (controlsBox.Parent == rootBox)
@@ -981,6 +1106,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         seekLegacyCallback = null;
         // Dispose the overlay before the objects it reads (playback, videoSurface): Dispose cancels its 1 Hz timer, ensuring no post-teardown tick fires into a disposed Playback.
         diagnosticOverlay.Dispose();
+        // Detach the panel's Playlist.Changed subscription before viewModel.Dispose drops the playlist — keeps a late mainloop tick from invoking into a half-torn-down panel.
+        playlistPanel.Dispose();
         viewModel.Dispose();
         videoSurface?.Dispose();
         playback.Dispose();

@@ -87,6 +87,23 @@ public sealed partial class MainWindow
         };
         AddAction(diagnosticAction);
 
+        // Stateful boolean action backing "View → Playlist". Same pattern as toggle-diagnostic. The auto-show path (OnWindowFileDrop after a multi-item drop) flips this state via ChangeState so the menu's check glyph stays in sync regardless of which path triggered visibility.
+        playlistVisibleAction = Gio.SimpleAction.NewStateful(
+            "toggle-playlist",
+            parameterType: null,
+            state: GLib.Variant.NewBoolean(false));
+        playlistVisibleAction.OnChangeState += (_, args) =>
+        {
+            if (args.Value == null)
+            {
+                throw new InvalidOperationException("toggle-playlist change-state signal fired with null args.Value");
+            }
+            bool newState = args.Value.GetBoolean();
+            playlistVisibleAction.SetState(args.Value);
+            playlistPanel.Widget.SetVisible(newState);
+        };
+        AddAction(playlistVisibleAction);
+
         var fileMenu = Gio.Menu.New();
         // GirCore 0.7.0 doesn't expose gtk_menu_append_item as AppendItem, only the position-based InsertItem. Passing -1 as position appends per the gmenu contract.
         fileMenu.InsertItem(-1, Gio.MenuItem.New("Open…", "win.open"));
@@ -107,6 +124,7 @@ public sealed partial class MainWindow
 
         var viewMenu = Gio.Menu.New();
         viewMenu.InsertItem(-1, Gio.MenuItem.New("Fullscreen", "win.fullscreen"));
+        viewMenu.InsertItem(-1, Gio.MenuItem.New("Playlist", "win.toggle-playlist"));
 
         var editMenu = Gio.Menu.New();
         editMenu.InsertItem(-1, Gio.MenuItem.New("Preferences…", "win.preferences"));

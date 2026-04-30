@@ -19,6 +19,9 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Mirror of mpv's `core-idle` property: true when the playback core isn't actively advancing — paused, at EOF with keep-open, or no file loaded. Differs from IsPaused (which is just the user-facing pause flag), and that's the point — IsPaused stays false at EOF with keep-open=yes, but IsCoreIdle correctly flips back to true. Used to gate side-effects that should track "actually playing right now" (e.g. screensaver inhibit).
     bool IsCoreIdle { get; }
 
+    // Mirror of mpv's `eof-reached` property: true when the current file has hit end-of-file. With keep-open=yes (which we set), mpv parks at the last frame at EOF and does NOT fire MPV_EVENT_END_FILE — so the FileEnded event is unreliable for detecting natural EOF. eof-reached is the right signal. Used by playlist auto-advance, which reads the false→true transition.
+    bool IsEofReached { get; }
+
     // mpv's `volume` property (percent — typical range 0..100, mpv allows up to volume-max which defaults to 130). Mute is independent of volume: muting doesn't reset Volume to 0, so unmuting restores the prior level.
     double Volume { get; }
     bool IsMuted { get; }

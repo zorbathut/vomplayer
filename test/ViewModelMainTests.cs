@@ -31,6 +31,9 @@ public partial class ViewModelMainTests
         private bool isCoreIdle = true;
 
         [ObservableProperty]
+        private bool isEofReached;
+
+        [ObservableProperty]
         private double volume = 100;
 
         [ObservableProperty]
@@ -63,8 +66,9 @@ public partial class ViewModelMainTests
 
         public int InitializeCalls { get; private set; }
         public int TogglePauseCalls { get; private set; }
-        public int LoadFileCalls { get; private set; }
-        public string? LastLoadedFile { get; private set; }
+        // Mutable from tests so post-load assertions can isolate per-step deltas (the playlist tests reset these between LoadPaths and a follow-up auto-advance to assert "this trigger ALONE produced one new load").
+        public int LoadFileCalls { get; set; }
+        public string? LastLoadedFile { get; set; }
         public double? LastSeekSeconds { get; private set; }
         public string? LastLoadedAudio { get; private set; }
         public string? LastLoadedSubtitle { get; private set; }
@@ -1323,5 +1327,265 @@ public partial class ViewModelMainTests
         vm.Dispose();
         Assert.That(recents.GetPositionCalls, Is.Empty);
         Assert.That(recents.RecordedPositions, Is.Empty);
+    }
+
+    // --- Playlist: LoadPaths, PlayPlaylistItem, OpenFile back-compat ---
+
+    [Test]
+    public void OpenFilePublicReplacesPlaylistWithSingleItem()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.OpenFile("/path/to/a.mp4");
+        Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/path/to/a.mp4" }));
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/a.mp4"));
+
+        vm.OpenFile("/path/to/b.mp4");
+        Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/path/to/b.mp4" }));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/b.mp4"));
+    }
+
+    [Test]
+    public void LoadPathsReplaceLoadsFirstItem()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
+        Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/a", "/b", "/c" }));
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/a"));
+    }
+
+    [Test]
+    public void LoadPathsReplaceWithEmptyDoesNothing()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a" }, replace: true);
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
+
+        vm.LoadPaths(Array.Empty<string>(), replace: true);
+        // Empty input is a no-op — does not orphan the currently-playing item.
+        Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/a" }));
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void LoadPathsAppendToEmptyKicksOffPlayback()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b" }, replace: false);
+        Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/a", "/b" }));
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/a"));
+    }
+
+    [Test]
+    public void LoadPathsAppendToNonEmptyDoesNotChangeCurrent()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b" }, replace: true);
+        pb.LoadFileCalls = 0;
+        pb.LastLoadedFile = null;
+
+        vm.LoadPaths(new[] { "/c", "/d" }, replace: false);
+        Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/a", "/b", "/c", "/d" }));
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+        // No new load fired — current item keeps playing.
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void PlayPlaylistItemSwitchesCurrent()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
+        pb.LoadFileCalls = 0;
+        pb.LastLoadedFile = null;
+
+        vm.PlayPlaylistItem(2);
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(2));
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/c"));
+    }
+
+    // --- Playlist: auto-advance ---
+
+    [Test]
+    public void EofReachedRisingEdgeAdvances()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b" }, replace: true);
+        pb.RaiseFileLoaded();
+        pb.DurationSeconds = 60;
+        pb.LastLoadedFile = null;
+
+        pb.IsEofReached = true;
+
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/b"));
+    }
+
+    [Test]
+    public void EofReachedRisingEdgeDoesNotAdvanceWhilePendingLoad()
+    {
+        // The currentFileLoaded gate. A stale eof-reached=true from the prior file's tail can land in the dispatcher queue after LoadFile dispatches but before the new file's FileLoaded fires. Without the gate, the spurious rising edge would skip the just-loaded file.
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b" }, replace: true);
+        // FileLoaded NOT raised — currentFileLoaded is still false.
+        pb.DurationSeconds = 60;
+
+        pb.IsEofReached = true;
+
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/a"));
+    }
+
+    [Test]
+    public void EofReachedRisingEdgeDoesNotAdvanceForLiveStream()
+    {
+        // The DurationSeconds > 0 gate. Live streams may oscillate eof-reached without a meaningful "next item" semantic.
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "https://example.com/live", "/b" }, replace: true);
+        pb.RaiseFileLoaded();
+        // DurationSeconds remains 0 — live source.
+
+        pb.IsEofReached = true;
+
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void EofReachedAtLastItemDoesNotAdvance()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a" }, replace: true);
+        pb.RaiseFileLoaded();
+        pb.DurationSeconds = 60;
+        pb.LastLoadedFile = null;
+        int loadsBeforeEof = pb.LoadFileCalls;
+
+        pb.IsEofReached = true;
+
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(loadsBeforeEof));
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void EofReachedNoOpsOutsidePlaylist()
+    {
+        // No LoadPaths call yet — playlist is empty. EOF on whatever happens to be playing (shouldn't happen in practice; defense in depth).
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        pb.DurationSeconds = 60;
+
+        pb.IsEofReached = true;
+
+        Assert.That(vm.Playlist.Items, Is.Empty);
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void EofReachedDoesNotReFireOnRepeatTrue()
+    {
+        // The rising-edge gate. User seeks back from EOF and re-hits it without intervening load — should not re-advance.
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
+        pb.RaiseFileLoaded();
+        pb.DurationSeconds = 60;
+
+        pb.IsEofReached = true;     // advances to /b
+        // Simulate the auto-advance flow: in real life Playback.LoadFile resets IsEofReached=false synchronously, then mpv's eof-reached=false observation arrives. Mirror that.
+        pb.IsEofReached = false;
+        pb.RaiseFileLoaded();
+        // Now simulate a user seeking back into /b and re-hitting EOF without us resetting wasEofReached: the rising edge should fire normally (this is the "user-driven re-advance" case).
+        pb.IsEofReached = true;     // /b → /c
+
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(2));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/c"));
+    }
+
+    [Test]
+    public void LastItemEofThenUserClicksRowDoesNotSpuriouslyAdvance()
+    {
+        // Sequence: last item ends (auto-advance returns null, no load), user double-clicks an earlier row. The intervening LoadCurrentItem must reset wasEofReached so the row's eventual EOF triggers a real advance, but the row click itself must NOT auto-advance past whatever it landed on.
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
+        pb.RaiseFileLoaded();
+        pb.DurationSeconds = 60;
+
+        // Walk through to the last item and EOF.
+        pb.IsEofReached = true;     // → /b
+        pb.IsEofReached = false;
+        pb.RaiseFileLoaded();
+        pb.IsEofReached = true;     // → /c
+        pb.IsEofReached = false;
+        pb.RaiseFileLoaded();
+        pb.IsEofReached = true;     // last item; no advance
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(2));
+
+        // User clicks row 0 from the panel.
+        pb.LoadFileCalls = 0;
+        vm.PlayPlaylistItem(0);
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
+        // No spurious auto-advance from the lingering eof state.
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/a"));
+    }
+
+    [Test]
+    public void AutoAdvanceIntoUriItemWorks()
+    {
+        // The next item is a URI; auto-advance shouldn't bail just because the entry isn't a local-fs path. The IsLocalFilesystemPath gate inside LoadCurrentItem only affects the recents-position lookup, not the load itself.
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences());
+        vm.LoadPaths(new[] { "/local.mkv", "https://example.com/stream.m3u8" }, replace: true);
+        pb.RaiseFileLoaded();
+        pb.DurationSeconds = 60;
+
+        pb.IsEofReached = true;
+
+        Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(1));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("https://example.com/stream.m3u8"));
+    }
+
+    [Test]
+    public void AutoAdvanceElidesNearEndOutgoingSave()
+    {
+        // Pin the no-save-on-natural-EOF behavior. At natural EOF with keep-open=yes, position parks at duration; SaveCurrentPositionIfEligible's near-end gate (position >= duration - 5) elides the save. If a future change inverts the gate, this test catches the regression.
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var path = LocalPathInTemp("a.mkv");
+        var pathB = LocalPathInTemp("b.mkv");
+        try
+        {
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences());
+            vm.LoadPaths(new[] { path, pathB }, replace: true);
+            pb.RaiseFileLoaded();
+            pb.DurationSeconds = 600;
+            pb.PositionSeconds = 599;   // within the near-end window
+            recents.RecordedPositions.Clear();
+
+            pb.IsEofReached = true;     // auto-advance triggers SaveCurrentPositionIfEligible for the outgoing file
+
+            Assert.That(recents.RecordedPositions, Is.Empty);
+            Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(1));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+            Directory.Delete(Path.GetDirectoryName(pathB)!, recursive: true);
+        }
     }
 }

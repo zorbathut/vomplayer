@@ -46,6 +46,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     private double? pendingResumePosition;
     // Previous IsPaused value, for rising-edge detection in OnPlaybackPropertyChanged. Updated only by real PropertyChanged events — never re-snapshotted from playback.IsPaused on OpenFile, because the snapshot would race a queued-but-not-yet-dispatched IsPaused event from the dispatcher worker, leaving wasPaused out of sync with the next edge the handler sees.
     private bool wasPaused = true;
+    // Previous IsEofReached value, for rising-edge detection driving playlist auto-advance. LoadCurrentItem proactively resets this to false (paired with Playback.LoadFile's synchronous IsEofReached reset) so the gate is aligned at file-load boundaries. Without that pairing, a user clicking row N after the playlist's last item naturally ended would have the rising edge already "consumed", and the new file's eventual EOF would still register as a rising edge — fine in that direction; the worse direction is the stale carry-over described on Playback.LoadFile (auto-advancing past a just-loaded file because IsEofReached was already true at observation time). The three-gate handler below adds defense in depth.
+    private bool wasEofReached;
     // Per-kind apply tracking: each kind that has been successfully applied for the current file load is in this set. Reset on FileLoaded so the next file gets a fresh attempt for all three. Each TracksReloaded fire retries any kind not yet in the set, which handles mpv's lazy track discovery (e.g., external sub-auto landing in a later TracksReloaded than the embedded tracks).
     private readonly HashSet<MediaKind> appliedKindsForCurrentFile = new();
     // Set on FileLoaded, cleared on the next FileLoaded. Distinguishes "we're in the apply window" from "no file load is pending" so that user-driven track-list changes (sub-add later in the session) don't trigger spurious applies.
@@ -92,6 +94,9 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     private int? currentSubtitleId;
 
     public string? InitialFile { get; set; }
+
+    // Owned playlist model. The view (PlaylistPanel) subscribes to Playlist.Changed and rebuilds rows wholesale; LoadPaths / PlayPlaylistItem / the auto-advance handler are the only mutators. Public so the panel can read Items / CurrentIndex on every Changed fire — Playlist itself is a plain class, no GTK dependency, fully unit-testable.
+    public Playlist Playlist { get; } = new Playlist();
 
     public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences)
     {
@@ -195,21 +200,76 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         PrefsLog($"saved: dir={currentDirectoryKey} kind={kind} isNone={pref.IsNone} title={pref.Title ?? "<null>"} lang={pref.Lang ?? "<null>"} external={pref.External} extFile={pref.ExternalFilename ?? "<null>"} index={pref.IndexInKind}");
     }
 
-    // Direct path/URI load, bypassing the file picker. Used by drag-and-drop. Accepts whatever libmpv accepts: a local filesystem path, or a remote URI (http://, https://, smb://, …).
+    // Single-file public entry point — back-compat for the existing picker / command-line / single-drop callers. Routes through LoadPaths so the playlist mirror always reflects what's playing; the user-spec is "single file dropped REPLACES the playlist", and OpenFile is the morally-equivalent picker path.
     public void OpenFile(string pathOrUri)
     {
-        // Save the OUTGOING file's position synchronously, before mutating any per-file state. This is the primary "user moved on from this file" save trigger and replaces the obvious-but-broken alternative of subscribing to FileEnded: mpv's EndFile event delivers its reason field via a separate struct that the existing MpvClient.Dispatch reads incorrectly (it reads evt.Error, not the mpv_event_end_file.reason behind evt.Data) — and even with that fixed, at EOF with keep-open=yes time-pos parks at duration so the near-end filter would always elide the save. Saving here, on the user's deliberate "open new file" action, dodges both problems.
+        if (pathOrUri == null)
+        {
+            throw new ArgumentNullException(nameof(pathOrUri));
+        }
+        LoadPaths(new[] { pathOrUri }, replace: true);
+    }
+
+    // Multi-file entry point. replace=true wipes the playlist and starts at index 0; replace=false appends, kicking off playback only if the playlist was previously empty (otherwise we just queue items behind the current one). An empty input is a no-op — covers zero-match directory drops without orphaning currently-playing media.
+    public void LoadPaths(IReadOnlyList<string> paths, bool replace)
+    {
+        if (paths == null)
+        {
+            throw new ArgumentNullException(nameof(paths));
+        }
+        if (paths.Count == 0)
+        {
+            return;
+        }
+        bool kickOff;
+        if (replace)
+        {
+            Playlist.Replace(paths);
+            kickOff = true;
+        }
+        else
+        {
+            bool wasEmpty = Playlist.Items.Count == 0;
+            Playlist.Append(paths);
+            kickOff = wasEmpty;
+        }
+        if (kickOff)
+        {
+            LoadCurrentItem();
+        }
+    }
+
+    // User clicked / activated a row in the playlist panel. SetCurrent + LoadCurrentItem — the former is a pure state mutation, the latter does the actual playback transition.
+    public void PlayPlaylistItem(int index)
+    {
+        Playlist.SetCurrent(index);
+        LoadCurrentItem();
+    }
+
+    // The shared per-file setup: outgoing-position save, recents.Record, currentDirectoryKey resolve, currentFilePath set, lastSavedPositionSeconds reset, pendingResumePosition lookup, then playback.LoadFile. Called from LoadPaths (when starting / replacing a playlist), PlayPlaylistItem, and the auto-advance handler. Idempotent w.r.t. the playlist itself — the playlist mutation already happened.
+    //
+    // Why save-on-LoadCurrentItem instead of subscribing to FileEnded: mpv's EndFile event delivers its reason field via a separate struct that the existing MpvClient.Dispatch reads incorrectly (it reads evt.Error, not the mpv_event_end_file.reason behind evt.Data) — and even with that fixed, at EOF with keep-open=yes time-pos parks at duration so the near-end filter would always elide the save. Saving here, on the user's deliberate "open new file" action OR on auto-advance, dodges both problems. Auto-advance specifically: at natural EOF position ≈ duration so SaveCurrentPositionIfEligible's near-end gate elides the save anyway — verified by the AutoAdvanceElidesNearEndOutgoingSave test.
+    private void LoadCurrentItem()
+    {
+        if (Playlist.CurrentIndex < 0 || Playlist.CurrentIndex >= Playlist.Items.Count)
+        {
+            return;
+        }
+        string pathOrUri = Playlist.Items[Playlist.CurrentIndex];
+
         SaveCurrentPositionIfEligible();
 
         recentFiles.Record(pathOrUri);
-        // Resolve and cache the directory key NOW so Select* calls between LoadFile and the next OpenFile can reach it. URIs return null and disable persistence for this file.
+        // Resolve and cache the directory key NOW so Select* calls between LoadFile and the next load can reach it. URIs return null and disable persistence for this file.
         currentDirectoryKey = TrackPreferences.TryGetDirectoryKey(pathOrUri);
         currentFilePath = pathOrUri;
         currentFileLoaded = false;
         lastSavedPositionSeconds = 0;
+        // Reset the eof-rising-edge mirror to match the synchronous IsEofReached=false that Playback.LoadFile is about to perform. Ensures the next true→ transition we observe is treated as a rising edge against this file, not against whatever the previous file's tail was.
+        wasEofReached = false;
         // Look up the saved position only for local files. URI sources don't accumulate positions, so skipping the GetPosition call also keeps test fakes' GetPositionCalls clean.
         pendingResumePosition = TrackPreferences.IsLocalFilesystemPath(pathOrUri) ? recentFiles.GetPosition(pathOrUri) : null;
-        PrefsLog($"OpenFile: pathOrUri={pathOrUri} → directoryKey={currentDirectoryKey ?? "<null>"}, resumePos={(pendingResumePosition?.ToString() ?? "<null>")}");
+        PrefsLog($"LoadCurrentItem: pathOrUri={pathOrUri} → directoryKey={currentDirectoryKey ?? "<null>"}, resumePos={(pendingResumePosition?.ToString() ?? "<null>")}");
         playback.LoadFile(pathOrUri);
     }
 
@@ -431,6 +491,23 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
                 }
                 wasPaused = nowPaused;
                 IsPaused = nowPaused;
+                break;
+            case nameof(IPlayback.IsEofReached):
+                // Three gates guard the playlist auto-advance:
+                //   1. Rising edge (!wasEof && nowEof). mpv may fire eof-reached=true repeatedly while parked at EOF (e.g., property re-observe on track-list updates); we only want to advance once per natural EOF, not every time mpv re-asserts the flag.
+                //   2. currentFileLoaded. A stale eof-reached=true from the prior file's tail can land in the dispatcher queue after LoadFile dispatches but before the new file's FileLoaded fires; without this gate the spurious rising edge would skip the just-loaded file.
+                //   3. DurationSeconds > 0. Live streams may oscillate eof-reached without a meaningful "next item" semantic.
+                // All three protect different scenarios; don't skimp on any.
+                bool nowEof = playback.IsEofReached;
+                if (nowEof && !wasEofReached && currentFileLoaded && playback.DurationSeconds > 0)
+                {
+                    var next = Playlist.Advance();
+                    if (next != null)
+                    {
+                        LoadCurrentItem();
+                    }
+                }
+                wasEofReached = nowEof;
                 break;
             case nameof(IPlayback.VideoTracks):
                 VideoTracks = playback.VideoTracks;

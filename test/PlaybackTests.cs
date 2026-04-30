@@ -93,6 +93,32 @@ public class PlaybackTests
         Assert.That(pb.IsMuted, Is.False);
     }
 
+    [Test]
+    public void IsEofReachedDefaultsFalse()
+    {
+        using var pb = new Playback.Playback(a => a());
+        Assert.That(pb.IsEofReached, Is.False);
+    }
+
+    [Test]
+    public void UpdateIsEofReachedTracksValue()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateIsEofReached(true);
+        Assert.That(pb.IsEofReached, Is.True);
+        pb.UpdateIsEofReached(false);
+        Assert.That(pb.IsEofReached, Is.False);
+    }
+
+    [Test]
+    public void UpdateIsEofReachedNullCoalescesToFalse()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.UpdateIsEofReached(true);
+        pb.UpdateIsEofReached(null);
+        Assert.That(pb.IsEofReached, Is.False);
+    }
+
     // Regression: libmpv aborts the host process with `free(): invalid pointer` if a `seek` command runs before any file has been loaded. User-visible symptom was the seek slider crashing the player when clicked with no media open. Sleeps bracket the Seek call to give the dispatcher's worker thread time to drain the posted action — without them the test could reach Dispose before the seek even reaches mpv, masking the abort. Reaching the end of this test without the test host being killed is the assertion; reverting the gate in Playback.Seek causes this test to abort the entire test run.
     [Test]
     public void SeekBeforeLoadFileIsSafe()
