@@ -183,6 +183,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         // --newline: emit each progress update on its own line (default rewrites in place via \r). Required for stdout line-by-line parsing.
         // --progress-template: stable machine-parseable format. We split on whitespace and read fields by index.
         // --print after_move:filepath: emit the final-file path AFTER all post-processing (merge of separate video+audio streams, format conversion, etc.) so we know exactly which file mpv should open.
+        // --no-quiet: --print implicitly enables --quiet, which suppresses *all* other output including the progress lines we depend on. Restore the default verbosity so progress-template lines land on stdout.
         // -P: place all output (incl. .part files) inside the per-URL cache subdir. -o template ensures a single canonical file name; %(ext)s lets yt-dlp pick the actual extension.
         // --no-warnings + --no-progress in stderr keeps stderr clean for actual error output.
         psi.ArgumentList.Add("--newline");
@@ -190,6 +191,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         psi.ArgumentList.Add($"{ProgressPrefix} %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.status)s");
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add($"after_move:{FilenamePrefix} %(filepath)s");
+        psi.ArgumentList.Add("--no-quiet");
         psi.ArgumentList.Add("--no-warnings");
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("-P");
