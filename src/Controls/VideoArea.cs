@@ -2,7 +2,7 @@ using System;
 
 namespace Vomplayer.Controls;
 
-// DrawingArea subclass that paints nothing. Emits GeometryChanged whenever its size or position (relative to the root window) changes. Used as the placeholder widget in the Wayland subsurface path — it reserves layout space, and the subsurface sits over its bounds at the compositor level.
+// DrawingArea subclass that paints nothing. Emits GeometryChanged when its allocated SIZE changes (via OnResize) and when an external caller explicitly invokes RefreshGeometry(). Pure-position changes — e.g. an ancestor's margin update that moves this widget without resizing it — are NOT autodetected; the caller responsible for that change must call RefreshGeometry to keep the wl_subsurface in sync. Used as the placeholder widget in the Wayland subsurface path: reserves layout space, and the subsurface sits over its bounds at the compositor level.
 public sealed class VideoArea : Gtk.DrawingArea
 {
     private int lastX = -1;

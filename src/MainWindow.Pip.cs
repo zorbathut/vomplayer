@@ -3,18 +3,48 @@ using System.ComponentModel;
 using System.IO;
 using Vomplayer.Controls;
 using Vomplayer.UserData;
+using Vomplayer.Util;
 using Vomplayer.ViewModels;
 using Vomplayer.Wayland;
 
 namespace Vomplayer;
 
-// Picture-in-Picture lifecycle for MainWindow. Constructs the secondary Playback / VideoSurface or VideoView, wires it into the VM coordinator, and tears it all down on disable. Layout decision is "GTK Overlay child + Halign=Start, Valign=End, SetSizeRequest(pipW, pipH)" — sufficient for v1 fixed-corner PiP. Future drag-to-reposition swaps the alignment for explicit margins.
+// Picture-in-Picture lifecycle for MainWindow. Constructs the secondary Playback / VideoSurface or VideoView, wires it into the VM coordinator, and tears it all down on disable. The secondary widget is wrapped in a `pipContainer` Gtk.Overlay; the container carries the absolute layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest) and hosts a small bottom-right resize grip alongside the secondary widget. Drag gestures on the secondary move the container; on the grip, aspect-locked resize. Layout math (defaults, clamping, aspect projection) is in PipLayoutCalc — kept pure for unit tests.
 public partial class MainWindow
 {
     private const int PipMargin = 16;
     private const int PipMinWidth = 160;
     private const int PipMinHeight = 90;
+    private const int PipResizeGripSize = 18;
     private const string SelectedVideoCssClass = "vompl-selected-video";
+
+    // Wrapper hosting (secondary widget + resize grip). Carries the layout (margins/size). Null when PiP is off.
+    private Gtk.Overlay? pipContainer;
+    // The corner resize handle. Held as a field only for SyncPipResizeGripVisibility; construction and event-wiring stays local to AttachPipContainer.
+    private Gtk.DrawingArea? pipResizeGripWidget;
+    // Hover controller on the wrapper; queried on drag-end to decide whether the pointer is still inside the wrapper (keep grip visible) or outside (hide it). Without this, the leave path that fired during the drag was suppressed by the active flag and would not re-fire after release.
+    private Gtk.EventControllerMotion? pipHoverController;
+
+    // User-driven layout overrides. Each remains null until the user drags (margins) or resizes (width). Cleared on DisablePip so a re-enable starts at the default corner placement.
+    private int? pipUserWidth;
+    private int? pipUserMarginStart;
+    private int? pipUserMarginTop;
+
+    // Captured at drag-begin. Margins/width are the layout snapshot at that moment; the overlay-local point is the press position translated into videoOverlay coordinates, which is the reference frame we read deltas in. Why not just `OffsetX`/`OffsetY`? Those are reported in the dragged widget's local frame, and we MOVE the widget during the drag — so the local frame slides under the pointer and OffsetX collapses back toward zero each time we apply our update, producing slow + jittery motion. videoOverlay doesn't move; deltas read in its frame are stable. (Same problem affects the resize grip: as the wrapper grows, the grip — pinned to the wrapper's bottom-right — also moves under the pointer.)
+    private int pipDragStartMarginStart;
+    private int pipDragStartMarginTop;
+    private int pipResizeStartWidth;
+    private double pipGestureOverlayStartX;
+    private double pipGestureOverlayStartY;
+
+    // Coalescer for the post-ApplyPipLayout geometry refresh. ApplyPipLayout fires per drag-update event (potentially many times per frame); we only need one refresh per frame.
+    private bool pipGeometryRefreshScheduled;
+
+    // App-level commit threshold for drag-to-move. Larger than GTK's gtk-dnd-drag-threshold (default 8 px) because GTK's threshold is empirically crossed by hand tremor / mouse jitter during what the user considers a normal click — under that threshold, GestureDrag fires drag-begin, our handler claims the sequence, and the sibling GestureClick's `released` signal is denied → PlayPause never runs. Bumping this app-side gates the SetState(Claimed) call until motion is unambiguous enough to commit. Picked at 16 px (~1/8" on typical DPI) — comfortably above tremor, comfortably below intentional drag motion.
+    private const double PipMoveClaimThresholdPx = 16.0;
+    private bool pipMoveClaimed;
+    // True while a corner-resize drag is active. Used alongside pipMoveClaimed to keep the grip visible mid-drag even if the pointer briefly slips outside the wrapper's bounds (which would otherwise fire EventControllerMotion::leave and hide the grip).
+    private bool pipResizeActive;
 
     // Stream-selector toolbar fields. Constructed in Phase 4 (BuildStreamSelectorToolbar). Declared here as nullable so OnViewModelPipPropertyChanged + SyncStreamSelectorButtons can defensively no-op pre-build, and so the menu refactor in Phase 6 can null-check before calling SetEnabled. The ToggleButton[] is indexed by VideoSlot (Primary=0, Secondary=1).
     private Gtk.Box? streamSelectorToolbar;
@@ -191,12 +221,19 @@ public partial class MainWindow
         // VM teardown comes first: it disposes the VideoContext (which detaches the HDR sink + unsubscribes Source/Output handlers); doing this before the surface is destroyed lets the SDR pre-stage call inside DetachHdrSink land on a still-live surface.
         viewModel.DisablePip();
 
-        if (secondaryArea != null)
+        if (videoArea != null)
         {
-            videoArea!.GeometryChanged -= OnPrimaryAreaGeometryChangedForPip;
-            videoOverlay.RemoveOverlay(secondaryArea);
-            secondaryArea = null;
+            videoArea.GeometryChanged -= OnPrimaryAreaGeometryChangedForPip;
         }
+        if (pipContainer != null)
+        {
+            // Removing the wrapper from videoOverlay walks the whole subtree (secondary widget + grip), so no per-child RemoveOverlay calls.
+            videoOverlay.RemoveOverlay(pipContainer);
+            pipContainer = null;
+            pipResizeGripWidget = null;
+            pipHoverController = null;
+        }
+        secondaryArea = null;
         if (secondarySurface != null)
         {
             secondarySurface.RenderContextReady -= OnSecondaryRenderContextReadyWayland;
@@ -209,7 +246,6 @@ public partial class MainWindow
         {
             secondaryView.RenderContextReady -= OnSecondaryRenderContextReadyGLArea;
             secondaryView.RenderFailed -= OnVideoRenderFailed;
-            videoOverlay.RemoveOverlay(secondaryView);
             secondaryView = null;
         }
         if (secondaryPlayback != null)
@@ -217,6 +253,10 @@ public partial class MainWindow
             secondaryPlayback.Dispose();
             secondaryPlayback = null;
         }
+        // Reset user-set layout so a future EnablePip starts at the default corner placement again. Persisting across enable/disable was considered and rejected — re-enabling a previously-dragged PiP at a stale absolute position is more disorienting than re-anchoring to the corner.
+        pipUserWidth = null;
+        pipUserMarginStart = null;
+        pipUserMarginTop = null;
         RebindPlaylistPanelToTarget();
         UpdateSelectedVideoCss();
         ReinsertControlsOverlay();
@@ -225,15 +265,9 @@ public partial class MainWindow
     private void BuildSecondaryVideoArea(VideoContext secondaryCtx)
     {
         var area2 = new VideoArea();
-        area2.SetHalign(Gtk.Align.Start);
-        area2.SetValign(Gtk.Align.End);
-        area2.SetHexpand(false);
-        area2.SetVexpand(false);
-        area2.SetMarginStart(PipMargin);
-        area2.SetMarginBottom(PipMargin);
-        UpdatePipSizeRequest(area2);
-        videoOverlay.AddOverlay(area2);
+        // The secondary widget itself stays at default fill alignment inside its wrapper; the wrapper carries the layout.
         secondaryArea = area2;
+        AttachPipContainer(area2);
         // Re-size the PiP whenever the secondary's loaded source's aspect changes (file load with known dwidth/dheight, or unload back to null). The PropertyChanged source is the secondary VideoContext we just built — it lives at viewModel.Secondary now that EnablePip ran.
         secondaryCtx.PropertyChanged += OnSecondaryContextPropertyChanged;
 
@@ -250,7 +284,7 @@ public partial class MainWindow
             surface2.PlaceAbove(videoSurface);
         }
 
-        AttachClickToFocus(area2, ViewModelMain.VideoSlot.Secondary);
+        AttachPipBodyInputs(area2);
         AttachSecondaryDropTarget(area2);
         // Track primary geometry so PiP rescales when the window resizes.
         videoArea!.GeometryChanged += OnPrimaryAreaGeometryChangedForPip;
@@ -259,21 +293,14 @@ public partial class MainWindow
     private void BuildSecondaryVideoView()
     {
         var view2 = new VideoView();
-        view2.SetHalign(Gtk.Align.Start);
-        view2.SetValign(Gtk.Align.End);
-        view2.SetHexpand(false);
-        view2.SetVexpand(false);
-        view2.SetMarginStart(PipMargin);
-        view2.SetMarginBottom(PipMargin);
-        UpdatePipSizeRequest(view2);
-        videoOverlay.AddOverlay(view2);
         secondaryView = view2;
+        AttachPipContainer(view2);
 
         view2.RenderContextReady += OnSecondaryRenderContextReadyGLArea;
         view2.RenderFailed += OnVideoRenderFailed;
         secondaryPlayback!.AttachRenderSurface(d => view2.AttachDispatcher(d));
 
-        AttachClickToFocus(view2, ViewModelMain.VideoSlot.Secondary);
+        AttachPipBodyInputs(view2);
         AttachSecondaryDropTarget(view2);
         // GLArea path: same per-source PiP-aspect bookkeeping as the Wayland path. viewModel.Secondary was set by EnablePip before this method runs.
         if (viewModel.Secondary != null)
@@ -282,18 +309,71 @@ public partial class MainWindow
         }
     }
 
+    // Wrap the secondary video widget in a Gtk.Overlay (`pipContainer`) and add the wrapper as the videoOverlay's PiP overlay child. The wrapper carries the layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest). A small DrawingArea is layered as the wrapper's overlay child in the bottom-right corner to act as the resize grip.
+    private void AttachPipContainer(Gtk.Widget secondaryWidget)
+    {
+        var container = Gtk.Overlay.New();
+        container.SetHalign(Gtk.Align.Start);
+        container.SetValign(Gtk.Align.Start);
+        container.SetHexpand(false);
+        container.SetVexpand(false);
+        container.SetChild(secondaryWidget);
+
+        var grip = Gtk.DrawingArea.New();
+        grip.SetSizeRequest(PipResizeGripSize, PipResizeGripSize);
+        grip.SetHalign(Gtk.Align.End);
+        grip.SetValign(Gtk.Align.End);
+        grip.SetCanTarget(true);
+        grip.SetCursorFromName("se-resize");
+        grip.SetDrawFunc(DrawPipResizeGrip);
+        grip.SetVisible(false);
+
+        var resizeDrag = Gtk.GestureDrag.New();
+        resizeDrag.OnDragBegin += OnPipResizeDragBegin;
+        resizeDrag.OnDragUpdate += OnPipResizeDragUpdate;
+        resizeDrag.OnDragEnd += OnPipResizeDragEnd;
+        grip.AddController(resizeDrag);
+
+        container.AddOverlay(grip);
+
+        var moveDrag = Gtk.GestureDrag.New();
+        moveDrag.OnDragBegin += OnPipMoveDragBegin;
+        moveDrag.OnDragUpdate += OnPipMoveDragUpdate;
+        moveDrag.OnDragEnd += OnPipMoveDragEnd;
+        secondaryWidget.AddController(moveDrag);
+
+        // Hover-only grip visibility. EventControllerMotion exposes a `contains-pointer` boolean property that's true whenever the pointer is in the controller's widget OR any descendant. We listen to its property-changed notification (not the Enter/Leave signals) — Enter/Leave fire on EVERY intra-tree crossing the pointer makes (e.g., wrapper ↔ secondary ↔ grip), so they're noisy and the contains-pointer state at the moment of OnLeave can still be True. The notify path fires exactly when contains-pointer transitions, which is what we actually want for "hovering anywhere in the PiP region". Visibility is forced true while a drag is active so a fast drag — where the pointer can momentarily slip outside the wrapper bounds before layout catches up — doesn't flicker the grip away mid-gesture.
+        var hoverController = Gtk.EventControllerMotion.New();
+        hoverController.OnNotify += OnPipHoverControllerNotify;
+        container.AddController(hoverController);
+
+        pipContainer = container;
+        pipResizeGripWidget = grip;
+        pipHoverController = hoverController;
+
+        videoOverlay.AddOverlay(container);
+        ApplyPipLayout();
+    }
+
+    // Two diagonal hairlines hugging the bottom-right corner of the grip. Drawn in white at moderate alpha so they read against both bright and dark video. The pattern (two parallel lines in the south-east corner) is the standard "resize handle" idiom (cf. CSS `resize: both`, GNOME WindowResizeGripStyle pre-3.20).
+    private static void DrawPipResizeGrip(Gtk.DrawingArea area, Cairo.Context cr, int width, int height)
+    {
+        cr.SetSourceRgba(1.0, 1.0, 1.0, 0.85);
+        cr.LineWidth = 2.0;
+        // Outer line — goes from (0, height) up to (width, 0)-ish, but inset 3 px so it sits inside the grip.
+        cr.MoveTo(width - 1, height * 0.45);
+        cr.LineTo(width * 0.45, height - 1);
+        cr.Stroke();
+        cr.MoveTo(width - 1, height * 0.75);
+        cr.LineTo(width * 0.75, height - 1);
+        cr.Stroke();
+    }
+
     private void OnSecondaryContextPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(VideoContext.VideoAspect))
         {
-            if (secondaryArea != null)
-            {
-                UpdatePipSizeRequest(secondaryArea);
-            }
-            else if (secondaryView != null)
-            {
-                UpdatePipSizeRequest(secondaryView);
-            }
+            ApplyPipLayout();
             return;
         }
         if (e.PropertyName == nameof(VideoContext.CurrentFilePath))
@@ -317,42 +397,227 @@ public partial class MainWindow
 
     private void OnPrimaryAreaGeometryChangedForPip(int x, int y, int w, int h, int scale)
     {
-        // VideoArea fires this whenever its allocation changes. Use it to recompute PiP size against the primary's new bounds.
-        if (secondaryArea != null)
-        {
-            UpdatePipSizeRequest(secondaryArea);
-        }
+        // VideoArea fires this whenever its allocation changes. Recompute PiP layout against the primary's new bounds (also re-clamps user-set margins so a window shrink can't strand the PiP off-screen).
+        ApplyPipLayout();
     }
 
-    // PiP sizing rule: 1/4 of primary's allocation width with the secondary source's actual display aspect (mpv dwidth/dheight). Falls back to 16:9 pre-load. Floors at PipMinWidth × PipMinHeight so the corner thumbnail stays drag/click-targetable on small windows; if the aspect is so extreme that the floor blows out the other dimension (e.g. a portrait source on a tiny primary), the floor on the binding dimension wins and the other expands accordingly to preserve aspect.
-    private void UpdatePipSizeRequest(Gtk.Widget secondaryWidget)
+    // Resolve the effective PiP layout from PipLayoutCalc and push it to pipContainer. After clamping, write any clamped value back into the user-override fields so subsequent drags/resizes resume from a valid position even after a window-resize-induced clamp. Skips when pipContainer is null (PiP off / mid-teardown).
+    private void ApplyPipLayout()
     {
+        if (pipContainer == null)
+        {
+            return;
+        }
         int primaryW = videoArea?.GetAllocatedWidth() ?? videoView?.GetAllocatedWidth() ?? 0;
         int primaryH = videoArea?.GetAllocatedHeight() ?? videoView?.GetAllocatedHeight() ?? 0;
         double aspect = viewModel.Secondary?.VideoAspect ?? (16.0 / 9.0);
-        if (aspect <= 0)
+        var r = PipLayoutCalc.Compute(primaryW, primaryH, aspect, PipMargin, pipUserWidth, pipUserMarginStart, pipUserMarginTop, PipMinWidth, PipMinHeight);
+        if (pipUserWidth.HasValue)
         {
-            aspect = 16.0 / 9.0;
+            pipUserWidth = r.Width;
         }
-        if (primaryW <= 0 || primaryH <= 0)
+        if (pipUserMarginStart.HasValue)
         {
-            // Pre-realize / pre-allocation. SetSizeRequest with a 2× floor at the source's aspect; the next geometry change will recompute against actual primary bounds.
-            int initialW = PipMinWidth * 2;
-            int initialH = (int)Math.Round(initialW / aspect);
-            secondaryWidget.SetSizeRequest(initialW, initialH);
-            return;
+            pipUserMarginStart = r.MarginStart;
         }
-        int pipW = Math.Max(PipMinWidth, primaryW / 4);
-        int pipH = (int)Math.Round(pipW / aspect);
-        if (pipH < PipMinHeight)
+        if (pipUserMarginTop.HasValue)
         {
-            pipH = PipMinHeight;
-            pipW = (int)Math.Round(pipH * aspect);
+            pipUserMarginTop = r.MarginTop;
         }
-        secondaryWidget.SetSizeRequest(pipW, pipH);
+        pipContainer.SetSizeRequest(r.Width, r.Height);
+        pipContainer.SetMarginStart(r.MarginStart);
+        pipContainer.SetMarginTop(r.MarginTop);
+        // The wrapper uses Halign/Valign=Start with Margin{Start,Top}; explicitly zero the other margins in case anything previously set them on this widget.
+        pipContainer.SetMarginEnd(0);
+        pipContainer.SetMarginBottom(0);
+
+        // VideoArea.OnResize fires on size changes only — pure-position changes from a wrapper-margin update (drag-to-move, or window-resize-induced clamp where width is fixed) leave the wl_subsurface stranded at the previous screen position. Schedule a deferred RefreshGeometry so it fires after the queued layout pass settles (DEFAULT_IDLE runs after GTK's HIGH_IDLE layout phase). Coalesced so a flurry of drag updates is one refresh per frame, not N. RefreshGeometry's lastX/Y dedupe makes redundant calls free when geometry didn't actually change.
+        SchedulePipGeometryRefresh();
     }
 
-    // Single-press routing: snap active to the slot for this widget. The existing HotkeyMap routing for double-click → ToggleFullscreen still fires on NPress=2 because we don't claim the press event; the gesture continues to deliver subsequent presses with incrementing NPress.
+    private void SchedulePipGeometryRefresh()
+    {
+        if (pipGeometryRefreshScheduled)
+        {
+            return;
+        }
+        if (secondaryArea == null)
+        {
+            // GLArea path: GTK draws the FBO at the widget's actual screen position so there's no separate subsurface position to keep in sync. Nothing to schedule.
+            return;
+        }
+        pipGeometryRefreshScheduled = true;
+        GLib.Functions.IdleAdd(
+            (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
+            () =>
+            {
+                pipGeometryRefreshScheduled = false;
+                secondaryArea?.RefreshGeometry();
+                return false;
+            });
+    }
+
+    private void OnPipMoveDragBegin(Gtk.GestureDrag sender, Gtk.GestureDrag.DragBeginSignalArgs args)
+    {
+        if (pipContainer == null)
+        {
+            return;
+        }
+        // Capture state but DON'T claim yet — claiming here denies the sibling click gesture even when the user only meant to click. We claim from drag-update once motion exceeds PipMoveClaimThresholdPx, leaving small-motion "clicks" untouched so GestureClick.Released can fire normally.
+        pipMoveClaimed = false;
+        pipDragStartMarginStart = pipContainer.GetMarginStart();
+        pipDragStartMarginTop = pipContainer.GetMarginTop();
+        TryCaptureGestureStartInOverlay(sender);
+    }
+
+    private void OnPipMoveDragUpdate(Gtk.GestureDrag sender, Gtk.GestureDrag.DragUpdateSignalArgs args)
+    {
+        if (pipContainer == null)
+        {
+            return;
+        }
+        if (!pipMoveClaimed)
+        {
+            // Motion is reported in the dragged widget's local frame. We haven't moved the widget yet (no claim → no apply), so widget-local offsets are equivalent to screen-space offsets here — fine for thresholding. Once we claim and start applying moves, we switch to overlay-translated coords (TryGetGesturePointerInOverlay) for the stable reference frame.
+            if (Math.Abs(args.OffsetX) < PipMoveClaimThresholdPx && Math.Abs(args.OffsetY) < PipMoveClaimThresholdPx)
+            {
+                return;
+            }
+            pipMoveClaimed = true;
+            sender.SetState(Gtk.EventSequenceState.Claimed);
+        }
+        if (!TryGetGesturePointerInOverlay(sender, args.OffsetX, args.OffsetY, out double overlayX, out double overlayY))
+        {
+            return;
+        }
+        double dx = overlayX - pipGestureOverlayStartX;
+        double dy = overlayY - pipGestureOverlayStartY;
+        pipUserMarginStart = pipDragStartMarginStart + (int)Math.Round(dx);
+        pipUserMarginTop = pipDragStartMarginTop + (int)Math.Round(dy);
+        ApplyPipLayout();
+    }
+
+    private void OnPipResizeDragBegin(Gtk.GestureDrag sender, Gtk.GestureDrag.DragBeginSignalArgs args)
+    {
+        if (pipContainer == null)
+        {
+            return;
+        }
+        pipResizeStartWidth = pipContainer.GetAllocatedWidth();
+        TryCaptureGestureStartInOverlay(sender);
+        sender.SetState(Gtk.EventSequenceState.Claimed);
+        pipResizeActive = true;
+        // Anchoring choice: resize keeps the top-left fixed (pipContainer's margins don't change). The grip is in the bottom-right corner so the standard "drag the corner outward" UX maps to growing width/height. This is consistent with most window-manager corner-resize behaviors.
+    }
+
+    private void OnPipResizeDragUpdate(Gtk.GestureDrag sender, Gtk.GestureDrag.DragUpdateSignalArgs args)
+    {
+        if (pipContainer == null)
+        {
+            return;
+        }
+        if (!TryGetGesturePointerInOverlay(sender, args.OffsetX, args.OffsetY, out double overlayX, out double overlayY))
+        {
+            return;
+        }
+        double dx = overlayX - pipGestureOverlayStartX;
+        double dy = overlayY - pipGestureOverlayStartY;
+        double aspect = viewModel.Secondary?.VideoAspect ?? (16.0 / 9.0);
+        double dw = PipLayoutCalc.ProjectAspectResize(dx, dy, aspect);
+        pipUserWidth = pipResizeStartWidth + (int)Math.Round(dw);
+        ApplyPipLayout();
+    }
+
+    private void OnPipResizeDragEnd(Gtk.GestureDrag sender, Gtk.GestureDrag.DragEndSignalArgs args)
+    {
+        pipResizeActive = false;
+        SyncPipResizeGripVisibility();
+    }
+
+    private void OnPipMoveDragEnd(Gtk.GestureDrag sender, Gtk.GestureDrag.DragEndSignalArgs args)
+    {
+        pipMoveClaimed = false;
+        SyncPipResizeGripVisibility();
+    }
+
+
+
+    private void OnPipHoverControllerNotify(GObject.Object sender, GObject.Object.NotifySignalArgs args)
+    {
+        // Only the contains-pointer change drives the grip; ignore is-pointer (which fires whenever pointer transitions between the wrapper and its own descendants) and any other property notifications.
+        if (args.Pspec.GetName() != "contains-pointer")
+        {
+            return;
+        }
+        SyncPipResizeGripVisibility();
+    }
+
+    // Resolve the grip's visibility against the latest hover state + active-drag flags. Called from drag-end (to belatedly apply a hide that was suppressed mid-drag) and from the hover controller's contains-pointer notify handler. If any drag is active OR the pointer is currently inside the wrapper or a descendant, keep the grip visible; otherwise hide.
+    private void SyncPipResizeGripVisibility()
+    {
+        if (pipResizeGripWidget == null)
+        {
+            return;
+        }
+        bool keepVisible = pipMoveClaimed || pipResizeActive || (pipHoverController?.GetContainsPointer() ?? false);
+        pipResizeGripWidget.SetVisible(keepVisible);
+    }
+
+    // Capture the gesture's press point translated into videoOverlay-local coordinates. videoOverlay is a stationary common ancestor of every widget the PiP gestures attach to, so its coordinate space is invariant under the moves we apply during the drag.
+    private void TryCaptureGestureStartInOverlay(Gtk.GestureDrag sender)
+    {
+        sender.GetStartPoint(out double localX, out double localY);
+        var widget = sender.GetWidget();
+        if (widget == null)
+        {
+            return;
+        }
+        if (widget.TranslateCoordinates(videoOverlay, localX, localY, out double overlayX, out double overlayY))
+        {
+            pipGestureOverlayStartX = overlayX;
+            pipGestureOverlayStartY = overlayY;
+        }
+    }
+
+    // Translate the current pointer position (start point + signal offsets, both in widget-local) into videoOverlay-local coordinates. The widget the gesture is on may have moved between begin and now; TranslateCoordinates uses the widget's CURRENT allocation, so the return value is the pointer's true overlay-local position regardless of how many moves we've already applied. Returns false on the rare case where the widget has been unparented (gesture firing late during teardown).
+    private bool TryGetGesturePointerInOverlay(Gtk.GestureDrag sender, double offsetX, double offsetY, out double overlayX, out double overlayY)
+    {
+        sender.GetStartPoint(out double localX, out double localY);
+        var widget = sender.GetWidget();
+        if (widget == null)
+        {
+            overlayX = 0;
+            overlayY = 0;
+            return false;
+        }
+        return widget.TranslateCoordinates(videoOverlay, localX + offsetX, localY + offsetY, out overlayX, out overlayY);
+    }
+
+    // Click + drag wiring for the PiP body. Click fires on RELEASE so it doesn't pre-empt the drag-to-move gesture: when motion exceeds PipMoveClaimThresholdPx the drag-update handler calls SetState(Claimed), which transitions this GestureClick's view of the same sequence to Denied — and a Denied sequence's `released` signal does not fire. Sub-threshold motion never claims → release fires normally and runs the bound action (default: MouseClick1 → PlayPause, MouseDoubleClick1 → ToggleFullscreen). The primary's video widget keeps its existing fire-on-press behavior in MainWindow.cs's AttachClickToFocus (no drag attached there).
+    private void AttachPipBodyInputs(Gtk.Widget widget)
+    {
+        var clickGesture = Gtk.GestureClick.New();
+        clickGesture.Button = 0;
+        clickGesture.OnReleased += OnPipBodyReleased;
+        widget.AddController(clickGesture);
+    }
+
+    private void OnPipBodyReleased(Gtk.GestureClick sender, Gtk.GestureClick.ReleasedSignalArgs args)
+    {
+        uint button = sender.GetCurrentButton();
+        if (button == 0)
+        {
+            return;
+        }
+        var trigger = new Trigger.MouseClick(button, args.NPress);
+        var action = hotkeys.Lookup(trigger);
+        if (action != null)
+        {
+            ExecuteAction(action.Value);
+        }
+    }
+
+    // Single-press routing for the PRIMARY video widget — kept separate from the PiP body's drag-aware variant. Fires on press to preserve historical behavior; the primary has no drag-to-move so there's no conflict.
     private void AttachClickToFocus(Gtk.Widget widget, ViewModelMain.VideoSlot slot)
     {
         var clickGesture = Gtk.GestureClick.New();
