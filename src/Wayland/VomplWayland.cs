@@ -57,6 +57,16 @@ internal sealed partial class VomplVideoSurface : IDisposable
         SetGeometryNative(handle, x, y, clampedW, clampedH, clampedScale);
     }
 
+    // Place this subsurface directly above `sibling` (which must be a subsurface of the same parent — invariant enforced by the protocol). Used to put the picture-in-picture subsurface above the primary one. The native call commits the parent + flushes synchronously so stacking lands atomically rather than waiting for GTK's next redraw.
+    public void PlaceAbove(VomplVideoSurface sibling)
+    {
+        if (handle == IntPtr.Zero || sibling == null || sibling.handle == IntPtr.Zero)
+        {
+            return;
+        }
+        PlaceAboveNative(handle, sibling.handle);
+    }
+
     public int MakeCurrent()
     {
         if (handle == IntPtr.Zero)
@@ -211,6 +221,9 @@ internal sealed partial class VomplVideoSurface : IDisposable
 
     [LibraryImport(Lib, EntryPoint = "vompl_video_surface_set_geometry")]
     private static partial void SetGeometryNative(IntPtr vs, int x, int y, int w, int h, int bufferScale);
+
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_place_above")]
+    private static partial void PlaceAboveNative(IntPtr vs, IntPtr sibling);
 
     [LibraryImport(Lib, EntryPoint = "vompl_video_surface_make_current")]
     private static partial int MakeCurrentNative(IntPtr vs);

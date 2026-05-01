@@ -68,6 +68,14 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private int? currentSubtitleId;
 
+    // Display aspect ratio of the loaded source's video stream, computed from mpv's `dwidth`/`dheight` properties (display dimensions, with sample aspect ratio applied — i.e. the rectangle to render the video into for square-pixel output). Null when no file is loaded or the file has no video stream. Consumed by the PiP layout to size the secondary video widget to its content's aspect.
+    [ObservableProperty]
+    private double? videoAspect;
+
+    // Most-recent dwidth / dheight values, used to recompute VideoAspect when either lands. Both must be present and positive for the aspect to be derivable; otherwise VideoAspect goes back to null.
+    private long? lastDwidth;
+    private long? lastDheight;
+
     // Latest decision derived from `video-params/gamma`. Drives the Wayland subsurface's PQ image-description toggle and mpv's target-* targeting. Kept here as a plain field (no ObservableProperty) because the only consumer is MainWindow, which subscribes to SourceHdrChanged directly — a full ObservableObject property would add IPlayback surface area for a concern that's purely internal to the render path.
     private bool isSourceHdr;
 
@@ -149,6 +157,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("current-tracks/sub/id", MpvFormat.Int64);
             // chapter-list/count fires on file load and on any chapter add/remove. We re-walk the list on each fire. Observing /count rather than chapter-list itself is the same accommodation as track-list — MpvClient.ReadPropertyValue can't unpack NodeArray. The known edge case (a same-count list replacement, e.g. mpv-script chapter-add immediately followed by chapter-remove) is accepted: chapters change far less than tracks, and any file load changes the count anyway.
             h.ObserveProperty("chapter-list/count", MpvFormat.Int64);
+            // Display dimensions, fired together by mpv after a file's video stream is decoded enough to know its display aspect (sample aspect ratio applied). Either property changing recomputes VideoAspect; the synthesized initial fires land null and clear it. mpv reports them in pixel-correct units regardless of decoder, so VideoAspect stays correct for anamorphic sources.
+            h.ObserveProperty("dwidth", MpvFormat.Int64);
+            h.ObserveProperty("dheight", MpvFormat.Int64);
         });
     }
 
@@ -164,6 +175,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
         UpdateChapters(Array.Empty<MediaChapter>());
         // Preemptive eof-reached clear: same race rationale as the chapter clear. The previous file's eof-reached=true could otherwise survive past LoadFile and trip the playlist auto-advance handler's rising-edge gate against the just-loaded file.
         UpdateIsEofReached(false);
+        // Drop any cached dwidth/dheight from the previous file so VideoAspect goes null until the new file's properties land. Otherwise PiP geometry would briefly use the previous source's aspect for the period between LoadFile and mpv's first dwidth/dheight observation on the new file.
+        lastDwidth = null;
+        lastDheight = null;
+        VideoAspect = null;
         dispatcher.Post(h =>
         {
             h.Command("loadfile", path);
@@ -201,6 +216,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
     {
         bool pausedNow = IsPaused;
         dispatcher.Post(h => h.SetProperty("pause", pausedNow ? "no" : "yes"));
+    }
+
+    public void SetPaused(bool paused)
+    {
+        dispatcher.Post(h => h.SetProperty("pause", paused ? "yes" : "no"));
     }
 
     public void SetVolume(double percent)
@@ -374,6 +394,14 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 break;
             case "current-tracks/sub/id":
                 UpdateCurrentSubtitleId((int?)change.Value.AsInt64);
+                break;
+            case "dwidth":
+                lastDwidth = change.Value.AsInt64;
+                UpdateVideoAspect();
+                break;
+            case "dheight":
+                lastDheight = change.Value.AsInt64;
+                UpdateVideoAspect();
                 break;
             default:
                 // Log-and-skip rather than throw: MpvClient.PropertyChanged is a broadcast and an unrecognized name here would otherwise take down the whole event-drain loop. A future observer on the same client shouldn't be able to ambush us.
@@ -640,6 +668,19 @@ public sealed partial class Playback : ObservableObject, IPlayback
     internal void UpdateIsEofReached(bool? value)
     {
         IsEofReached = value ?? false;
+    }
+
+    // Recompute VideoAspect from the latest dwidth/dheight pair. Goes null when either dimension is missing or non-positive (no file loaded, no video stream, or pre-decode); the ObservableProperty setter dedups same-value writes so cycling between a known aspect and the same aspect after a Property re-fire doesn't emit a spurious change.
+    private void UpdateVideoAspect()
+    {
+        if (lastDwidth.HasValue && lastDheight.HasValue && lastDwidth.Value > 0 && lastDheight.Value > 0)
+        {
+            VideoAspect = (double)lastDwidth.Value / (double)lastDheight.Value;
+        }
+        else
+        {
+            VideoAspect = null;
+        }
     }
 
     // Internal so PlaybackTests can drive transition behavior directly without spinning up mpv's event pump (see test file comment). Keeps the higher-level dispatcher (OnMpvPropertyChanged) private — only the minimum transition surface is exposed.

@@ -37,14 +37,27 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     int? CurrentAudioId { get; }
     int? CurrentSubtitleId { get; }
 
+    // Whether the currently-loaded source's `video-params/gamma` is one of mpv's HDR transfer functions (PQ / HLG). False for SDR sources or when no file is loaded. Drives VideoContext's HDR policy and the diagnostic overlay's `source=` row. Promoted to the interface so per-video HDR policy lives behind the IPlayback seam — VideoContext doesn't need a concrete Playback reference.
+    bool IsSourceHdr { get; }
+
+    // The hwdec backend mpv settled on for the current source ("vaapi", "no", null when no file is loaded, etc.). Read by the diagnostic overlay's `hwdec=` row only.
+    string? HwdecCurrent { get; }
+
+    // Display aspect of the loaded source (dwidth/dheight, square-pixel rectangle the video should render into). Null when no file is loaded or no video stream is present. Drives the PiP layout's per-source aspect-correct sizing.
+    double? VideoAspect { get; }
+
     event Action? FileLoaded;
     event Action<int>? FileEnded;
     // Fires once per dispatcher-level track-list re-walk, AFTER the three per-kind properties (VideoTracks / AudioTracks / SubtitleTracks) have been updated on the main thread. Distinct from PropertyChanged on the lists individually because consumers (like the directory-preferences applier) need an "all three are settled" signal — relying on PropertyChanged for one specific kind misses files where that kind is empty (no notification fires for an empty→empty update due to the dedup gate). FileLoaded alone isn't enough either: FileLoaded fires before the dispatcher has finished re-walking and pushing the new lists.
     event Action? TracksReloaded;
+    // Fires on transitions of IsSourceHdr (PQ/HLG ↔ neither). VideoContext subscribes to drive its ApplyHdrPolicy.
+    event Action<bool>? SourceHdrChanged;
 
     void Initialize();
     void LoadFile(string path);
     void TogglePause();
+    // Set the paused state explicitly. Idempotent — calling SetPaused(true) on an already-paused playback is a no-op. The coordinator's no-selection PlayPause path uses this to converge two streams that have drifted into different pause states (TogglePause on each independently could leave them divergent if one was already at the target).
+    void SetPaused(bool paused);
     void Seek(double seconds);
     // Relative seek in source-content seconds (negative = backward). mpv handles edge clamping (won't seek before 0 or past duration). Same pre-load gate as Seek — no-op when no file is loaded.
     void SeekRelative(double seconds);
@@ -65,4 +78,9 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Relative volume change in percent points (e.g. +5 / -5). Implementations clamp against 0 and the active volume-max.
     void AdjustVolume(double deltaPercent);
     void ToggleMute();
+
+    // Set mpv's `target-prim`/`target-trc`/`target-peak` to the PQ/BT.2020 viewport so mpv emits PQ pass-through into the FBO. Caller must already have a PQ-tagged surface attached or the compositor will misinterpret the pixels. Inverse pair with DisableHdrOutput.
+    void EnableHdrOutput();
+    // Drop the PQ targets so mpv falls back to its auto target-* defaults (SDR tone-mapping handled by mpv's gl_video pipeline). See Playback.cs for why we don't pin gamma2.2 explicitly.
+    void DisableHdrOutput();
 }

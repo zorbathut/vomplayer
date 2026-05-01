@@ -55,6 +55,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private delegate int SeekLegacyEventCallback(IntPtr sender, IntPtr evt, IntPtr userData);
 
     private readonly Playback.Playback playback;
+    private readonly IRecentFiles recentFiles;
+    private readonly ITrackPreferences trackPreferences;
+    private readonly Services.IFilePicker filePicker;
+    private readonly Services.IUrlDownloader urlDownloader;
+    private readonly Services.IUrlPrompt urlPrompt;
     private readonly ViewModelMain viewModel;
     private readonly UserConfig userConfig;
     private readonly string configPath;
@@ -79,6 +84,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
     private readonly VideoSurface? videoSurface;
+    // Secondary (PiP) widget set. All null when PiP is off; populated by EnablePip / torn down by DisablePip. See MainWindow.Pip.cs.
+    private VideoArea? secondaryArea;
+    private VideoView? secondaryView;
+    private VideoSurface? secondarySurface;
+    private Playback.Playback? secondaryPlayback;
     private readonly DiagnosticOverlay diagnosticOverlay;
     // Fullscreen state is a mirror of Gtk.Window.Fullscreened — the notify::fullscreened handler is authoritative. This lets compositor/WM-initiated fullscreen exits (Super-key, window menu, tiling WM shortcut) restore the controls even though our own toggles didn't run.
     private bool isFullscreen;
@@ -144,6 +154,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             throw new ArgumentException("configPath must be non-empty", nameof(configPath));
         }
         this.playback = playback;
+        this.recentFiles = recentFiles;
+        this.trackPreferences = trackPreferences;
         this.userConfig = userConfig;
         this.configPath = configPath;
         // Derive the runtime keymap from the config now that we're past gtk_init. Trigger parsing logs and skips bad entries rather than aborting load — a single typo in config.toml shouldn't lock the user out of every other binding.
@@ -157,13 +169,13 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         InstallVomplCss();
 
-        var filePicker = new FilePickerGtk(this);
+        this.filePicker = new FilePickerGtk(this);
         // Per-URL cache root sits under our regular XDG-aware cache dir (NOT /tmp — /tmp clears on reboot, which would make the 24h-mtime sweep mostly redundant). The cache class wipes stale entries on Cleanup(); we run that once at startup, and YtDlpDownloader runs it again per download to bound disk for long-running sessions.
         var urlDownloadCache = new UrlDownloadCache(UserDataPaths.UrlDownloadCacheRoot);
         urlDownloadCache.Cleanup(DateTimeOffset.UtcNow, msg => Console.Error.WriteLine($"[vompl] {msg}"));
-        var urlDownloader = new YtDlpDownloader(urlDownloadCache, "yt-dlp");
-        var urlPrompt = new UrlPromptGtk(this);
-        viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
+        this.urlDownloader = new YtDlpDownloader(urlDownloadCache, "yt-dlp");
+        this.urlPrompt = new UrlPromptGtk(this);
+        viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt, forceSdr);
         viewModel.InitialFile = initialFile;
 
         Gtk.Widget videoWidget;
@@ -178,16 +190,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             videoArea = area;
             videoSurface = surface;
             videoWidget = area;
-            // Combined HDR policy: enable HDR viewport only when both the source is PQ/HLG AND the current output advertises HDR. Two signals drive re-evaluation — Playback.SourceHdrChanged (per-video) and VideoSurface.CurrentOutputHdrChanged (output probe completes, user drags window cross-monitor, monitor HDR toggled). --sdr skips the subscriptions entirely so an explicit "force SDR" request can't be overridden by either signal; hdrActiveState is stamped Forced here so the diagnostic overlay renders "SDR (--sdr)" instead of plain "SDR" and the override is visible at a glance.
-            if (!forceSdr)
-            {
-                playback.SourceHdrChanged += OnSourceHdrChanged;
-                surface.CurrentOutputHdrChanged += OnCurrentOutputHdrChanged;
-            }
-            else
-            {
-                hdrActiveState = HdrActiveState.Forced;
-            }
+            // VideoContext (inside the VM) owns the per-instance HDR policy now: it subscribes to playback.SourceHdrChanged in its ctor and to surface.CurrentOutputHdrChanged when AttachHdrSink runs. AttachHdrSink fires from OnVideoRenderContextReadyWayland (post-realize) so SetHdr's pre-stage SDR call lands on a ready surface.
         }
         else
         {
@@ -258,8 +261,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         noVideoBg.SetVexpand(true);
         videoOverlay.AddOverlay(noVideoBg);
 
-        // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Constructed before BuildMenuBar to match the file's "assign then build menu" pattern (cf. viewModel at line 106); the menu action closure resolves `this.diagnosticOverlay` lazily at invoke time, so the ordering is stylistic rather than load-bearing.
-        diagnosticOverlay = new DiagnosticOverlay(playback, videoSurface, () => hdrActiveState == HdrActiveState.Hdr);
+        // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Constructed before BuildMenuBar to match the file's "assign then build menu" pattern (cf. viewModel at line 106); the menu action closure resolves `this.diagnosticOverlay` lazily at invoke time, so the ordering is stylistic rather than load-bearing. Reads HDR / source-HDR / hwdec from the current target (Selected ?? Primary) — providers re-resolve every refresh so a selection swap propagates within the next 1 Hz tick.
+        diagnosticOverlay = new DiagnosticOverlay(() => viewModel.SingleTarget, () => GetTargetVideoSurfaceForDiagnostic());
         videoOverlay.AddOverlay(diagnosticOverlay.Widget);
 
         // Playlist panel sits to the right of the video. Hidden by default; toggled by "View → Playlist" or auto-shown when a multi-file drop populates the playlist (so first-time users see the result of their drop without hunting through menus). Wholesale-rebuild on Playlist.Changed.
@@ -275,8 +278,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         menuBar = BuildMenuBar(app);
 
+        // Stream-selector toolbar — built before SetChild so it has its rootBox slot reserved. Hidden by default; visibility flips on IsPipEnabled via UpdateStreamSelectorVisibility. Sits between menubar and video region in windowed mode (a solid layout row that displaces the video area, mirroring controlsBox in windowed mode).
+        BuildStreamSelectorToolbar();
+
         rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         rootBox.Append(menuBar);
+        rootBox.Append(streamSelectorToolbar!);
         rootBox.Append(videoAndPlaylistRow);
         rootBox.Append(controlsBox);
         SetChild(rootBox);
@@ -312,11 +319,13 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         motionController.OnMotion += OnWindowPointerMotion;
         AddController(motionController);
 
-        // Click on the video widget routes through the HotkeyMap so any button + click-count combination can be bound to any action. Default keymap binds MouseDoubleClick1 (double-left) to ToggleFullscreen, matching the pre-customization behavior. Button=0 means the gesture fires for any button; OnVideoClickPressed reads the actual button via GetCurrentButton(). GestureClick delivers `pressed` for each press in a sequence with NPress incrementing — so a single-click bind also fires once on the first press of a double-click, an inherent property the user has to live with. Note this gesture now claims press/release for every button (formerly only BUTTON_PRIMARY): a future "right-click context menu on video" would need to coexist (e.g., by using a sibling GestureClick at a higher phase or by routing through the HotkeyMap).
-        var clickGesture = Gtk.GestureClick.New();
-        clickGesture.Button = 0;
-        clickGesture.OnPressed += OnVideoClickPressed;
-        videoWidget.AddController(clickGesture);
+        // Click on the video widget routes through the HotkeyMap (default: MouseDoubleClick1 → ToggleFullscreen) AND, on single-press (NPress=1), snaps the active slot to this widget — so when PiP is on, clicking either video focuses it. Button=0 means the gesture fires for any button; OnPressed reads the actual button via GetCurrentButton(). GestureClick delivers `pressed` for each press in a sequence with NPress incrementing — so a single-click action also fires once on the first press of a double-click, an inherent property the user has to live with.
+        AttachClickToFocus(videoWidget, ViewModelMain.VideoSlot.Primary);
+
+        // Per-widget drop target on the primary video region. Always routes to Primary regardless of active slot — so a drop on the main video area can't accidentally land in Secondary just because Secondary is currently active. Window-level drop (registered below) is the active-aware fallback for chrome / margin drops.
+        var primaryDrop = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
+        primaryDrop.OnDrop += OnPrimaryFileDrop;
+        videoWidget.AddController(primaryDrop);
 
         // Drag-and-drop loading. Register a Gdk.FileList drop target — both single- and multi-file drags deserialize into a 1-or-N element FileList from any file-manager / browser source that offers text/uri-list (universal). GirCore 0.7.0 doesn't bind GdkFileList.GetFiles, so we walk the underlying GSList ourselves via P/Invoke (see GdkFileListGetFiles + ExtractAndExpandPaths). Window-level target REPLACES the playlist; the panel-level target wired below APPENDS. GTK4's drop dispatch picks the topmost widget under the pointer that matches the offered formats, so a drop on the panel triggers ONLY the panel's target — replace and append are properly disjoint without a propagation dance. Copy|Move|Link is accepted because Wayland/X11 sources negotiate the action set with the destination; we read the file either way.
         var dropTarget = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
@@ -332,6 +341,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         OnNotify += OnWindowNotify;
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        viewModel.PropertyChanged += OnViewModelPipPropertyChanged;
         playback.PropertyChanged += OnPlaybackPropertyChangedForSeekSettle;
         playback.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
         OnCloseRequest += OnWindowCloseRequest;
@@ -569,12 +579,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         muteButton.SetTooltipText(viewModel.IsMuted ? "Unmute" : "Mute");
     }
 
-    // Wayland path: pre-stage the SDR image description on the subsurface synchronously, before any frame can render. Necessary to cover three paths that ApplyHdrPolicy alone doesn't reach: (a) `--sdr` mode, where the policy event subscriptions are skipped entirely; (b) first-SDR-file in a fresh process, where the source-gamma observation arrives as null→bt.1886 and never crosses isSourceHdr's transition gate, so SourceHdrChanged never fires; (c) any compositor whose first wl_surface.enter races ahead of our bridge subscription (the comment in TryCreateRenderContext acknowledges the first enter is often missed). In all three, without this kickoff the subsurface stays untagged and KWin's HDR-aware compositor blows out gamma22 SDR output the same way the original bug did. We deliberately do NOT touch mpv's target-* options here — that interacts badly with mpv's auto resolution (tried, reverted) and ApplyHdrPolicy will set them appropriately when it does run for HDR sources.
+    // Wayland path: hand the IHdrSink to the per-context HDR policy so it can pre-stage the SDR image description (synchronously, before any frame renders), subscribe to output-HDR transitions, and run an initial ApplyHdrPolicy. AttachHdrSink encapsulates that sequence — see its docstring for the three pre-stage edge cases it covers.
     private void OnVideoRenderContextReadyWayland()
     {
         if (videoSurface != null)
         {
-            videoSurface.SetHdr(false);
+            viewModel.Primary.AttachHdrSink(videoSurface);
         }
         viewModel.OnRenderContextReady();
     }
@@ -590,87 +600,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         viewModel.OnRenderContextReady();
     }
 
-    // Outcome of the most recent ApplyHdrPolicy. Kept as a four-state enum (rather than a bool) so the stderr log on transition into Failed can distinguish "compositor refused" from "intentional SDR" — the diagnostic overlay collapses every non-Hdr state to "SDR" and doesn't care about the internal distinction, but ApplyHdrPolicy does.
-    private enum HdrActiveState
-    {
-        // Subsurface untagged. Default pre-first-apply, or the explicit outcome when source or display is SDR.
-        Sdr,
-        // HDR tagging applied to the subsurface and mpv advanced to PQ targets.
-        Hdr,
-        // HDR was requested (source PQ/HLG + display HDR-capable) but VideoSurface.SetHdr(true) returned non-zero. Pixels scan out as SDR.
-        Failed,
-        // --sdr command-line override in effect. ApplyHdrPolicy never runs; state stays here for the process lifetime.
-        Forced,
-    }
-
-    // Latest value from Playback.SourceHdrChanged. Playback fires on transitions only, not on every frame, so caching here lets ApplyHdrPolicy combine it with the current output bit on output-side changes too.
-    private bool lastSourceHdr;
-    // Initialized in the constructor: Forced when --sdr is in effect (policy never runs), Sdr otherwise (default pre-first-apply — subsurface untagged, equivalent at the pixel level to an explicit SDR policy).
-    private HdrActiveState hdrActiveState;
-    private static readonly bool logHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
-
-    private void OnSourceHdrChanged(bool isHdr)
-    {
-        lastSourceHdr = isHdr;
-        ApplyHdrPolicy();
-    }
-
-    private void OnCurrentOutputHdrChanged()
-    {
-        ApplyHdrPolicy();
-    }
-
-    // Single point of decision for the HDR-viewport question. Drives the wp_color_management_v1 tag on the subsurface and mpv's target-* options. Policy: PQ tag iff source is HDR (regardless of display HDR-capability). Rationale: mpv-via-libmpv is forced to use the older gl_video pipeline whose tone-map curve clips highlights hard at the source mastering-display peak (1000 nits → all-white SDR for typical files); KWin 6.x runs HDR-aware compositing with libplacebo, which has nicer curves. By tagging PQ and having mpv emit pass-through PQ, we hand HDR→SDR conversion to the compositor and inherit its tone-map. Caveats: we haven't instrumented the curve-equality claim ("matches gpu-next") — KWin's tonemap quality depends on its libplacebo version, the user's KDE settings, and the per-output ICC profile if any; on a misconfigured compositor this could be worse than mpv's tonemap, but in our testing the trade is a clear win. Display HDR-capability is no longer load-bearing for the policy — it's still tracked for the diagnostic overlay's `display=` row, but doesn't gate the tag. Window-spanning a PQ-tagged subsurface across HDR + SDR outputs is now correct by construction: the compositor pass-throughs on the HDR side and tonemaps on the SDR side per-output. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable (else mpv tone-maps to gamma22 — fallback for non-CM compositors). On disable, mirror in reverse order so the next SDR frame lands on an SDR-tagged surface (GAMMA22/BT.709) — see VideoSurface.SetHdr for why we tag SDR explicitly rather than leave the surface in compositor-defined territory.
-    private void ApplyHdrPolicy()
-    {
-        if (videoSurface == null)
-        {
-            return;
-        }
-        bool? outputHdr = videoSurface.CurrentOutputIsHdr;
-        bool wantHdr = lastSourceHdr;
-        HdrActiveState newState;
-        if (wantHdr)
-        {
-            bool applied = videoSurface.SetHdr(true) == 0;
-            if (applied)
-            {
-                playback.EnableHdrOutput();
-                newState = HdrActiveState.Hdr;
-            }
-            else
-            {
-                // Shim refused (no wp_color_manager_v1 advertised, description build failed, etc). Do NOT advance mpv to PQ targets — that would leave mpv rendering PQ-encoded pixels into an untagged surface, which the compositor would interpret as sRGB and display as blown-out whites. Staying SDR on both halves is safe.
-                newState = HdrActiveState.Failed;
-            }
-        }
-        else
-        {
-            // SetHdr(false) attaches the SDR (GAMMA22/BT.709) image description. -1 means the compositor doesn't advertise wp_color_manager_v1 (or description build failed) — surface stays untagged, which is implementation-defined per the wp_color_management_v1 spec. On most compositors that's fine (treated as sRGB); on KWin with an HDR output present, an untagged surface is misinterpreted and SDR output blows out. We can't do anything about it from here, but log so a future bug report ("blown out on a non-KWin compositor") is diagnosable.
-            int sdrRc = videoSurface.SetHdr(false);
-            if (sdrRc != 0 && hdrActiveState != HdrActiveState.Sdr)
-            {
-                Console.Error.WriteLine("[vompl] hdr: SDR tag attach failed (no wp_color_manager_v1) — surface left untagged; if SDR output looks blown out, your compositor is misinterpreting untagged surfaces");
-            }
-            playback.DisableHdrOutput();
-            newState = HdrActiveState.Sdr;
-        }
-        if (newState != hdrActiveState)
-        {
-            // Silent error handling is banned (CLAUDE.md). Failed = the user asked for HDR and the compositor refused; surface it unconditionally rather than gating on VOMPL_LOG_HDR. Only logged on transitions into Failed so a stuck-in-Failed state doesn't spam.
-            if (newState == HdrActiveState.Failed)
-            {
-                Console.Error.WriteLine("[vompl] hdr: requested but compositor refused (no wp_color_manager_v1 or description build failed) — staying SDR");
-            }
-        }
-        if (logHdr)
-        {
-            string outStr = outputHdr.HasValue ? (outputHdr.Value ? "HDR" : "SDR") : "unknown";
-            Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} display={outStr} → {newState} (was {hdrActiveState})");
-        }
-        hdrActiveState = newState;
-    }
-
     private void OnVideoRenderFailed(int code)
     {
         Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
@@ -680,13 +609,27 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private static void InstallVomplCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; }");
+        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; } .vompl-selected-video { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.9); } .vompl-stream-toolbar { padding: 4px 6px; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
     // Single keyboard dispatch path. The capture-phase EventControllerKey runs before any focused-child controller. Trigger.MakeKey canonicalizes the keyval (lowercase) and masks the modifier state to the GTK default-mod-mask, so CapsLock-on `f` and Shift+f match their bound forms regardless of whether the binding was authored as "f" or "<Shift>F". ExecuteAction returns true to consume the key, false to let it propagate (used for ExitFullscreen-when-not-fullscreen, so Escape remains available to dialogs/popovers we host in the future).
     private bool OnWindowKeyPressed(Gtk.EventControllerKey sender, Gtk.EventControllerKey.KeyPressedSignalArgs args)
     {
+        // In fullscreen, treat any key press as activity: un-hide controls + stream-selector toolbar (if currently hidden) and re-arm the auto-hide timer. Without this, a user keyboard-cueing PiP without mouse motion would silently lose the toolbar selection after 2s of mouse idleness — the auto-hide reset would clear SelectedSlot mid-sequence. Mouse motion already arms the timer (OnWindowPointerMotion); this extends the same affordance to keyboard input.
+        if (isFullscreen)
+        {
+            if (!controlsBox.GetVisible())
+            {
+                controlsBox.SetVisible(true);
+            }
+            if (streamSelectorToolbar != null && viewModel.IsPipEnabled && !streamSelectorToolbar.GetVisible())
+            {
+                streamSelectorToolbar.SetVisible(true);
+            }
+            SetCursorFromName(null);
+            ArmControlsHideTimer();
+        }
         var trigger = Trigger.MakeKey(args.Keyval, args.State);
         var action = hotkeys.Lookup(trigger);
         if (action == null)
@@ -727,6 +670,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         if (!controlsBox.GetVisible())
         {
             controlsBox.SetVisible(true);
+        }
+        // Restore the top stream-selector toolbar alongside the bottom controls when the user moves the mouse. Visibility is gated by IsPipEnabled — a single-stream session never shows the toolbar.
+        if (streamSelectorToolbar != null && viewModel.IsPipEnabled && !streamSelectorToolbar.GetVisible())
+        {
+            streamSelectorToolbar.SetVisible(true);
         }
         SetCursorFromName(null);
         ArmControlsHideTimer();
@@ -808,21 +756,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         GSListFree(gslist);
 
         return MediaExtensions.ExpandPaths(raw, msg => Console.Error.WriteLine($"[vompl] dnd: {msg}"));
-    }
-
-    private void OnVideoClickPressed(Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
-    {
-        uint button = sender.GetCurrentButton();
-        if (button == 0)
-        {
-            return;
-        }
-        var trigger = new Trigger.MouseClick(button, args.NPress);
-        var action = hotkeys.Lookup(trigger);
-        if (action != null)
-        {
-            ExecuteAction(action.Value);
-        }
     }
 
     // Single dispatch site for HotkeyMap-bound actions. Returns true when the input has been consumed so the key controller can short-circuit propagation; the click handler ignores the return value because GestureClick doesn't propagate the same way. ExitFullscreen returns false when not actually fullscreen so the bound key (typically Escape) doesn't get silently swallowed in non-fullscreen state — matches the pre-customization behavior.
@@ -1020,6 +953,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 videoOverlay.AddOverlay(controlsBox);
             }
             controlsBox.SetVisible(true);
+            ReparentStreamSelectorForFullscreen(true);
             ArmControlsHideTimer();
         }
         else
@@ -1040,6 +974,47 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 rootBox.Append(controlsBox);
             }
             controlsBox.SetVisible(true);
+            ReparentStreamSelectorForFullscreen(false);
+        }
+    }
+
+    // Reparent the stream-selector toolbar between rootBox (windowed: a solid layout row that displaces the video) and videoOverlay (fullscreen: floats at the top of the video). Same pattern as controlsBox below, but anchored at top. The toolbar's visibility is governed independently by IsPipEnabled, so this method only handles the parent + alignment + CSS swap.
+    private void ReparentStreamSelectorForFullscreen(bool fullscreen)
+    {
+        if (streamSelectorToolbar == null)
+        {
+            return;
+        }
+        if (fullscreen)
+        {
+            if (streamSelectorToolbar.Parent == rootBox)
+            {
+                rootBox.Remove(streamSelectorToolbar);
+            }
+            streamSelectorToolbar.SetValign(Gtk.Align.Start);
+            streamSelectorToolbar.SetHalign(Gtk.Align.Start);
+            streamSelectorToolbar.RemoveCssClass("vompl-chrome");
+            streamSelectorToolbar.AddCssClass("osd");
+            if (streamSelectorToolbar.Parent != videoOverlay)
+            {
+                videoOverlay.AddOverlay(streamSelectorToolbar);
+            }
+        }
+        else
+        {
+            if (streamSelectorToolbar.Parent == videoOverlay)
+            {
+                videoOverlay.RemoveOverlay(streamSelectorToolbar);
+            }
+            streamSelectorToolbar.RemoveCssClass("osd");
+            streamSelectorToolbar.AddCssClass("vompl-chrome");
+            streamSelectorToolbar.SetValign(Gtk.Align.Fill);
+            streamSelectorToolbar.SetHalign(Gtk.Align.Fill);
+            if (streamSelectorToolbar.Parent != rootBox)
+            {
+                // Re-insert at the slot the original BuildStreamSelectorToolbar placed it: between menubar (index 0) and videoAndPlaylistRow (index 1 in the original layout). InsertChildAfter places it after menubar.
+                rootBox.InsertChildAfter(streamSelectorToolbar, menuBar);
+            }
         }
     }
 
@@ -1075,6 +1050,15 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         if (isFullscreen)
         {
             controlsBox.SetVisible(false);
+            // Top-of-screen stream-selector hides with the bottom controls. On hide, additionally reset SelectedSlot to null so the user's "I stopped touching it" gesture restores broadcast/sync mode. The reset is fullscreen-specific by design: in windowed mode the toolbar is always visible and the selection persists until the user explicitly clicks again.
+            if (streamSelectorToolbar != null && viewModel.IsPipEnabled)
+            {
+                streamSelectorToolbar.SetVisible(false);
+            }
+            if (viewModel.SelectedSlot != null)
+            {
+                viewModel.SetSelected(null);
+            }
             // "none" is a standard CSS cursor name; GTK maps it to a blank cursor on every backend we care about. Setting it on the window covers the video region too: the wl_subsurface is opaque to GTK, but its input region is empty (see hdr_helper.c), so pointer events route to the parent GTK surface and the window-level cursor is what the compositor draws there.
             SetCursorFromName("none");
             videoOverlay.QueueDraw();
@@ -1099,10 +1083,13 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
         playback.PropertyChanged -= OnPlaybackPropertyChangedForSeekSettle;
         playback.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
-        playback.SourceHdrChanged -= OnSourceHdrChanged;
-        if (videoSurface != null)
+        viewModel.PropertyChanged -= OnViewModelPipPropertyChanged;
+        viewModel.Primary.PropertyChanged -= OnPrimaryContextPropertyChangedForToolbar;
+        // VideoContext (via viewModel.Dispose below) handles its own playback.SourceHdrChanged unsubscribe and DetachHdrSink. MainWindow no longer touches HDR plumbing.
+        // If PiP is on, tear it down so the secondary Playback/Surface are disposed under our control before the window's GTK widgets go.
+        if (viewModel.IsPipEnabled)
         {
-            videoSurface.CurrentOutputHdrChanged -= OnCurrentOutputHdrChanged;
+            DisablePip();
         }
         // Disconnect the raw signal BEFORE releasing our delegate reference. GTK flushes pending events during window destruction, which can happen after this handler returns; if we dropped the delegate root first, a late dispatch would land in freed memory. Disconnect is synchronous — once it returns, the function pointer is unwired.
         if (seekLegacyHandlerId != 0 && seekLegacyControllerHandle != IntPtr.Zero)

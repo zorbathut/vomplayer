@@ -11,8 +11,9 @@ namespace Vomplayer.Controls;
 // SetActivateOnSingleClick(false): the default. Single-click selects, double-click activates → PlayPlaylistItem. Single-click activate would fight drag-reorder (every press would also fire row-activated and reload the file the user was trying to drag).
 public sealed class PlaylistPanel : IDisposable
 {
-    private readonly Playlist playlist;
-    private readonly Action<int> playItem;
+    // Mutable so Rebind can swap them when the active VideoContext changes (Phase 5: PiP active swap). The Changed subscription is moved across with the swap so the panel always tracks the bound playlist.
+    private Playlist playlist;
+    private Action<int> playItem;
     private readonly Gtk.ListBox listBox;
     private readonly Gtk.ScrolledWindow scrolledWindow;
 
@@ -62,6 +63,29 @@ public sealed class PlaylistPanel : IDisposable
         {
             return listBox;
         }
+    }
+
+    // Swap the bound playlist + activation callback. Used by MainWindow when the active video changes during PiP (the panel should reflect whichever video is currently active). The Changed subscription is moved atomically and a Rebuild fires immediately so the panel reflects the new playlist's state.
+    public void Rebind(Playlist newPlaylist, Action<int> newPlayItem)
+    {
+        if (newPlaylist == null)
+        {
+            throw new ArgumentNullException(nameof(newPlaylist));
+        }
+        if (newPlayItem == null)
+        {
+            throw new ArgumentNullException(nameof(newPlayItem));
+        }
+        if (ReferenceEquals(newPlaylist, playlist))
+        {
+            playItem = newPlayItem;
+            return;
+        }
+        playlist.Changed -= Rebuild;
+        playlist = newPlaylist;
+        playItem = newPlayItem;
+        playlist.Changed += Rebuild;
+        Rebuild();
     }
 
     private void OnRowActivated(Gtk.ListBox sender, Gtk.ListBox.RowActivatedSignalArgs args)

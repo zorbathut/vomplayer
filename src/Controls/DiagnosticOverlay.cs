@@ -1,18 +1,20 @@
 using System;
+using Vomplayer.ViewModels;
 using Vomplayer.Wayland;
 
 namespace Vomplayer.Controls;
 
-// Toggleable diagnostic panel for hwdec / source-HDR / output-HDR / VRR. The underlying Widget is added as an overlay child of MainWindow.videoOverlay, anchored top-right. Updates are timer-driven (1 Hz) rather than observable-bound: the overlay's commit cadence must stay well below KWin's VRR-engage hysteresis, and binding to per-frame properties like time-pos would defeat that. Reads data directly from the concrete Playback + (optional) VideoSurface — no VM plumbing.
+// Toggleable diagnostic panel for hwdec / source-HDR / output-HDR / VRR. The underlying Widget is added as an overlay child of MainWindow.videoOverlay, anchored top-right. Updates are timer-driven (1 Hz) rather than observable-bound: the overlay's commit cadence must stay well below KWin's VRR-engage hysteresis, and binding to per-frame properties like time-pos would defeat that.
+//
+// Reads from a Func<VideoContext> provider so MainWindow can swap which context the overlay reflects when the active video changes (Phase 5+); in Phase 2 the provider always returns Primary. The VideoSurface accessor is similarly callback-shaped: Phase 5+ swaps it to point at the active video's surface.
 //
 // Not a Gtk.Box subclass: GirCore's GObject subclassing story is fragile. Composition over inheritance — we own a Gtk.Box and expose it via Widget.
 public sealed class DiagnosticOverlay : IDisposable
 {
     private const uint UpdateIntervalMs = 1000;
 
-    private readonly Vomplayer.Playback.Playback playback;
-    private readonly VideoSurface? videoSurface;
-    private readonly Func<bool> getHdrActive;
+    private readonly Func<VideoContext> activeContextProvider;
+    private readonly Func<VideoSurface?> activeVideoSurfaceProvider;
     private readonly Gtk.Box box;
     private readonly Gtk.Label[] labels;
 
@@ -27,22 +29,24 @@ public sealed class DiagnosticOverlay : IDisposable
         }
     }
 
-    // getHdrActive: returns true iff the player has actually HDR-tagged the subsurface (MainWindow.ApplyHdrPolicy's Hdr outcome). Every other state — intentional SDR, --sdr override, shim refusal, pre-first-apply default — collapses to false and renders as "SDR"; the Failed-specific distinction is kept internal to ApplyHdrPolicy for the stderr log. Shaped as a callback rather than a concrete MainWindow reference because the HDR policy isn't conceptually owned by MainWindow — it's currently housed there but belongs on a dedicated HdrPolicy object whenever that refactor lands.
-    //
-    // Called on the main thread from the 1 Hz OnTick. ApplyHdrPolicy also runs on the main thread (both OnSourceHdrChanged and OnCurrentOutputHdrChanged are posted there), so there's no cross-thread concern with the current caller. If a future producer writes the backing field from off-main, that invariant breaks and the read needs hardening.
-    public DiagnosticOverlay(Vomplayer.Playback.Playback playback, VideoSurface? videoSurface, Func<bool> getHdrActive)
+    // Convenience overload for the common case where the surface is fixed for the overlay's lifetime (Phase 2 / single-context, or Phase 5+ when active wraps the same Wayland surface). Callers that want active-aware surface routing should use the Func overload directly.
+    public DiagnosticOverlay(Func<VideoContext> activeContextProvider, VideoSurface? videoSurface)
+        : this(activeContextProvider, () => videoSurface)
     {
-        if (playback == null)
+    }
+
+    public DiagnosticOverlay(Func<VideoContext> activeContextProvider, Func<VideoSurface?> activeVideoSurfaceProvider)
+    {
+        if (activeContextProvider == null)
         {
-            throw new ArgumentNullException(nameof(playback));
+            throw new ArgumentNullException(nameof(activeContextProvider));
         }
-        if (getHdrActive == null)
+        if (activeVideoSurfaceProvider == null)
         {
-            throw new ArgumentNullException(nameof(getHdrActive));
+            throw new ArgumentNullException(nameof(activeVideoSurfaceProvider));
         }
-        this.playback = playback;
-        this.videoSurface = videoSurface;
-        this.getHdrActive = getHdrActive;
+        this.activeContextProvider = activeContextProvider;
+        this.activeVideoSurfaceProvider = activeVideoSurfaceProvider;
 
         box = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         box.SetHalign(Gtk.Align.End);
@@ -117,21 +121,22 @@ public sealed class DiagnosticOverlay : IDisposable
 
     private DiagnosticSnapshot Snapshot()
     {
+        var ctx = activeContextProvider();
+        var surface = activeVideoSurfaceProvider();
         VrrClassification vrrClass = VrrClassification.Unknown;
         int measuredHzCenti = 0;
-        bool? displayHdr = null;
-        bool isWaylandPath = videoSurface != null;
-        if (videoSurface != null)
+        bool? displayHdr = ctx.HdrSink?.CurrentOutputIsHdr;
+        bool isWaylandPath = surface != null;
+        if (surface != null)
         {
-            vrrClass = videoSurface.GetVrrClassification();
-            measuredHzCenti = videoSurface.VrrMeasuredHzCenti;
-            displayHdr = videoSurface.CurrentOutputIsHdr;
+            vrrClass = surface.GetVrrClassification();
+            measuredHzCenti = surface.VrrMeasuredHzCenti;
         }
         return new DiagnosticSnapshot(
-            Hwdec: playback.HwdecCurrent,
-            IsSourceHdr: playback.IsSourceHdr,
+            Hwdec: ctx.Playback.HwdecCurrent,
+            IsSourceHdr: ctx.Playback.IsSourceHdr,
             DisplayIsHdr: displayHdr,
-            HdrActive: getHdrActive(),
+            HdrActive: ctx.ActiveHdrState == VideoContext.HdrActiveState.Hdr,
             VrrClass: vrrClass,
             VrrMeasuredHzCenti: measuredHzCenti,
             IsWaylandPath: isWaylandPath);

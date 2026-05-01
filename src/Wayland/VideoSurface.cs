@@ -8,7 +8,7 @@ namespace Vomplayer.Wayland;
 
 // Orchestrates the Wayland subsurface lifecycle against a Gtk.Window + VideoArea pair.
 // Constructor is trivial — stores references and hooks window realize/unrealize + area geometry changes. EGL/subsurface work runs in OnRealize, by which time MainWindow has connected RenderContextReady / RenderFailed. Render loop: mpv update callback (mpv thread) → coalesced IdleAdd → main-thread Render = MakeCurrent + mpv_render_context_render + Swap + ReportSwap.
-public sealed partial class VideoSurface : IDisposable
+public sealed partial class VideoSurface : IDisposable, IHdrSink
 {
     private const string GtkLib = "gtk-4";
 
@@ -116,6 +116,26 @@ public sealed partial class VideoSurface : IDisposable
 
         // Static-event subscription — must be unhooked in Dispose or we'd leak this VideoSurface for the process lifetime. The Bridge-side subscription is hooked/unhooked with the VomplVideoSurface lifetime in TryCreateRenderContext / TearDown.
         WaylandOutputRegistry.IsHdrChanged += OnRegistryIsHdrChanged;
+
+        // If the GTK window is already realized at construction time — the case for the lazily-created PiP secondary VideoSurface in MainWindow.EnablePip() — OnRealize will never fire, leaving `surface` null forever. Run the realize handler synchronously so the subsurface is created on this thread, before any caller can call into us. Primary VideoSurface (constructed pre-realize from MainWindow's ctor) takes the normal event-driven path.
+        if (window.GetRealized())
+        {
+            OnWindowRealize(window, EventArgs.Empty);
+        }
+    }
+
+    // Stack this subsurface above `other` in the parent's z-order. Both must be subsurfaces of the same parent (enforced by the underlying protocol; this wrapper just forwards). Used by MainWindow.EnablePip after constructing the secondary so the PiP composites above the primary's video buffer.
+    public void PlaceAbove(VideoSurface other)
+    {
+        if (other == null)
+        {
+            throw new ArgumentNullException(nameof(other));
+        }
+        if (surface == null || other.surface == null)
+        {
+            return;
+        }
+        surface.PlaceAbove(other.surface);
     }
 
     // Called by MainWindow via playback.AttachRenderSurface(dispatcher => videoSurface.SetMpvDispatcher(dispatcher)). If the window is already realized, the render context is built now; otherwise the dispatcher is stashed and the render context is built on OnRealize. Internal because MpvDispatcher is internal.

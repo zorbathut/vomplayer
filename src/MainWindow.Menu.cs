@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using Vomplayer.Playback;
 using Vomplayer.UserData;
+using Vomplayer.ViewModels;
 
 namespace Vomplayer;
 
@@ -19,6 +20,7 @@ public sealed partial class MainWindow
     private Gio.SimpleAction? videoAction;
     private Gio.SimpleAction? audioAction;
     private Gio.SimpleAction? subtitleAction;
+    // PiP-related menu actions. Sensitivities are synced from OnViewModelPipPropertyChanged on IsPipEnabled changes — Add Stream is enabled iff PiP is off, Delete Stream iff PiP is on. (Field decls are duplicated in MainWindow.Pip.cs's partial; only one declaration site lives in this file.)
     // Sentinel state value for "no track selected" in any track-kind action. Using "none" rather than the empty string keeps the action state human-readable in any future debug print and matches mpv's "no" symbolic value semantically.
     private const string TrackStateNone = "none";
 
@@ -108,6 +110,17 @@ public sealed partial class MainWindow
         };
         AddAction(playlistVisibleAction);
 
+        // View → Add Stream / Delete Stream. Two stateless actions; sensitivities flip based on viewModel.IsPipEnabled (Add when PiP off, Delete when PiP on). The OnViewModelPipPropertyChanged handler keeps these in sync. Activate handlers drive MainWindow.EnablePip / DisablePip directly — those routines manage the lifecycle (construct/dispose Secondary VideoContext + widgets) and flip viewModel.IsPipEnabled themselves.
+        addStreamAction = Gio.SimpleAction.New("add-stream", null);
+        addStreamAction.OnActivate += (_, _) => EnablePip();
+        addStreamAction.SetEnabled(!viewModel.IsPipEnabled);
+        AddAction(addStreamAction);
+
+        deleteStreamAction = Gio.SimpleAction.New("delete-stream", null);
+        deleteStreamAction.OnActivate += (_, _) => DisablePip();
+        deleteStreamAction.SetEnabled(viewModel.IsPipEnabled);
+        AddAction(deleteStreamAction);
+
         var fileMenu = Gio.Menu.New();
         // GirCore 0.7.0 doesn't expose gtk_menu_append_item as AppendItem, only the position-based InsertItem. Passing -1 as position appends per the gmenu contract.
         fileMenu.InsertItem(-1, Gio.MenuItem.New("Open File…", "win.open"));
@@ -130,6 +143,12 @@ public sealed partial class MainWindow
         var viewMenu = Gio.Menu.New();
         viewMenu.InsertItem(-1, Gio.MenuItem.New("Fullscreen", "win.fullscreen"));
         viewMenu.InsertItem(-1, Gio.MenuItem.New("Playlist", "win.toggle-playlist"));
+
+        // PiP section. Section break renders as a separator between the existing items and the stream cluster — visually groups them. Two stateless commands: Add Stream creates the Secondary stream (PiP on); Delete Stream removes it. Sensitivities are mutually exclusive based on IsPipEnabled.
+        var pipSection = Gio.Menu.New();
+        pipSection.InsertItem(-1, Gio.MenuItem.New("Add Stream", "win.add-stream"));
+        pipSection.InsertItem(-1, Gio.MenuItem.New("Delete Stream", "win.delete-stream"));
+        viewMenu.AppendSection(null!, pipSection);
 
         var editMenu = Gio.Menu.New();
         editMenu.InsertItem(-1, Gio.MenuItem.New("Preferences…", "win.preferences"));
