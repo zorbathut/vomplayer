@@ -270,7 +270,16 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             urlsRequiringDownload.Add(u);
         }
-        LoadPaths(entries, replace: true);
+        // Single-video URL: behave as today — replace playlist and autoplay (download starts in LoadCurrentItem). Playlist URL: populate the playlist but DO NOT auto-load the first entry. The user clicks a row when ready, and LoadCurrentItem then kicks off the download for just that row. This keeps a paste-of-a-50-video-playlist from immediately downloading anything. Cancel any in-flight download from a previous load so a stale yt-dlp doesn't keep running in the background after the user reframes their intent with a new OpenUrl.
+        if (entries.Count == 1)
+        {
+            LoadPaths(entries, replace: true);
+        }
+        else
+        {
+            CancelActiveDownload();
+            Playlist.Replace(entries);
+        }
     }
 
     public async Task LoadAudioAsync()
@@ -403,14 +412,8 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
         string pathOrUri = Playlist.Items[Playlist.CurrentIndex];
 
-        // Cancel any in-flight URL download from a previous LoadCurrentItem before mutating per-load state. If the user clicks a different playlist row mid-download, we don't want the late completion of the old download to call playback.LoadFile against the new file's slot. CTS swap is synchronous, so by the time we set currentFilePath below the previous download's continuation will have observed cancellation. Dispose is idempotent on CTS — LoadUrlAsync's `finally` also disposes its CTS, but a second Dispose is a guaranteed no-op so we don't need to guard against the double call.
-        var previousCts = activeDownloadCts;
-        activeDownloadCts = null;
-        if (previousCts != null)
-        {
-            previousCts.Cancel();
-            previousCts.Dispose();
-        }
+        // Cancel any in-flight URL download from a previous LoadCurrentItem before mutating per-load state. If the user clicks a different playlist row mid-download, we don't want the late completion of the old download to call playback.LoadFile against the new file's slot. CTS swap is synchronous, so by the time we set currentFilePath below the previous download's continuation will have observed cancellation.
+        CancelActiveDownload();
 
         SaveCurrentPositionIfEligible();
 
@@ -437,6 +440,18 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
             return;
         }
         playback.LoadFile(pathOrUri);
+    }
+
+    // Cancel-and-clear the in-flight URL download CTS, if any. Called from LoadCurrentItem (before swapping in the new file's slot) and from OpenUrlAsync's playlist branch (where we don't go through LoadCurrentItem but still want to stop a stale yt-dlp from a prior load). Dispose is idempotent on CTS — LoadUrlAsync's `finally` also disposes its CTS, but a second Dispose is a guaranteed no-op.
+    private void CancelActiveDownload()
+    {
+        var previousCts = activeDownloadCts;
+        activeDownloadCts = null;
+        if (previousCts != null)
+        {
+            previousCts.Cancel();
+            previousCts.Dispose();
+        }
     }
 
     private async Task LoadUrlAsync(string url, CancellationTokenSource cts)

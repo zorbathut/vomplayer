@@ -1760,7 +1760,7 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public async Task OpenUrlPlaylistExpandsIntoPlaylist()
+    public async Task OpenUrlPlaylistPopulatesWithoutAutoplay()
     {
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader
@@ -1775,8 +1775,31 @@ public partial class ViewModelMainTests
 
         Assert.That(vm.Playlist.Items, Has.Count.EqualTo(3));
         Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
-        // Only the first item starts downloading; the others wait for auto-advance.
-        Assert.That(dl.DownloadCalls, Is.EquivalentTo(new[] { "https://youtu.be/a" }));
+        // Multi-entry OpenUrl populates the playlist but does NOT auto-download — the user picks a row to start. (Single-video URLs still autoplay; see OpenUrlSingleVideoLoadsAsSingleItem.)
+        Assert.That(dl.DownloadCalls, Is.Empty);
+        Assert.That(pb.LoadedFiles, Is.Empty);
+    }
+
+    [Test]
+    public async Task OpenUrlPlaylistDownloadsOnlyAfterRowClick()
+    {
+        var pb = new FakePlayback();
+        var dl = new FakeUrlDownloader
+        {
+            NextProbeResult = new[] { "https://youtu.be/a", "https://youtu.be/b", "https://youtu.be/c" },
+            DownloadResolver = u => $"/cache/{u}.mp4",
+        };
+        var prompt = new FakeUrlPrompt { NextUrl = "https://youtube.com/playlist?list=XYZ" };
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+
+        await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
+        // User clicks the second row.
+        vm.PlayPlaylistItem(1);
+        await Task.Yield();
+        await Task.Delay(10);
+
+        Assert.That(dl.DownloadCalls, Is.EquivalentTo(new[] { "https://youtu.be/b" }));
+        Assert.That(pb.LoadedFiles, Is.EquivalentTo(new[] { "/cache/https://youtu.be/b.mp4" }));
     }
 
     [Test]
@@ -1845,6 +1868,9 @@ public partial class ViewModelMainTests
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
+        // Multi-entry OpenUrl no longer auto-starts; click row 0 to put A in flight.
+        vm.PlayPlaylistItem(0);
+        await Task.Yield();
         // Now B is in queue. Swap PendingDownload so B's DownloadAsync resolves synchronously (Task.FromResult path).
         dl.PendingDownload = null;
         dl.DownloadResolver = u => $"/cache/{u}.mp4";
@@ -1878,6 +1904,9 @@ public partial class ViewModelMainTests
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
+        // Multi-entry OpenUrl no longer auto-starts; click row 0 to put A in flight.
+        vm.PlayPlaylistItem(0);
+        await Task.Yield();
         // User moves on to B before A completes.
         dl.PendingDownload = null;
         dl.DownloadResolver = u => $"/cache/{u}.mp4";
