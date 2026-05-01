@@ -24,6 +24,7 @@
   </Target>
 
   <ItemGroup Condition="'$(IsBuildingOnLinux)' == 'true'">
-    <Content Include="$(OutDir)libhdr_helper.so" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Link flattens the relative path so publish output puts libhdr_helper.so next to the apphost (where the P/Invoke loader looks) instead of nesting it under bin/Release/net10.0/linux-x64/ alongside it. -->
+    <Content Include="$(OutDir)libhdr_helper.so" CopyToPublishDirectory="PreserveNewest" Link="libhdr_helper.so" />
   </ItemGroup>
 </Project>

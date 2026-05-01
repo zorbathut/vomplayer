@@ -5,7 +5,7 @@ namespace Vomplayer.Wayland;
 
 internal static partial class WaylandDetect
 {
-    private const string GtkLib = "gtk-4";
+    private const string GtkLib = "libgtk-4.so.1";
 
     [LibraryImport(GtkLib, EntryPoint = "gdk_wayland_display_get_wl_display")]
     private static partial IntPtr GdkWaylandDisplayGetWlDisplay(IntPtr display);

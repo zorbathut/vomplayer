@@ -115,7 +115,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         {
             // vo=libmpv defers VO selection until a render context is registered — otherwise mpv picks a default VO (on Wayland that's waylandvk, which ignores our render context and spawns its own window).
             h.SetOption("vo", "libmpv");
-            h.SetOption("osc", "no");
+            // `osc` is registered by mpv's built-in Lua scripts. Builds without Lua (e.g. our flatpak's slim libmpv) compile osc out and return OPTION_NOT_FOUND. Lua-less mpv defaults to no OSC anyway, so the desired behavior is already in place — silently swallow the not-found error rather than aborting initialization.
+            try { h.SetOption("osc", "no"); } catch (MpvException ex) when (ex.Code == (int)MpvErrorCode.OptionNotFound) { }
             h.SetOption("keep-open", "yes");
             h.SetOption("terminal", "no");
             // auto-safe is mpv's curated set of hwdec backends that are known to work with GL interop on the current platform/driver combination — includes vaapi, nvdec, videotoolbox, d3d11va, plus their copy-back variants where the zero-copy path is unavailable. Unlike "auto" it excludes blacklisted driver/backend combos; unlike hand-picking a backend it degrades gracefully to software when nothing is available. Must be set before Initialize(); runtime changes also work but the startup path is simpler. Fallback is automatic — if the selected backend fails on a specific file mpv drops to software and updates hwdec-current accordingly.

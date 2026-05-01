@@ -1,0 +1,179 @@
+id: net.vomplayer.Vomplayer
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.dotnet10
+command: vomplayer
+
+# Hardware-acceleration story:
+#   * --device=dri exposes /dev/dri/* so VA-API / VDPAU / direct GL on the GPU work.
+#   * The runtime's org.freedesktop.Platform.GL.default extension carries Mesa drivers
+#     (radeonsi, iHD, i965, virglrenderer, ...) and the VA-API/VDPAU back-ends that
+#     match them. It is auto-installed alongside org.gnome.Platform.
+#   * NVIDIA hardware decode works transparently: when the host has the proprietary
+#     driver, flatpak pulls the matching org.freedesktop.Platform.GL.nvidia-* extension,
+#     which gives libnvcuvid + libcuda and lets mpv use --hwdec=nvdec.
+#   * The org.freedesktop.Platform.codecs-extra extension supplies the patent-
+#     encumbered codecs (openh264, etc.) the base runtime ships without. It mounts
+#     at /app/extensions/codecs-extra; mpv finds them via add-ld-path so all common
+#     formats decode without the user installing extra codecs.
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=xdg-videos
+  - --filesystem=xdg-download
+  - --filesystem=xdg-music
+  - --filesystem=xdg-pictures
+  - --filesystem=xdg-run/pipewire-0
+  - --filesystem=host:ro
+  - --talk-name=org.freedesktop.ScreenSaver
+  - --talk-name=org.freedesktop.PowerManagement.Inhibit
+  - --talk-name=org.gnome.SessionManager
+  - --own-name=org.mpris.MediaPlayer2.Vomplayer
+  - --env=LC_NUMERIC=C
+  # Mesa's VA-API and VDPAU drivers ship inside the org.freedesktop.Platform.GL.*
+  # extensions, mounted at /usr/lib/x86_64-linux-gnu/GL/lib. libva searches
+  # /usr/lib/dri by default and the GL extension does NOT symlink there, so
+  # without these env hints VA-API silently falls back to software decode on
+  # Mesa-backed hosts (radeonsi/iHD/i965/...).
+  - --env=LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/GL/lib/dri:/usr/lib/x86_64-linux-gnu/GL/default/lib/dri:/usr/lib/x86_64-linux-gnu/dri
+  - --env=VDPAU_DRIVER_PATH=/usr/lib/x86_64-linux-gnu/GL/lib/vdpau:/usr/lib/x86_64-linux-gnu/GL/default/lib/vdpau
+
+add-extensions:
+  org.freedesktop.Platform.codecs-extra:
+    directory: extensions/codecs-extra
+    add-ld-path: lib
+    version: 25.08-extra
+    autodelete: false
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+  - /share/aclocal
+  - '*.a'
+  - '*.la'
+
+modules:
+  - name: codecs-extra-mountpoint
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/extensions/codecs-extra
+
+  # libplacebo drives mpv's vo=gpu-next path, which is what gives us libplacebo-quality
+  # tonemapping (HDR -> SDR scan-out) and proper PQ pass-through. 7.x matches mpv 0.40.
+  - name: libplacebo
+    buildsystem: meson
+    config-opts:
+      - -Dvulkan=disabled
+      - -Dshaderc=disabled
+      - -Dglslang=disabled
+      - -Dlcms=enabled
+      - -Dopengl=enabled
+      - -Dd3d11=disabled
+      - -Ddemos=false
+      - -Dtests=false
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/libplacebo.git
+        tag: v7.351.0
+        commit: 3188549fba13bbdf3a5a98de2a38c2e71f04e21e
+        disable-submodules: false
+
+  # libXpresent — X11 Present extension. Not in the GNOME SDK; mpv hard-requires
+  # it whenever x11 output is enabled. Building this is cheaper than disabling x11
+  # in mpv (which would also kill the X11 GL contexts an X11-fallback session needs).
+  - name: libXpresent
+    buildsystem: autotools
+    sources:
+      - type: archive
+        url: https://www.x.org/archive/individual/lib/libXpresent-1.0.1.tar.xz
+        sha256: b964df9e5a066daa5e08d2dc82692c57ca27d00b8cc257e8e960c9f1cf26231b
+
+  # libass — subtitle rendering. Not in the GNOME SDK; mpv requires it.
+  - name: libass
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --enable-shared
+    sources:
+      - type: archive
+        url: https://github.com/libass/libass/releases/download/0.17.4/libass-0.17.4.tar.gz
+        sha256: a886b3b80867f437bc55cff3280a652bfa0d37b43d2aff39ddf3c4f288b8c5a8
+
+  # libmpv. Built against the runtime's ffmpeg at compile time; at runtime the
+  # ffmpeg-full extension's libraries shadow the runtime's via add-ld-path, so the
+  # codec-complete build is what actually decodes. cplayer is off because we only
+  # ever consume the C library API.
+  - name: mpv
+    buildsystem: meson
+    config-opts:
+      - -Dlibmpv=true
+      - -Dcplayer=false
+      - -Dmanpage-build=disabled
+      - -Dlua=disabled
+      - -Djavascript=disabled
+      - -Dlibarchive=disabled
+      - -Dvapoursynth=disabled
+      - -Dwayland=enabled
+      - -Dx11=enabled
+      - -Degl-wayland=enabled
+      - -Dgl-x11=enabled
+      - -Degl-x11=enabled
+      - -Dvulkan=disabled
+      - -Dvaapi=enabled
+      - -Dvaapi-wayland=enabled
+      - -Dvaapi-x11=enabled
+      # vaapi-drm is for VA-API decode against bare DRM (kiosk/embedded). On a
+      # desktop session we use vaapi-wayland or vaapi-x11; vaapi-drm gated by drm.
+      - -Dvaapi-drm=disabled
+      - -Dvdpau=enabled
+      - -Dvdpau-gl-x11=enabled
+      # vo=drm is for kiosk/headless rendering; we use libmpv's render context
+      # against a Wayland subsurface, so the DRM video output is dead weight.
+      # Also drops the libdisplay-info dep, which is only used by vo=drm.
+      - -Ddrm=disabled
+      - -Djpeg=enabled
+      - -Dpipewire=enabled
+      - -Dpulse=enabled
+      - -Dalsa=enabled
+    sources:
+      - type: archive
+        url: https://github.com/mpv-player/mpv/archive/refs/tags/v0.40.0.tar.gz
+        sha256: 10a0f4654f62140a6dd4d380dcf0bbdbdcf6e697556863dc499c296182f081a3
+
+  - name: vomplayer
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/dotnet10/bin
+      env:
+        DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        DOTNET_NOLOGO: '1'
+        DOTNET_CLI_HOME: /run/build/vomplayer/.dotnet
+        XDG_DATA_HOME: /run/build/vomplayer/.data
+      build-args:
+        # NuGet restore hits the network. For Flathub submission this gets replaced
+        # by an offline NuGet source generated via flatpak-builder-tools'
+        # flatpak-dotnet-generator.py — see flatpak/README.md.
+        - --share=network
+    build-commands:
+      # Self-contained publish: bundles the .NET runtime so /app does not depend on
+      # the dotnet10 SDK extension being installed on the user's machine. The MSBuild
+      # BuildHdrHelper target (Vomplayer.csproj) compiles libhdr_helper.so against
+      # the SDK's wayland-client/wayland-egl/EGL headers as part of this step.
+      - dotnet publish Vomplayer.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=false -o publish
+      - install -d ${FLATPAK_DEST}/lib/vomplayer
+      - cp -r publish/. ${FLATPAK_DEST}/lib/vomplayer/
+      - install -Dm755 flatpak/vomplayer.sh ${FLATPAK_DEST}/bin/vomplayer
+      - install -Dm644 flatpak/net.vomplayer.Vomplayer.desktop ${FLATPAK_DEST}/share/applications/net.vomplayer.Vomplayer.desktop
+      - install -Dm644 flatpak/net.vomplayer.Vomplayer.metainfo.xml ${FLATPAK_DEST}/share/metainfo/net.vomplayer.Vomplayer.metainfo.xml
+      - install -Dm644 flatpak/icons/net.vomplayer.Vomplayer.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/net.vomplayer.Vomplayer.svg
+    sources:
+      - type: dir
+        path: ..

@@ -29,6 +29,15 @@ Tests:
 dotnet test
 ```
 
+Flatpak:
+
+```sh
+flatpak-builder --user --install --force-clean build-flatpak flatpak/net.vomplayer.Vomplayer.yml
+flatpak run net.vomplayer.Vomplayer [path-or-url]
+```
+
+See [flatpak/README.md](flatpak/README.md) for prerequisites, hardware acceleration notes, and file associations.
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the codebase map, the two rendering paths, the playback threading model, and the ABI-boundary policy.

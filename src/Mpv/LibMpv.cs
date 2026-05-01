@@ -5,7 +5,7 @@ namespace Vomplayer.Mpv;
 
 internal static partial class LibMpv
 {
-    private const string Lib = "mpv";
+    private const string Lib = "libmpv.so.2";
 
     [LibraryImport(Lib, EntryPoint = "mpv_create")]
     public static partial IntPtr Create();
@@ -55,8 +55,14 @@ internal static partial class LibMpv
     [LibraryImport(Lib, EntryPoint = "mpv_set_wakeup_callback")]
     public static partial void ClearWakeupCallback(IntPtr ctx, IntPtr callback, IntPtr data);
 
-    [LibraryImport(Lib, EntryPoint = "mpv_error_string", StringMarshalling = StringMarshalling.Utf8)]
-    public static partial string? ErrorString(int error);
+    // Returns a const char* into mpv's static string table — must NOT be freed by the caller. We deliberately marshal the return as IntPtr and copy with Marshal.PtrToStringUTF8 in ErrorString below; using StringMarshalling.Utf8 on the return would make the source-generated marshaller free the pointer after copying, which crashes the process with "free(): invalid pointer" the first time mpv reports an error.
+    [LibraryImport(Lib, EntryPoint = "mpv_error_string")]
+    private static partial IntPtr ErrorStringRaw(int error);
+
+    public static string? ErrorString(int error)
+    {
+        return Marshal.PtrToStringUTF8(ErrorStringRaw(error));
+    }
 
     [LibraryImport(Lib, EntryPoint = "mpv_render_context_create")]
     public static partial int RenderContextCreate(out IntPtr res, IntPtr mpv, ref MpvRenderParam parameters);

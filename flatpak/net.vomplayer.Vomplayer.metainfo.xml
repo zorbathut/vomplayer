@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.vomplayer.Vomplayer</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Vomplayer</name>
+  <summary>Video player that handles HDR, VRR, and hardware acceleration without configuration</summary>
+
+  <description>
+    <p>
+      Vomplayer is a cross-platform video player built on libmpv that just handles the whole
+      HDR/VRR/hardware-acceleration mess for you. It is designed for Linux + Wayland (KWin
+      in particular) but degrades gracefully on X11 and other backends.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>HDR (PQ pass-through with libplacebo tonemapping for SDR scan-out)</li>
+      <li>VRR-aware presentation timing</li>
+      <li>Hardware-accelerated decode (VA-API, VDPAU, NVDEC where available)</li>
+      <li>Subtitles, audio/video track selection, chapter cueing</li>
+      <li>Per-directory remembered track preferences</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">net.vomplayer.Vomplayer.desktop</launchable>
+
+  <provides>
+    <binary>vomplayer</binary>
+  </provides>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Player</category>
+    <category>Video</category>
+  </categories>
+
+  <url type="homepage">https://github.com/zorbathut/vomplayer</url>
+  <url type="bugtracker">https://github.com/zorbathut/vomplayer/issues</url>
+
+  <developer id="net.vomplayer">
+    <name>Ben Rog-Wilhelm</name>
+  </developer>
+
+  <content_rating type="oars-1.1" />
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
+  <recommends>
+    <display_length compare="ge">768</display_length>
+  </recommends>
+
+  <releases>
+    <release version="0.0.0" date="2026-05-01">
+      <description>
+        <p>Pre-release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

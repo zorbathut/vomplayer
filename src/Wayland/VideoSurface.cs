@@ -10,7 +10,7 @@ namespace Vomplayer.Wayland;
 // Constructor is trivial — stores references and hooks window realize/unrealize + area geometry changes. EGL/subsurface work runs in OnRealize, by which time MainWindow has connected RenderContextReady / RenderFailed. Render loop: mpv update callback (mpv thread) → coalesced IdleAdd → main-thread Render = MakeCurrent + mpv_render_context_render + Swap + ReportSwap.
 public sealed partial class VideoSurface : IDisposable, IHdrSink
 {
-    private const string GtkLib = "gtk-4";
+    private const string GtkLib = "libgtk-4.so.1";
 
     [LibraryImport(GtkLib, EntryPoint = "gdk_wayland_display_get_wl_display")]
     private static partial IntPtr GdkWaylandDisplayGetWlDisplay(IntPtr display);
