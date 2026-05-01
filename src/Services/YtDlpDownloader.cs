@@ -73,6 +73,8 @@ public sealed class YtDlpDownloader : IUrlDownloader
     }
 
     // Run yt-dlp with --flat-playlist to extract URLs without downloading. Returns one entry for a single video, or N entries for a playlist. yt-dlp's default behavior on a single video is to print the same URL back, so the caller doesn't have to special-case "is this a playlist" — they just check Count.
+    //
+    // --no-playlist makes yt-dlp itself disambiguate the "video URL with a playlist parameter" case: a `watch?v=X&list=Y` URL resolves to just video X (because there's an unambiguous single-video target on the page), while a pure `/playlist?list=Y` URL still expands to all entries (the flag is a no-op when there's no single-video to fall back to). This matches the user-intent of "URL that points at a specific video plays just that video; URL that points at a playlist plays the playlist", driven by yt-dlp's own URL classification rather than a regex on our side.
     public async Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(url))
@@ -88,6 +90,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
             CreateNoWindow = true,
         };
         psi.ArgumentList.Add("--flat-playlist");
+        psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add("%(webpage_url)s");
         psi.ArgumentList.Add("--no-warnings");
