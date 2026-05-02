@@ -17,3 +17,7 @@ lcov.*.info
 
 # Benchmarking
 /benchmark-results
+
+# Flatpak
+/repo
+/vomplayer.flatpak
