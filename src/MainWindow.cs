@@ -163,7 +163,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         this.forceSdr = forceSdr;
 
         SetApplication(app);
-        Title = forceSdr ? "Vomplayer — SDR" : "Vomplayer";
+        var brand = Random.Shared.NextDouble() < 0.01 ? "VomplAyer" : "Vomplayer";
+        Title = forceSdr ? $"{brand} — SDR" : brand;
         SetDefaultSize(1280, 720);
         AddCssClass("vompl-main-window");
 
