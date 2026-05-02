@@ -119,6 +119,10 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     [ObservableProperty]
     private double? videoAspect;
 
+    // Mirror of IPlayback.MediaTitle. Null when no file is loaded. Drives the main window's title bar.
+    [ObservableProperty]
+    private string? mediaTitle;
+
     // When false, the per-context EOF-rising-edge auto-advance is suppressed. The coordinator flips this off on both contexts when a sibling exists, owning advance dispatch itself (lockstep). Default true preserves single-video behavior when this is the only live context.
     public bool AutoAdvanceEnabled { get; set; } = true;
 
@@ -851,6 +855,9 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
                 break;
             case nameof(IPlayback.VideoAspect):
                 VideoAspect = playback.VideoAspect;
+                break;
+            case nameof(IPlayback.MediaTitle):
+                MediaTitle = playback.MediaTitle;
                 break;
         }
     }

@@ -65,6 +65,9 @@ public partial class VideoContextTests
         [ObservableProperty]
         private double? videoAspect;
 
+        [ObservableProperty]
+        private string? mediaTitle;
+
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
         public event Action? TracksReloaded;
@@ -194,6 +197,32 @@ public partial class VideoContextTests
         Assert.That(ctx.AdvanceAndLoadIfPossible(), Is.False);
         // No additional LoadFile beyond the initial replace.
         Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4" }));
+    }
+
+    [Test]
+    public void MediaTitleMirrorsPlayback()
+    {
+        using var ctx = NewContext(out var pb);
+        var fires = new List<string?>();
+        ctx.PropertyChanged += (s, e) =>
+        {
+            if (e.PropertyName == nameof(VideoContext.MediaTitle))
+            {
+                fires.Add(ctx.MediaTitle);
+            }
+        };
+        Assert.That(ctx.MediaTitle, Is.Null, "no source loaded ⇒ MediaTitle is null");
+
+        pb.MediaTitle = "Big Buck Bunny";
+        Assert.That(ctx.MediaTitle, Is.EqualTo("Big Buck Bunny"));
+
+        pb.MediaTitle = "Sintel";
+        Assert.That(ctx.MediaTitle, Is.EqualTo("Sintel"));
+
+        pb.MediaTitle = null;
+        Assert.That(ctx.MediaTitle, Is.Null, "unload clears the title");
+
+        Assert.That(fires, Is.EqualTo(new string?[] { "Big Buck Bunny", "Sintel", null }));
     }
 
     [Test]

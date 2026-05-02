@@ -182,6 +182,14 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
     }
 
+    public string? MediaTitle
+    {
+        get
+        {
+            return SingleTarget.MediaTitle;
+        }
+    }
+
     // The set of proxy-property names that mirror per-context observables. Used by OnSelectedSlotChanged to re-fire PropertyChanged for all of them when selection swaps so the view re-reads from the new target.
     private static readonly string[] ProxyPropertyNames =
     {
@@ -198,6 +206,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         nameof(CurrentVideoId),
         nameof(CurrentAudioId),
         nameof(CurrentSubtitleId),
+        nameof(MediaTitle),
     };
 
     public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt)

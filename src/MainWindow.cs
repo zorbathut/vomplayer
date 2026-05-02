@@ -80,6 +80,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Controls.PlaylistPanel playlistPanel;
     // Stateful action backing "View → Playlist". Held as a field so the auto-show-on-multi-drop path can flip the action's state in lockstep with playlistPanel.SetVisible — keeps the menu's check glyph honest.
     private Gio.SimpleAction? playlistVisibleAction;
+    // Window-title brand string, rolled once at construction. The 1% VomplAyer roll wants to be stable for the session — re-rolling on every media-title update would let it flicker mid-playback.
+    private readonly string brand;
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
     private readonly VideoSurface? videoSurface;
@@ -161,7 +163,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         this.hotkeys = HotkeyMap.FromTomlForm(userConfig.Hotkeys.ToDictionary(), m => Console.Error.WriteLine($"[vompl] {m}"));
 
         SetApplication(app);
-        Title = Random.Shared.NextDouble() < 0.01 ? "VomplAyer" : "Vomplayer";
+        brand = Random.Shared.NextDouble() < 0.01 ? "VomplAyer" : "Vomplayer";
+        Title = brand;
         SetDefaultSize(1280, 720);
         AddCssClass("vompl-main-window");
 
@@ -549,6 +552,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 break;
             case nameof(ViewModelMain.IsMuted):
                 RefreshMuteButton();
+                break;
+            case nameof(ViewModelMain.MediaTitle):
+                Title = string.IsNullOrEmpty(viewModel.MediaTitle) ? brand : $"{viewModel.MediaTitle} — {brand}";
                 break;
         }
     }

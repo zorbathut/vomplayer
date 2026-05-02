@@ -64,6 +64,9 @@ public partial class ViewModelMainTests
         [ObservableProperty]
         private double? videoAspect;
 
+        [ObservableProperty]
+        private string? mediaTitle;
+
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
         public event Action? TracksReloaded;

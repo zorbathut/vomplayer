@@ -72,6 +72,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private double? videoAspect;
 
+    // Mirror of mpv's `media-title`. Null on no-file-loaded; reset preemptively in LoadFile so the previous file's title can't survive past a swap (it would otherwise linger until mpv's first observation lands on the new file).
+    [ObservableProperty]
+    private string? mediaTitle;
+
     // Most-recent dwidth / dheight values, used to recompute VideoAspect when either lands. Both must be present and positive for the aspect to be derivable; otherwise VideoAspect goes back to null.
     private long? lastDwidth;
     private long? lastDheight;
@@ -161,6 +165,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             // Display dimensions, fired together by mpv after a file's video stream is decoded enough to know its display aspect (sample aspect ratio applied). Either property changing recomputes VideoAspect; the synthesized initial fires land null and clear it. mpv reports them in pixel-correct units regardless of decoder, so VideoAspect stays correct for anamorphic sources.
             h.ObserveProperty("dwidth", MpvFormat.Int64);
             h.ObserveProperty("dheight", MpvFormat.Int64);
+            // mpv's media-title falls back to the filename when no metadata title tag is present; the synthesized initial fire lands null pre-LoadFile.
+            h.ObserveProperty("media-title", MpvFormat.String);
         });
     }
 
@@ -180,6 +186,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         lastDwidth = null;
         lastDheight = null;
         VideoAspect = null;
+        // Same race rationale as the dwidth/dheight clear: stop the previous file's title from surviving past a load while mpv works out the new file's media-title.
+        MediaTitle = null;
         dispatcher.Post(h =>
         {
             h.Command("loadfile", path);
@@ -403,6 +411,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
             case "dheight":
                 lastDheight = change.Value.AsInt64;
                 UpdateVideoAspect();
+                break;
+            case "media-title":
+                UpdateMediaTitle(change.Value.AsString);
                 break;
             default:
                 // Log-and-skip rather than throw: MpvClient.PropertyChanged is a broadcast and an unrecognized name here would otherwise take down the whole event-drain loop. A future observer on the same client shouldn't be able to ambush us.
@@ -663,6 +674,12 @@ public sealed partial class Playback : ObservableObject, IPlayback
     internal void UpdateMute(bool? value)
     {
         IsMuted = value ?? false;
+    }
+
+    // Internal test seam mirroring the other Update* methods. Empty strings normalize to null so consumers don't have to special-case "" — mpv occasionally fires empty for media-title on the synthesized initial observe before LoadFile, and again briefly during a load on some containers.
+    internal void UpdateMediaTitle(string? value)
+    {
+        MediaTitle = string.IsNullOrEmpty(value) ? null : value;
     }
 
     // Internal test seam mirroring UpdateMute. Null falls back to false (mpv shouldn't report null for eof-reached on a loaded file, but the synthesized initial-fire is null pre-Initialize / on shutdown). The ObservableProperty setter dedups same-value writes already; the explicit method just normalizes null.
