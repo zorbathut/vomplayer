@@ -1,17 +1,17 @@
 # Flatpak
 
 This directory holds everything flatpak-builder needs to produce
-`net.vomplayer.Vomplayer` from the project tree.
+`io.github.zorbathut.vomplayer` from the project tree.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `net.vomplayer.Vomplayer.yml` | Manifest. Pulls GNOME 49 + dotnet10 SDK extension, builds libplacebo, libmpv, then `dotnet publish`-es vomplayer self-contained. |
-| `net.vomplayer.Vomplayer.desktop` | Desktop entry with `MimeType=` covering the formats `Util/MediaExtensions.cs` enumerates. |
-| `net.vomplayer.Vomplayer.metainfo.xml` | AppStream metadata required by the Flathub validator. |
+| `io.github.zorbathut.vomplayer.yml` | Manifest. Pulls GNOME 49 + dotnet10 SDK extension, builds libplacebo, libmpv, then `dotnet publish`-es vomplayer self-contained. |
+| `io.github.zorbathut.vomplayer.desktop` | Desktop entry with `MimeType=` covering the formats `Util/MediaExtensions.cs` enumerates. |
+| `io.github.zorbathut.vomplayer.metainfo.xml` | AppStream metadata required by the Flathub validator. |
 | `vomplayer.sh` | `/app/bin/vomplayer` trampoline that execs the .NET apphost from `/app/lib/vomplayer`. |
-| `icons/net.vomplayer.Vomplayer.svg` | Application icon. Placeholder — replace before any release. |
+| `icons/io.github.zorbathut.vomplayer.svg` | Application icon. Placeholder — replace before any release. |
 
 ## One-time prerequisites
 
@@ -20,7 +20,7 @@ flatpak install --user flathub \
     org.gnome.Platform//49 \
     org.gnome.Sdk//49 \
     org.freedesktop.Sdk.Extension.dotnet10//25.08 \
-    org.freedesktop.Platform.ffmpeg-full//25.08
+    org.freedesktop.Platform.codecs-extra//25.08-extra
 ```
 
 (The Mesa GL extension is auto-installed alongside `org.gnome.Platform`.
@@ -33,32 +33,72 @@ From the repo root:
 
 ```sh
 flatpak-builder --user --install --force-clean build-flatpak \
-    flatpak/net.vomplayer.Vomplayer.yml
+    flatpak/io.github.zorbathut.vomplayer.yml
 ```
 
 Run:
 
 ```sh
-flatpak run net.vomplayer.Vomplayer [path-or-url]
+flatpak run io.github.zorbathut.vomplayer [path-or-url]
+```
+
+## Build a redistributable bundle
+
+`flatpak build-bundle` packages the app into a single `.flatpak` file that
+anyone with flatpak (and the matching runtime) can install with one command —
+no flatpak-builder, no source tree, no network build. The flow is two steps:
+build into a local OSTree repo, then export a bundle from it.
+
+```sh
+# 1. Build into a local repo (./repo) instead of installing.
+flatpak-builder --force-clean --repo=repo build-flatpak \
+    flatpak/io.github.zorbathut.vomplayer.yml
+
+# 2. Export a single-file bundle.
+flatpak build-bundle repo vomplayer.flatpak io.github.zorbathut.vomplayer
+```
+
+The resulting `vomplayer.flatpak` is self-contained for the *app*, but the
+recipient still needs `org.gnome.Platform//49` and the
+`org.freedesktop.Platform.codecs-extra//25.08-extra` extension installed on
+their flatpak (the bundle does not embed runtimes — that would balloon it to
+hundreds of MB for no benefit, since flatpak shares runtimes across apps).
+Recipient install:
+
+```sh
+flatpak install --user vomplayer.flatpak
+flatpak run io.github.zorbathut.vomplayer
+```
+
+To bundle a debug build with full symbols (useful for sharing crash reports),
+add `--runtime` to also bundle the `.Debug` extension flatpak-builder produces
+alongside the app:
+
+```sh
+flatpak build-bundle repo vomplayer-debug.flatpak \
+    io.github.zorbathut.vomplayer.Debug --runtime
 ```
 
 ## Hardware acceleration
 
-The manifest builds libmpv with VA-API (Wayland + X11 + DRM), VDPAU, and DRM
-output paths enabled. At runtime:
+The manifest builds libmpv with VA-API (Wayland + X11) and VDPAU. At runtime:
 
 * `--device=dri` exposes `/dev/dri/*` so VA-API / VDPAU / direct GL on the GPU work.
+* `LIBVA_DRIVERS_PATH` and `VDPAU_DRIVER_PATH` point at the GL extension's
+  driver dirs (`/usr/lib/x86_64-linux-gnu/GL/lib/{dri,vdpau}`); without these,
+  libva's default `/usr/lib/dri` lookup misses Mesa's back-ends and falls back
+  to software decode on radeonsi/iHD/i965/...
 * The runtime's `org.freedesktop.Platform.GL.default` extension carries Mesa's
   drivers and matching VA-API/VDPAU back-ends.
-* `org.freedesktop.Platform.ffmpeg-full` is mounted at `/app/lib/ffmpeg` and
-  shadows the runtime's stripped ffmpeg so all common codecs decode without the
-  user adding anything.
+* `org.freedesktop.Platform.codecs-extra` supplies the patent-encumbered codecs
+  (openh264, etc.) the base runtime ships without; mounted at
+  `/app/extensions/codecs-extra` and added to LD_LIBRARY_PATH automatically.
 * On hosts with the proprietary NVIDIA driver, flatpak transparently installs
   `org.freedesktop.Platform.GL.nvidia-<version>` and mpv's `--hwdec=nvdec`
   picks it up via libnvcuvid.
 
-mpv decides between these via its standard `--hwdec=auto` machinery; vomplayer
-does not currently force a specific back-end.
+mpv decides between these via its standard `--hwdec=auto-safe` machinery;
+vomplayer does not currently force a specific back-end.
 
 ## File associations
 

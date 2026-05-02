@@ -35,7 +35,7 @@ public static class Program
         var recentFiles = new RecentFiles(stateDb.Connection);
         var trackPreferences = new TrackPreferences(stateDb.Connection);
 
-        var app = Gtk.Application.New("net.vomplayer.Vomplayer", Gio.ApplicationFlags.NonUnique);
+        var app = Gtk.Application.New("io.github.zorbathut.vomplayer", Gio.ApplicationFlags.NonUnique);
         app.OnActivate += (sender, _) =>
         {
             BuildAndPresent((Gtk.Application)sender, recentFiles, trackPreferences, userConfig, configPath, initialFile, forceSdr);

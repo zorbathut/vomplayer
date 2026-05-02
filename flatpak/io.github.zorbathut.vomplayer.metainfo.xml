@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>net.vomplayer.Vomplayer</id>
+  <id>io.github.zorbathut.vomplayer</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>Vomplayer</name>
@@ -22,7 +22,7 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">net.vomplayer.Vomplayer.desktop</launchable>
+  <launchable type="desktop-id">io.github.zorbathut.vomplayer.desktop</launchable>
 
   <provides>
     <binary>vomplayer</binary>
@@ -37,7 +37,7 @@
   <url type="homepage">https://github.com/zorbathut/vomplayer</url>
   <url type="bugtracker">https://github.com/zorbathut/vomplayer/issues</url>
 
-  <developer id="net.vomplayer">
+  <developer id="io.github.zorbathut">
     <name>Ben Rog-Wilhelm</name>
   </developer>
 

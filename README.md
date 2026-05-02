@@ -32,11 +32,11 @@ dotnet test
 Flatpak:
 
 ```sh
-flatpak-builder --user --install --force-clean build-flatpak flatpak/net.vomplayer.Vomplayer.yml
-flatpak run net.vomplayer.Vomplayer [path-or-url]
+flatpak-builder --user --install --force-clean build-flatpak flatpak/io.github.zorbathut.vomplayer.yml
+flatpak run io.github.zorbathut.vomplayer [path-or-url]
 ```
 
-See [flatpak/README.md](flatpak/README.md) for prerequisites, hardware acceleration notes, and file associations.
+See [flatpak/README.md](flatpak/README.md) for prerequisites, hardware acceleration notes, file associations, and how to produce a redistributable `.flatpak` bundle.
 
 ## Architecture
 

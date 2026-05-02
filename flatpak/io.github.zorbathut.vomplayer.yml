@@ -1,4 +1,4 @@
-id: net.vomplayer.Vomplayer
+id: io.github.zorbathut.vomplayer
 runtime: org.gnome.Platform
 runtime-version: '49'
 sdk: org.gnome.Sdk
@@ -171,9 +171,9 @@ modules:
       - install -d ${FLATPAK_DEST}/lib/vomplayer
       - cp -r publish/. ${FLATPAK_DEST}/lib/vomplayer/
       - install -Dm755 flatpak/vomplayer.sh ${FLATPAK_DEST}/bin/vomplayer
-      - install -Dm644 flatpak/net.vomplayer.Vomplayer.desktop ${FLATPAK_DEST}/share/applications/net.vomplayer.Vomplayer.desktop
-      - install -Dm644 flatpak/net.vomplayer.Vomplayer.metainfo.xml ${FLATPAK_DEST}/share/metainfo/net.vomplayer.Vomplayer.metainfo.xml
-      - install -Dm644 flatpak/icons/net.vomplayer.Vomplayer.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/net.vomplayer.Vomplayer.svg
+      - install -Dm644 flatpak/io.github.zorbathut.vomplayer.desktop ${FLATPAK_DEST}/share/applications/io.github.zorbathut.vomplayer.desktop
+      - install -Dm644 flatpak/io.github.zorbathut.vomplayer.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.zorbathut.vomplayer.metainfo.xml
+      - install -Dm644 flatpak/icons/io.github.zorbathut.vomplayer.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.zorbathut.vomplayer.svg
     sources:
       - type: dir
         path: ..
