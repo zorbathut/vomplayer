@@ -187,7 +187,7 @@ public partial class MainWindow
         secondaryPlayback = pb;
 
         // Secondary VideoContext. Constructed here (not in the VM ctor) so the VM stays unaware of how Playback instances are minted on Linux/GTK.
-        var secondaryCtx = new VideoContext(pb, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt, forceSdr);
+        var secondaryCtx = new VideoContext(pb, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         viewModel.EnablePip(secondaryCtx);
 
         if (videoArea != null)

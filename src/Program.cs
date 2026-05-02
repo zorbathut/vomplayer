@@ -8,15 +8,9 @@ public static class Program
     public static int Main(string[] args)
     {
         string? initialFile = null;
-        // Per-video HDR autodetect is the default; --sdr / --no-hdr forces SDR for the whole session (useful when the display isn't in HDR mode and even correctly-tagged PQ output would display wrong).
-        bool forceSdr = false;
         foreach (var a in args)
         {
-            if (a == "--sdr" || a == "--no-hdr")
-            {
-                forceSdr = true;
-            }
-            else if (a.StartsWith('-'))
+            if (a.StartsWith('-'))
             {
                 Console.Error.WriteLine($"[vomplayer] unknown flag: {a}");
                 return 2;
@@ -38,12 +32,12 @@ public static class Program
         var app = Gtk.Application.New("io.github.zorbathut.vomplayer", Gio.ApplicationFlags.NonUnique);
         app.OnActivate += (sender, _) =>
         {
-            BuildAndPresent((Gtk.Application)sender, recentFiles, trackPreferences, userConfig, configPath, initialFile, forceSdr);
+            BuildAndPresent((Gtk.Application)sender, recentFiles, trackPreferences, userConfig, configPath, initialFile);
         };
         return app.RunWithSynchronizationContext(null);
     }
 
-    private static void BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile, bool forceSdr)
+    private static void BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
     {
         // gtk_init ran setlocale(LC_ALL, "") already; force LC_NUMERIC=C back before any mpv call. Must happen on the main thread after GTK init, not before Main.
         LibC.ForceCNumericLocale();
@@ -58,7 +52,7 @@ public static class Program
                 }));
         playback.Initialize();
 
-        var window = new MainWindow(app, playback, recentFiles, trackPreferences, userConfig, configPath, initialFile, forceSdr);
+        var window = new MainWindow(app, playback, recentFiles, trackPreferences, userConfig, configPath, initialFile);
         window.Present();
     }
 }

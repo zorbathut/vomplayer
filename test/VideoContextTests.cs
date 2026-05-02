@@ -165,13 +165,8 @@ public partial class VideoContextTests
 
     private static VideoContext NewContext(out FakePlayback playback)
     {
-        return NewContext(out playback, forceSdr: false);
-    }
-
-    private static VideoContext NewContext(out FakePlayback playback, bool forceSdr)
-    {
         playback = new FakePlayback();
-        return new VideoContext(playback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt(), forceSdr);
+        return new VideoContext(playback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
     }
 
     [Test]
@@ -329,31 +324,6 @@ public partial class VideoContextTests
         pbA.PositionSeconds = 50;
         Assert.That(a.Duration, Is.EqualTo(TimeSpan.FromSeconds(100)));
         Assert.That(b.Duration, Is.EqualTo(TimeSpan.Zero), "b's duration is independent");
-    }
-
-    [Test]
-    public void AttachHdrSinkPreStagesSdrEvenWhenForceSdr()
-    {
-        using var ctx = NewContext(out _, forceSdr: true);
-        var sink = new FakeHdrSink { NextRc = 0 };
-        ctx.AttachHdrSink(sink);
-        // Pre-stage SDR runs regardless of forceSdr — leaving the surface untagged is implementation-defined. ApplyHdrPolicy itself is gated off, so no further SetHdr calls beyond the initial pre-stage.
-        Assert.That(sink.SetHdrCalls, Is.EqualTo(new[] { false }));
-        Assert.That(ctx.ActiveHdrState, Is.EqualTo(VideoContext.HdrActiveState.Forced));
-    }
-
-    [Test]
-    public void ForceSdrSkipsSourceHdrSubscription()
-    {
-        using var ctx = NewContext(out var pb, forceSdr: true);
-        var sink = new FakeHdrSink { NextRc = 0 };
-        ctx.AttachHdrSink(sink);
-        sink.SetHdrCalls.Clear();
-        // Source flips to HDR — forceSdr-context must NOT call SetHdr(true) or EnableHdrOutput.
-        pb.RaiseSourceHdrChanged(true);
-        Assert.That(sink.SetHdrCalls, Is.Empty);
-        Assert.That(pb.EnableHdrOutputCalls, Is.EqualTo(0));
-        Assert.That(ctx.ActiveHdrState, Is.EqualTo(VideoContext.HdrActiveState.Forced));
     }
 
     [Test]

@@ -71,7 +71,6 @@ Two runtime-selected paths, chosen by `WaylandDetect.IsWaylandBackend` in `MainW
   - `Playback` observes `video-params/gamma` and fires `SourceHdrChanged(bool)` per-video.
   - `VideoSurface.CurrentOutputHdrChanged` fires on output-side change — `wl_surface.enter`/`leave` mutating the active-output set, or `wp_color_management_output_v1.image_description_changed` propagating through `WaylandOutputRegistry`. Per-output HDR-capability is detected by probing the preferred image description's `tf_named` (PQ/HLG ⇒ HDR); classification lives in `HdrClassifier` on the C# side.
   - `MainWindow.ApplyHdrPolicy` combines the two signals and calls `VideoSurface.SetHdr` (stages `set_image_description` / `unset_image_description` that the next `eglSwapBuffers` flushes atomically with the first new-content buffer) and `Playback.EnableHdrOutput` / `DisableHdrOutput` for mpv's `target-*` targeting.
-  - `--sdr` forces SDR for the whole session and skips both subscriptions.
 - Controls overlaid in fullscreen (via `Gtk.Overlay` reparent) draw on top of the video with correct alpha.
 - Pointer input falls through to the parent (empty input region on the subsurface) so motion-driven auto-hide works.
 - `wp_presentation_feedback` per swap drives the `FrameTimingBridge` ring; VRR/fixed is classified against `wl_output.mode` refresh.

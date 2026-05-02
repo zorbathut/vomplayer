@@ -388,26 +388,26 @@ public partial class ViewModelMainTests
     [Test]
     public void NullPlaybackThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(null!, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(null!, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt()));
     }
 
     [Test]
     public void NullFilePickerThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), null!, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), null!, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt()));
     }
 
     [Test]
     public void NullRecentFilesThrows()
     {
-        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), new FakeFilePicker(), null!, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false));
+        Assert.Throws<ArgumentNullException>(() => new ViewModelMain(new FakePlayback(), new FakeFilePicker(), null!, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt()));
     }
 
     [Test]
     public void PositionMirrorsPlaybackPositionSeconds()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.PositionSeconds = 12.5;
         Assert.That(vm.Position, Is.EqualTo(TimeSpan.FromSeconds(12.5)));
     }
@@ -416,7 +416,7 @@ public partial class ViewModelMainTests
     public void DurationMirrorsPlaybackDurationSeconds()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 60;
         Assert.That(vm.Duration, Is.EqualTo(TimeSpan.FromSeconds(60)));
     }
@@ -425,7 +425,7 @@ public partial class ViewModelMainTests
     public void IsPausedMirrorsPlayback()
     {
         var pb = new FakePlayback { IsPaused = true };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.IsPaused = false;
         Assert.That(vm.IsPaused, Is.False);
     }
@@ -434,7 +434,7 @@ public partial class ViewModelMainTests
     public void ChaptersMirrorPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         var snap = new[] { new MediaChapter(0, "Intro", 0.0), new MediaChapter(1, "Act 1", 60.0) };
         pb.Chapters = snap;
         Assert.That(vm.Chapters, Is.EqualTo(snap));
@@ -444,7 +444,7 @@ public partial class ViewModelMainTests
     public void SeekValueTracksPlaybackWhenNotDragging()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 100;
         pb.PositionSeconds = 25;
         Assert.That(vm.SeekValue, Is.EqualTo(0.25));
@@ -454,7 +454,7 @@ public partial class ViewModelMainTests
     public void SeekToSeeksToNormalizedPositionScaledByDuration()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 100;
 
         vm.SeekTo(0.4);
@@ -466,7 +466,7 @@ public partial class ViewModelMainTests
     public void SeekRelativeForwardsToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.SeekRelative(-5);
         vm.SeekRelative(10);
         Assert.That(pb.RelativeSeeks, Is.EqualTo(new[] { -5.0, 10.0 }));
@@ -476,7 +476,7 @@ public partial class ViewModelMainTests
     public void StepFrameForwardsToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.StepFrameForward();
         vm.StepFrameForward();
         vm.StepFrameBack();
@@ -488,7 +488,7 @@ public partial class ViewModelMainTests
     public void StepChapterForwardsToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.StepChapter(-1);
         vm.StepChapter(1);
         Assert.That(pb.ChapterSteps, Is.EqualTo(new[] { -1, 1 }));
@@ -498,7 +498,7 @@ public partial class ViewModelMainTests
     public void SeekValueTracksPlaybackPosition()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 100;
 
         pb.PositionSeconds = 75;
@@ -511,7 +511,7 @@ public partial class ViewModelMainTests
     {
         // Single-video case (Secondary == null) means no selection and the PlayPause sync-broadcast path. Fires SetPaused with target = !Primary.IsPaused; not TogglePause. The behavior is observably identical to the user (still flips state) — the difference is the underlying call shape, which matters when PiP is on and two streams have drifted.
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 60;
         // Primary starts IsPaused=true (default); flip target is false.
         vm.PlayPauseCommand.Execute(null);
@@ -523,7 +523,7 @@ public partial class ViewModelMainTests
     public void PlayPauseCommandIsNoopBeforeFileLoad()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.PlayPauseCommand.Execute(null);
         Assert.That(pb.TogglePauseCalls, Is.EqualTo(0));
         Assert.That(pb.SetPausedCalls, Is.Empty);
@@ -534,7 +534,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = "/path/to/video.mp4" };
-        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(picker.Calls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/video.mp4"));
@@ -546,7 +546,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = "/path/to/video.mp4" };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/path/to/video.mp4" }));
     }
@@ -557,7 +557,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextResult = null };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         await vm.OpenCommand.ExecuteAsync(null);
         Assert.That(picker.Calls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.Null);
@@ -569,7 +569,7 @@ public partial class ViewModelMainTests
     public void OpenFileLoadsTheTarget()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.OpenFile("/path/to/dropped.mp4");
         Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("/path/to/dropped.mp4"));
@@ -580,7 +580,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.OpenFile("/path/to/dropped.mp4");
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/path/to/dropped.mp4" }));
     }
@@ -590,7 +590,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.OpenFile("https://example.com/stream.m3u8");
         Assert.That(pb.LastLoadedFile, Is.EqualTo("https://example.com/stream.m3u8"));
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "https://example.com/stream.m3u8" }));
@@ -601,7 +601,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false)
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt())
         {
             InitialFile = "/path/to/initial.mp4",
         };
@@ -623,7 +623,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.OnRenderContextReady();
         Assert.That(pb.LastLoadedFile, Is.Null);
         Assert.That(recents.RecordedPaths, Is.Empty);
@@ -633,7 +633,7 @@ public partial class ViewModelMainTests
     public void DisposeUnsubscribesFromPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.PositionSeconds = 5;
         var beforeDispose = vm.Position;
 
@@ -646,7 +646,7 @@ public partial class ViewModelMainTests
     public void TrackListsMirrorPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         var video = new[] { new MediaTrack(1, null, null, false, null) };
         var audio = new[] { new MediaTrack(1, null, "eng", false, null), new MediaTrack(2, null, "fre", false, null) };
         var subs = new[] { new MediaTrack(1, "English", "eng", false, null) };
@@ -662,7 +662,7 @@ public partial class ViewModelMainTests
     public void CurrentIdsMirrorPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.CurrentVideoId = 1;
         pb.CurrentAudioId = 2;
         pb.CurrentSubtitleId = 3;
@@ -681,7 +681,7 @@ public partial class ViewModelMainTests
     public void SelectMethodsRouteToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.SelectVideo(7);
         vm.SelectAudio(8);
         vm.SelectSubtitle(9);
@@ -698,7 +698,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextAudioResult = "/path/to/track.flac" };
-        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         await vm.LoadAudioCommand.ExecuteAsync(null);
         Assert.That(picker.AudioCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedAudio, Is.EqualTo("/path/to/track.flac"));
@@ -710,7 +710,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextAudioResult = null };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         await vm.LoadAudioCommand.ExecuteAsync(null);
         Assert.That(picker.AudioCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedAudio, Is.Null);
@@ -722,7 +722,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextSubtitleResult = "/path/to/track.srt" };
-        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         await vm.LoadSubtitleCommand.ExecuteAsync(null);
         Assert.That(picker.SubtitleCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedSubtitle, Is.EqualTo("/path/to/track.srt"));
@@ -734,7 +734,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var picker = new FakeFilePicker { NextSubtitleResult = null };
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         await vm.LoadSubtitleCommand.ExecuteAsync(null);
         Assert.That(picker.SubtitleCalls, Is.EqualTo(1));
         Assert.That(pb.LastLoadedSubtitle, Is.Null);
@@ -760,7 +760,7 @@ public partial class ViewModelMainTests
         var prefs = new FakeTrackPreferences();
         var path = LocalPathInTemp("movie.mkv");
         var picker = new FakeFilePicker { NextResult = path };
-        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, picker, new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
         try
         {
             await vm.OpenCommand.ExecuteAsync(null);
@@ -784,7 +784,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var prefs = new FakeTrackPreferences();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
         // Set tracks AFTER VM construction so the PropertyChanged → mirror flow runs and vm.AudioTracks reflects the test's setup.
         pb.AudioTracks = new[]
         {
@@ -823,7 +823,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var prefs = new FakeTrackPreferences();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.SubtitleTracks = new[] { new MediaTrack(1, "English", "eng", false, null) };
         var path = LocalPathInTemp("show.mkv");
         try
@@ -846,7 +846,7 @@ public partial class ViewModelMainTests
         // URI sources have no useful directory key; preferences must not be saved (and the playback call must still happen so the user's pick takes effect for the current session).
         var pb = new FakePlayback();
         var prefs = new FakeTrackPreferences();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.AudioTracks = new[] { new MediaTrack(1, "Foo", "eng", false, null) };
         vm.OpenFile("https://example.com/stream.m3u8");
 
@@ -861,7 +861,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var prefs = new FakeTrackPreferences();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.AudioTracks = new[] { new MediaTrack(1, "Foo", "eng", false, null) };
         var path = LocalPathInTemp("movie.mkv");
         try
@@ -893,7 +893,7 @@ public partial class ViewModelMainTests
 
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
             // Tracks set after VM construction so the PropertyChanged → mirror path runs and ApplyTrackPreferences sees them via vm.AudioTracks etc. In real mpv, the TracksReloaded fire that produces the populated lists happens before FileLoaded — so by the time FileLoaded fires, mirrors are populated.
             pb.AudioTracks = new[] { new MediaTrack(11, "English", "eng", false, null), new MediaTrack(12, "French", "fre", false, null) };
             pb.SubtitleTracks = new[] { new MediaTrack(21, "English", "eng", false, null) };
@@ -929,7 +929,7 @@ public partial class ViewModelMainTests
         prefs.Stored[(dir, MediaKind.Audio)] = new TrackPreference(false, null, "eng", false, null, null);
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.AudioTracks = new[] { new MediaTrack(1, null, "eng", false, null) };
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -954,7 +954,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.AudioTracks = new[] { new MediaTrack(1, null, "eng", false, null) };
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -979,7 +979,7 @@ public partial class ViewModelMainTests
         prefs.Stored[(dir, MediaKind.Audio)] = new TrackPreference(false, null, "eng", false, null, null);
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
             // Initial track-list: matches audio (eng) but NOT subtitle (no track titled "Forced").
             pb.AudioTracks = new[] { new MediaTrack(11, null, "eng", false, null) };
             pb.SubtitleTracks = new[] { new MediaTrack(21, "English", "eng", false, null) };
@@ -1020,7 +1020,7 @@ public partial class ViewModelMainTests
         prefs.Stored[(dir, MediaKind.Subtitle)] = new TrackPreference(false, null, "eng", false, null, null);
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.SubtitleTracks = new[] { new MediaTrack(21, null, "eng", false, null) };
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -1050,7 +1050,7 @@ public partial class ViewModelMainTests
     {
         var pb = new FakePlayback();
         var prefs = new FakeTrackPreferences();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), prefs, new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.AudioTracks = new[] { new MediaTrack(1, null, "eng", false, null) };
         vm.OpenFile("https://example.com/stream.m3u8");
         pb.RaiseFileLoaded();
@@ -1070,7 +1070,7 @@ public partial class ViewModelMainTests
         recents.Positions[path] = 60;
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             vm.OpenFile(path);
             // Apply happens on FileLoaded (which is when duration is reliably populated in the real flow), not on OpenFile itself.
@@ -1094,7 +1094,7 @@ public partial class ViewModelMainTests
         recents.Positions[path] = 60;
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             // Simulate "FileLoaded fires before duration is known" — DurationSeconds defaults to 0 on FakePlayback.
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -1118,7 +1118,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -1140,7 +1140,7 @@ public partial class ViewModelMainTests
         recents.Positions[path] = 597;
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -1162,7 +1162,7 @@ public partial class ViewModelMainTests
         recents.Positions[path] = 0;
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -1184,7 +1184,7 @@ public partial class ViewModelMainTests
         var pathB = LocalPathInTemp("b.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             vm.OpenFile(pathA);
             pb.RaiseFileLoaded();
@@ -1210,7 +1210,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             pb.IsPaused = false;
             vm.OpenFile(path);
@@ -1239,7 +1239,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             pb.IsPaused = true;
             vm.OpenFile(path);
@@ -1262,7 +1262,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             pb.IsPaused = false;
             vm.OpenFile(path);
@@ -1289,7 +1289,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             pb.IsPaused = true;
             vm.OpenFile(path);
@@ -1315,7 +1315,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             vm.OpenFile(path);
             pb.RaiseFileLoaded();
@@ -1339,7 +1339,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             pb.IsPaused = false;
             vm.OpenFile(path);
@@ -1366,7 +1366,7 @@ public partial class ViewModelMainTests
         var path = LocalPathInTemp("movie.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             pb.DurationSeconds = 600;
             pb.IsPaused = false;
             vm.OpenFile(path);
@@ -1387,7 +1387,7 @@ public partial class ViewModelMainTests
     public void VolumeMirrorsPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.Volume = 42;
         Assert.That(vm.Volume, Is.EqualTo(42));
     }
@@ -1396,7 +1396,7 @@ public partial class ViewModelMainTests
     public void IsMutedMirrorsPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.IsMuted = true;
         Assert.That(vm.IsMuted, Is.True);
     }
@@ -1405,7 +1405,7 @@ public partial class ViewModelMainTests
     public void SetVolumeForwardsToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.SetVolume(75);
         Assert.That(pb.VolumeWrites, Is.EqualTo(new[] { 75.0 }));
     }
@@ -1414,7 +1414,7 @@ public partial class ViewModelMainTests
     public void AdjustVolumeForwardsToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.AdjustVolume(-5);
         vm.AdjustVolume(10);
         Assert.That(pb.VolumeAdjustments, Is.EqualTo(new[] { -5.0, 10.0 }));
@@ -1424,7 +1424,7 @@ public partial class ViewModelMainTests
     public void ToggleMuteForwardsToPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.ToggleMute();
         vm.ToggleMute();
         Assert.That(pb.ToggleMuteCalls, Is.EqualTo(2));
@@ -1436,7 +1436,7 @@ public partial class ViewModelMainTests
         // URIs (http/smb/…) skip both the apply lookup AND every save trigger. Position persistence is for local paths only.
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 600;
         pb.IsPaused = false;
         vm.OpenFile("https://example.com/stream.m3u8");
@@ -1454,7 +1454,7 @@ public partial class ViewModelMainTests
     public void OpenFilePublicReplacesPlaylistWithSingleItem()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.OpenFile("/path/to/a.mp4");
         Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/path/to/a.mp4" }));
         Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
@@ -1469,7 +1469,7 @@ public partial class ViewModelMainTests
     public void LoadPathsReplaceLoadsFirstItem()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
         Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/a", "/b", "/c" }));
         Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
@@ -1481,7 +1481,7 @@ public partial class ViewModelMainTests
     public void LoadPathsReplaceWithEmptyDoesNothing()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a" }, replace: true);
         Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
 
@@ -1495,7 +1495,7 @@ public partial class ViewModelMainTests
     public void LoadPathsAppendToEmptyKicksOffPlayback()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b" }, replace: false);
         Assert.That(vm.Playlist.Items, Is.EqualTo(new[] { "/a", "/b" }));
         Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(0));
@@ -1506,7 +1506,7 @@ public partial class ViewModelMainTests
     public void LoadPathsAppendToNonEmptyDoesNotChangeCurrent()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b" }, replace: true);
         pb.LoadFileCalls = 0;
         pb.LastLoadedFile = null;
@@ -1522,7 +1522,7 @@ public partial class ViewModelMainTests
     public void PlayPlaylistItemSwitchesCurrent()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
         pb.LoadFileCalls = 0;
         pb.LastLoadedFile = null;
@@ -1539,7 +1539,7 @@ public partial class ViewModelMainTests
     public void EofReachedRisingEdgeAdvances()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b" }, replace: true);
         pb.RaiseFileLoaded();
         pb.DurationSeconds = 60;
@@ -1556,7 +1556,7 @@ public partial class ViewModelMainTests
     {
         // The currentFileLoaded gate. A stale eof-reached=true from the prior file's tail can land in the dispatcher queue after LoadFile dispatches but before the new file's FileLoaded fires. Without the gate, the spurious rising edge would skip the just-loaded file.
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b" }, replace: true);
         // FileLoaded NOT raised — currentFileLoaded is still false.
         pb.DurationSeconds = 60;
@@ -1572,7 +1572,7 @@ public partial class ViewModelMainTests
     {
         // The DurationSeconds > 0 gate. Live streams may oscillate eof-reached without a meaningful "next item" semantic.
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "https://example.com/live", "/b" }, replace: true);
         pb.RaiseFileLoaded();
         // DurationSeconds remains 0 — live source.
@@ -1586,7 +1586,7 @@ public partial class ViewModelMainTests
     public void EofReachedAtLastItemDoesNotAdvance()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a" }, replace: true);
         pb.RaiseFileLoaded();
         pb.DurationSeconds = 60;
@@ -1604,7 +1604,7 @@ public partial class ViewModelMainTests
     {
         // No LoadPaths call yet — playlist is empty. EOF on whatever happens to be playing (shouldn't happen in practice; defense in depth).
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 60;
 
         pb.IsEofReached = true;
@@ -1618,7 +1618,7 @@ public partial class ViewModelMainTests
     {
         // The rising-edge gate. User seeks back from EOF and re-hits it without intervening load — should not re-advance.
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
         pb.RaiseFileLoaded();
         pb.DurationSeconds = 60;
@@ -1639,7 +1639,7 @@ public partial class ViewModelMainTests
     {
         // Sequence: last item ends (auto-advance returns null, no load), user double-clicks an earlier row. The intervening LoadCurrentItem must reset wasEofReached so the row's eventual EOF triggers a real advance, but the row click itself must NOT auto-advance past whatever it landed on.
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/a", "/b", "/c" }, replace: true);
         pb.RaiseFileLoaded();
         pb.DurationSeconds = 60;
@@ -1668,7 +1668,7 @@ public partial class ViewModelMainTests
     {
         // The next item is a URI; auto-advance shouldn't bail just because the entry isn't a local-fs path. The IsLocalFilesystemPath gate inside LoadCurrentItem only affects the recents-position lookup, not the load itself.
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/local.mkv", "https://example.com/stream.m3u8" }, replace: true);
         pb.RaiseFileLoaded();
         pb.DurationSeconds = 60;
@@ -1689,7 +1689,7 @@ public partial class ViewModelMainTests
         var pathB = LocalPathInTemp("b.mkv");
         try
         {
-            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt(), false);
+            var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
             vm.LoadPaths(new[] { path, pathB }, replace: true);
             pb.RaiseFileLoaded();
             pb.DurationSeconds = 600;
@@ -1716,7 +1716,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader { Available = false };
         var prompt = new FakeUrlPrompt();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
 
@@ -1731,7 +1731,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt { NextUrl = null };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
 
@@ -1750,7 +1750,7 @@ public partial class ViewModelMainTests
             DownloadResolver = u => "/cache/abc/video.mp4",
         };
         var prompt = new FakeUrlPrompt { NextUrl = "https://youtu.be/abc" };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
 
@@ -1769,7 +1769,7 @@ public partial class ViewModelMainTests
             DownloadResolver = u => $"/cache/{u}.mp4",
         };
         var prompt = new FakeUrlPrompt { NextUrl = "https://youtube.com/playlist?list=XYZ" };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
 
@@ -1790,7 +1790,7 @@ public partial class ViewModelMainTests
             DownloadResolver = u => $"/cache/{u}.mp4",
         };
         var prompt = new FakeUrlPrompt { NextUrl = "https://youtube.com/playlist?list=XYZ" };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
         // User clicks the second row.
@@ -1808,7 +1808,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var dl = new FailingProbeDownloader("upstream parse failed");
         var prompt = new FakeUrlPrompt { NextUrl = "https://something" };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
 
@@ -1828,7 +1828,7 @@ public partial class ViewModelMainTests
             DownloadResolver = u => "/local/cache/X.mp4",
         };
         var prompt = new FakeUrlPrompt { NextUrl = "https://youtu.be/X" };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
         // Allow the fire-and-forget LoadUrlAsync to complete its synchronous Task.FromResult path.
@@ -1845,7 +1845,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         vm.OpenFile("/some/local/file.mkv");
 
@@ -1865,7 +1865,7 @@ public partial class ViewModelMainTests
             PendingDownload = pendingA,
         };
         var prompt = new FakeUrlPrompt { NextUrl = "https://youtube.com/playlist?list=Z" };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
         // Multi-entry OpenUrl no longer auto-starts; click row 0 to put A in flight.
@@ -1901,7 +1901,7 @@ public partial class ViewModelMainTests
             PendingDownload = pendingA,
         };
         var prompt = new FakeUrlPrompt { NextUrl = "https://youtube.com/playlist?list=Z" };
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         await ((CommunityToolkit.Mvvm.Input.IAsyncRelayCommand)vm.OpenUrlCommand).ExecuteAsync(null);
         // Multi-entry OpenUrl no longer auto-starts; click row 0 to put A in flight.
@@ -1932,7 +1932,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt, false);
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
         vm.OpenFile("https://youtu.be/never-via-openurl");
 

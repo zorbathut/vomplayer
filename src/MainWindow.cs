@@ -80,7 +80,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly Controls.PlaylistPanel playlistPanel;
     // Stateful action backing "View → Playlist". Held as a field so the auto-show-on-multi-drop path can flip the action's state in lockstep with playlistPanel.SetVisible — keeps the menu's check glyph honest.
     private Gio.SimpleAction? playlistVisibleAction;
-    private readonly bool forceSdr;
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
     private readonly VideoSurface? videoSurface;
@@ -127,7 +126,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private ulong seekLegacyHandlerId;
     private IntPtr seekLegacyControllerHandle;
 
-    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile, bool forceSdr)
+    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
     {
         if (app == null)
         {
@@ -160,11 +159,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         this.configPath = configPath;
         // Derive the runtime keymap from the config now that we're past gtk_init. Trigger parsing logs and skips bad entries rather than aborting load — a single typo in config.toml shouldn't lock the user out of every other binding.
         this.hotkeys = HotkeyMap.FromTomlForm(userConfig.Hotkeys.ToDictionary(), m => Console.Error.WriteLine($"[vompl] {m}"));
-        this.forceSdr = forceSdr;
 
         SetApplication(app);
-        var brand = Random.Shared.NextDouble() < 0.01 ? "VomplAyer" : "Vomplayer";
-        Title = forceSdr ? $"{brand} — SDR" : brand;
+        Title = Random.Shared.NextDouble() < 0.01 ? "VomplAyer" : "Vomplayer";
         SetDefaultSize(1280, 720);
         AddCssClass("vompl-main-window");
 
@@ -176,7 +173,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         urlDownloadCache.Cleanup(DateTimeOffset.UtcNow, msg => Console.Error.WriteLine($"[vompl] {msg}"));
         this.urlDownloader = new YtDlpDownloader(urlDownloadCache, "yt-dlp");
         this.urlPrompt = new UrlPromptGtk(this);
-        viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt, forceSdr);
+        viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         viewModel.InitialFile = initialFile;
 
         Gtk.Widget videoWidget;

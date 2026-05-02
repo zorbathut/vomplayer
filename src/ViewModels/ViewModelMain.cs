@@ -200,10 +200,10 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         nameof(CurrentSubtitleId),
     };
 
-    public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt, bool forceSdr)
+    public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt)
     {
         // VideoContext does its own null checks; this ctor's only added value is forwarding PropertyChanged so the proxy properties above re-fire under their own names on the VM (existing OnViewModelPropertyChanged handlers in MainWindow rely on the property names matching the VM's surface, not the context's).
-        Primary = new VideoContext(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt, forceSdr);
+        Primary = new VideoContext(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         Primary.PropertyChanged += OnContextPropertyChanged;
     }
 

@@ -162,13 +162,13 @@ public partial class MultiVideoCoordinatorTests
         public Harness()
         {
             PrimaryPlayback = new FakePlayback();
-            Vm = new ViewModelMain(PrimaryPlayback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt(), forceSdr: false);
+            Vm = new ViewModelMain(PrimaryPlayback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
         }
 
         public VideoContext NewSecondary()
         {
             SecondaryPlayback = new FakePlayback();
-            return new VideoContext(SecondaryPlayback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt(), forceSdr: false);
+            return new VideoContext(SecondaryPlayback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
         }
 
         public void EnablePip()

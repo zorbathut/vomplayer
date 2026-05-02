@@ -41,8 +41,6 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     private readonly ITrackPreferences trackPreferences;
     private readonly IUrlDownloader urlDownloader;
     private readonly IUrlPrompt urlPrompt;
-    // True ⇒ skip Source/Output HDR subscriptions and ApplyHdrPolicy entirely. The pre-stage SDR call in AttachHdrSink still runs (so the subsurface gets a defined GAMMA22/BT.709 tag instead of staying compositor-defined). HdrActiveState stays at Forced for the lifetime of this context.
-    private readonly bool forceSdr;
     // Currently-attached IHdrSink (the per-context VideoSurface on Wayland; null on the GLArea fallback path or when no surface is attached yet). AttachHdrSink populates this; DetachHdrSink clears it. Read by ApplyHdrPolicy and OnCurrentOutputHdrChanged.
     private IHdrSink? hdrSink;
     // Latest value from playback.SourceHdrChanged. Playback fires on transitions only, not on every frame, so caching here lets ApplyHdrPolicy combine it with the current output bit on output-side changes too.
@@ -136,7 +134,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     // Owned playlist model. The view (PlaylistPanel) subscribes to Playlist.Changed and rebuilds rows wholesale; LoadPaths / PlayPlaylistItem / the auto-advance handler are the only mutators. Public so the panel can read Items / CurrentIndex on every Changed fire — Playlist itself is a plain class, no GTK dependency, fully unit-testable.
     public Playlist Playlist { get; } = new Playlist();
 
-    // Outcome of the most recent ApplyHdrPolicy. Kept as a four-state enum (rather than a bool) so the stderr log on transition into Failed can distinguish "compositor refused" from "intentional SDR" — the diagnostic overlay collapses every non-Hdr state to "SDR" and doesn't care about the internal distinction, but ApplyHdrPolicy does.
+    // Outcome of the most recent ApplyHdrPolicy. Kept as a three-state enum (rather than a bool) so the stderr log on transition into Failed can distinguish "compositor refused" from "intentional SDR" — the diagnostic overlay collapses every non-Hdr state to "SDR" and doesn't care about the internal distinction, but ApplyHdrPolicy does.
     public enum HdrActiveState
     {
         // Subsurface untagged or explicitly SDR-tagged. Default pre-first-apply, or the explicit outcome when source or display is SDR.
@@ -145,12 +143,9 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         Hdr,
         // HDR was requested (source PQ/HLG) but the sink's SetHdr(true) returned non-zero. Pixels scan out as SDR.
         Failed,
-        // forceSdr=true is in effect. ApplyHdrPolicy never runs; state stays here for the context's lifetime.
-        Forced,
     }
 
-    // Initialized in the ctor: Forced when forceSdr is in effect, Sdr otherwise (default pre-first-apply — subsurface untagged, equivalent at the pixel level to an explicit SDR policy).
-    public HdrActiveState ActiveHdrState { get; private set; }
+    public HdrActiveState ActiveHdrState { get; private set; } = HdrActiveState.Sdr;
 
     // The currently-attached HDR sink, or null if none. Exposed so the diagnostic overlay can read CurrentOutputIsHdr without a separate VideoSurface reference.
     public IHdrSink? HdrSink
@@ -170,7 +165,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
     }
 
-    public VideoContext(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt, bool forceSdr)
+    public VideoContext(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt)
     {
         if (playback == null)
         {
@@ -202,16 +197,11 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         this.trackPreferences = trackPreferences;
         this.urlDownloader = urlDownloader;
         this.urlPrompt = urlPrompt;
-        this.forceSdr = forceSdr;
-        ActiveHdrState = forceSdr ? HdrActiveState.Forced : HdrActiveState.Sdr;
         this.playback.PropertyChanged += OnPlaybackPropertyChanged;
         this.playback.FileLoaded += OnPlaybackFileLoaded;
         this.playback.TracksReloaded += OnPlaybackTracksReloaded;
-        // Source-HDR transitions are tracked even when no sink is attached yet — lastSourceHdr is the input to ApplyHdrPolicy whenever a sink does attach. forceSdr skips the subscription so an explicit "force SDR" request can't be flipped by a late-arriving SourceHdrChanged.
-        if (!forceSdr)
-        {
-            this.playback.SourceHdrChanged += OnSourceHdrChanged;
-        }
+        // Source-HDR transitions are tracked even when no sink is attached yet — lastSourceHdr is the input to ApplyHdrPolicy whenever a sink does attach.
+        this.playback.SourceHdrChanged += OnSourceHdrChanged;
     }
 
     public async Task OpenAsync()
@@ -679,9 +669,9 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         // No-match leaves the kind unmarked so the next TracksReloaded retries — covers mpv lazy-loading external tracks that match the preference.
     }
 
-    // Wire the per-context HDR sink. The pre-stage SDR call runs synchronously here, before any frame can render — necessary to cover three paths that ApplyHdrPolicy alone doesn't reach: (a) forceSdr mode, where ApplyHdrPolicy is gated off; (b) first-SDR-file in a fresh process, where the source-gamma observation arrives as null→bt.1886 and never crosses isSourceHdr's transition gate, so SourceHdrChanged never fires; (c) any compositor whose first wl_surface.enter races ahead of the bridge subscription. In all three, without this kickoff the subsurface stays untagged and KWin's HDR-aware compositor blows out gamma22 SDR output.
+    // Wire the per-context HDR sink. The pre-stage SDR call runs synchronously here, before any frame can render — necessary to cover two paths that ApplyHdrPolicy alone doesn't reach: (a) first-SDR-file in a fresh process, where the source-gamma observation arrives as null→bt.1886 and never crosses isSourceHdr's transition gate, so SourceHdrChanged never fires; (b) any compositor whose first wl_surface.enter races ahead of the bridge subscription. In both, without this kickoff the subsurface stays untagged and KWin's HDR-aware compositor blows out gamma22 SDR output.
     //
-    // After pre-stage, subscribe to CurrentOutputHdrChanged (only when not forceSdr) and run an initial ApplyHdrPolicy so a source-HDR file already loaded picks up its tag now. Caller responsibility: invoke this only when the sink is past pre-render-ready (e.g., from RenderContextReady on Wayland) — the contract of IHdrSink.SetHdr returns -1 pre-realize and we'd silently fail without an obvious place to retry.
+    // After pre-stage, subscribe to CurrentOutputHdrChanged and run an initial ApplyHdrPolicy so a source-HDR file already loaded picks up its tag now. Caller responsibility: invoke this only when the sink is past pre-render-ready (e.g., from RenderContextReady on Wayland) — the contract of IHdrSink.SetHdr returns -1 pre-realize and we'd silently fail without an obvious place to retry.
     public void AttachHdrSink(IHdrSink? sink)
     {
         if (hdrSink == sink)
@@ -697,13 +687,10 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return;
         }
-        // Pre-stage SDR regardless of forceSdr — leaving the surface untagged is implementation-defined and can blow out on KWin. Even forceSdr wants an explicit GAMMA22/BT.709 description.
+        // Pre-stage SDR — leaving the surface untagged is implementation-defined and can blow out on KWin.
         sink.SetHdr(false);
-        if (!forceSdr)
-        {
-            sink.CurrentOutputHdrChanged += OnCurrentOutputHdrChanged;
-            ApplyHdrPolicy();
-        }
+        sink.CurrentOutputHdrChanged += OnCurrentOutputHdrChanged;
+        ApplyHdrPolicy();
     }
 
     public void DetachHdrSink()
@@ -730,10 +717,6 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     // Single point of decision for the HDR-viewport question. Drives the wp_color_management_v1 tag on the subsurface and mpv's target-* options. Policy: PQ tag iff source is HDR (regardless of display HDR-capability). Rationale: mpv-via-libmpv is forced to use the older gl_video pipeline whose tone-map curve clips highlights hard at the source mastering-display peak (1000 nits → all-white SDR for typical files); KWin 6.x runs HDR-aware compositing with libplacebo, which has nicer curves. By tagging PQ and having mpv emit pass-through PQ, we hand HDR→SDR conversion to the compositor and inherit its tone-map. Display HDR-capability is no longer load-bearing for the policy — it's still tracked for the diagnostic overlay's `display=` row, but doesn't gate the tag. Window-spanning a PQ-tagged subsurface across HDR + SDR outputs is now correct by construction: the compositor pass-throughs on the HDR side and tonemaps on the SDR side per-output. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable (else mpv tone-maps to gamma22 — fallback for non-CM compositors). On disable, mirror in reverse order so the next SDR frame lands on an SDR-tagged surface (GAMMA22/BT.709) — see VideoSurface.SetHdr for why we tag SDR explicitly rather than leave the surface in compositor-defined territory.
     private void ApplyHdrPolicy()
     {
-        if (forceSdr)
-        {
-            return;
-        }
         if (hdrSink == null)
         {
             return;
@@ -892,10 +875,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         playback.PropertyChanged -= OnPlaybackPropertyChanged;
         playback.FileLoaded -= OnPlaybackFileLoaded;
         playback.TracksReloaded -= OnPlaybackTracksReloaded;
-        if (!forceSdr)
-        {
-            playback.SourceHdrChanged -= OnSourceHdrChanged;
-        }
+        playback.SourceHdrChanged -= OnSourceHdrChanged;
         DetachHdrSink();
     }
 }
