@@ -25,10 +25,10 @@ public partial class MainWindow
     // Hover controller on the wrapper; queried on drag-end to decide whether the pointer is still inside the wrapper (keep grip visible) or outside (hide it). Without this, the leave path that fired during the drag was suppressed by the active flag and would not re-fire after release.
     private Gtk.EventControllerMotion? pipHoverController;
 
-    // User-driven layout overrides. Each remains null until the user drags (margins) or resizes (width). Cleared on DisablePip so a re-enable starts at the default corner placement.
-    private int? pipUserWidth;
-    private int? pipUserMarginStart;
-    private int? pipUserMarginTop;
+    // User-driven layout overrides, stored as fractions of the primary video region's allocation (width-fraction for width/marginStart, height-fraction for marginTop). Each remains null until the user drags (margins) or resizes (width). Storing fractions — not pixels — means a subsequent window resize keeps the PiP at the same proportional size and position the user picked. Cleared on DisablePip so a re-enable starts at the default corner placement.
+    private double? pipUserWidthFraction;
+    private double? pipUserMarginStartFraction;
+    private double? pipUserMarginTopFraction;
 
     // Captured at drag-begin. Margins/width are the layout snapshot at that moment; the overlay-local point is the press position translated into videoOverlay coordinates, which is the reference frame we read deltas in. Why not just `OffsetX`/`OffsetY`? Those are reported in the dragged widget's local frame, and we MOVE the widget during the drag — so the local frame slides under the pointer and OffsetX collapses back toward zero each time we apply our update, producing slow + jittery motion. videoOverlay doesn't move; deltas read in its frame are stable. (Same problem affects the resize grip: as the wrapper grows, the grip — pinned to the wrapper's bottom-right — also moves under the pointer.)
     private int pipDragStartMarginStart;
@@ -202,10 +202,21 @@ public partial class MainWindow
             BuildSecondaryVideoView();
         }
 
+        // Track the primary's video aspect: a primary file load/unload changes the letterbox/pillarbox layout, which moves the video display rect the PiP is positioned relative to. ApplyPipLayout reads the current rect on each call, so we just need to re-trigger it when the aspect flips.
+        viewModel.Primary.PropertyChanged += OnPrimaryContextPropertyChangedForPip;
+
         // PiP UI bookkeeping: re-bind the playlist panel to whichever context is active (Primary on first enable; SetActive may have been called pre-enable in tests, but in production EnablePip lands with active=Primary). Recompute the active CSS class and re-stack the OSD controlsBox if we're already fullscreen so it stays above the new PiP overlay child.
         RebindPlaylistPanelToTarget();
         UpdateSelectedVideoCss();
         ReinsertControlsOverlay();
+    }
+
+    private void OnPrimaryContextPropertyChangedForPip(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(VideoContext.VideoAspect))
+        {
+            ApplyPipLayout();
+        }
     }
 
     public void DisablePip()
@@ -219,6 +230,7 @@ public partial class MainWindow
         {
             viewModel.Secondary.PropertyChanged -= OnSecondaryContextPropertyChanged;
         }
+        viewModel.Primary.PropertyChanged -= OnPrimaryContextPropertyChangedForPip;
         // VM teardown comes first: it disposes the VideoContext (which detaches the HDR sink + unsubscribes Source/Output handlers); doing this before the surface is destroyed lets the SDR pre-stage call inside DetachHdrSink land on a still-live surface.
         viewModel.DisablePip();
 
@@ -255,9 +267,9 @@ public partial class MainWindow
             secondaryPlayback = null;
         }
         // Reset user-set layout so a future EnablePip starts at the default corner placement again. Persisting across enable/disable was considered and rejected — re-enabling a previously-dragged PiP at a stale absolute position is more disorienting than re-anchoring to the corner.
-        pipUserWidth = null;
-        pipUserMarginStart = null;
-        pipUserMarginTop = null;
+        pipUserWidthFraction = null;
+        pipUserMarginStartFraction = null;
+        pipUserMarginTopFraction = null;
         RebindPlaylistPanelToTarget();
         UpdateSelectedVideoCss();
         ReinsertControlsOverlay();
@@ -410,22 +422,10 @@ public partial class MainWindow
         {
             return;
         }
-        int primaryW = videoArea?.GetAllocatedWidth() ?? videoView?.GetAllocatedWidth() ?? 0;
-        int primaryH = videoArea?.GetAllocatedHeight() ?? videoView?.GetAllocatedHeight() ?? 0;
+        var rect = ComputePrimaryVideoRect();
         double aspect = viewModel.Secondary?.VideoAspect ?? (16.0 / 9.0);
-        var r = PipLayoutCalc.Compute(primaryW, primaryH, aspect, PipMargin, pipUserWidth, pipUserMarginStart, pipUserMarginTop, PipMinWidth, PipMinHeight);
-        if (pipUserWidth.HasValue)
-        {
-            pipUserWidth = r.Width;
-        }
-        if (pipUserMarginStart.HasValue)
-        {
-            pipUserMarginStart = r.MarginStart;
-        }
-        if (pipUserMarginTop.HasValue)
-        {
-            pipUserMarginTop = r.MarginTop;
-        }
+        var r = PipLayoutCalc.Compute(rect, aspect, PipMargin, pipUserWidthFraction, pipUserMarginStartFraction, pipUserMarginTopFraction, PipMinWidth, PipMinHeight);
+        // Note: we deliberately DO NOT write the post-clamp values back into pipUser*Fraction here. ApplyPipLayout fires on every layout-relevant change including passive window resizes, and round-tripping pixels↔fractions accumulates rounding error each pass — over many small resizes the PiP would walk inward and lose precision. Likewise, when the window shrinks enough to trigger Compute's bounds-clamp, writing the clamped fraction back would erase the user's original placement so a later window-grow couldn't restore it. Instead, the stored fractions are written ONLY by the drag handlers (where the user's intent is unambiguous); Compute clamps for rendering each call, so a stored fraction that's currently out of range (e.g. user dragged to right edge, window then shrank) renders correctly inside bounds AND springs back to its original spot when the window grows again. Subsequent drags resume from a valid position because OnPipMoveDragBegin / OnPipResizeDragBegin capture pipContainer.GetMargin*() / GetAllocatedWidth() — the rendered (clamped) screen position — not the stored fraction.
         pipContainer.SetSizeRequest(r.Width, r.Height);
         pipContainer.SetMarginStart(r.MarginStart);
         pipContainer.SetMarginTop(r.MarginTop);
@@ -435,6 +435,15 @@ public partial class MainWindow
 
         // VideoArea.OnResize fires on size changes only — pure-position changes from a wrapper-margin update (drag-to-move, or window-resize-induced clamp where width is fixed) leave the wl_subsurface stranded at the previous screen position. Schedule a deferred RefreshGeometry so it fires after the queued layout pass settles (DEFAULT_IDLE runs after GTK's HIGH_IDLE layout phase). Coalesced so a flurry of drag updates is one refresh per frame, not N. RefreshGeometry's lastX/Y dedupe makes redundant calls free when geometry didn't actually change.
         SchedulePipGeometryRefresh();
+    }
+
+    // Resolve the primary's video display rect in videoOverlay-space (== widget-space; the videoArea/videoView fills the overlay so the two share an origin). Combines the primary widget's allocation with the primary VideoContext's display aspect to compute the inner rect mpv actually paints into — which the user perceives as "the video" and the PiP is positioned relative to.
+    private PipLayoutCalc.VideoRect ComputePrimaryVideoRect()
+    {
+        int primaryW = videoArea?.GetAllocatedWidth() ?? videoView?.GetAllocatedWidth() ?? 0;
+        int primaryH = videoArea?.GetAllocatedHeight() ?? videoView?.GetAllocatedHeight() ?? 0;
+        double? primaryAspect = viewModel.Primary.VideoAspect;
+        return PipLayoutCalc.ComputeVideoRect(primaryW, primaryH, primaryAspect);
     }
 
     private void SchedulePipGeometryRefresh()
@@ -492,10 +501,18 @@ public partial class MainWindow
         {
             return;
         }
+        var rect = ComputePrimaryVideoRect();
+        if (rect.Width <= 0 || rect.Height <= 0)
+        {
+            return;
+        }
         double dx = overlayX - pipGestureOverlayStartX;
         double dy = overlayY - pipGestureOverlayStartY;
-        pipUserMarginStart = pipDragStartMarginStart + (int)Math.Round(dx);
-        pipUserMarginTop = pipDragStartMarginTop + (int)Math.Round(dy);
+        // Compute the new widget-space pixel margin from the captured start, subtract the video rect's offset to get an in-rect position, then convert to a fraction of the rect. Storing fractions relative to the *video rect* — not the surrounding widget — lets the PiP stay glued to the visible video region across both window resizes and viewport-aspect changes (e.g. 16:9 widget showing a 4:3 video has pillarbox bars that the PiP must not drift into).
+        double newMarginStart = pipDragStartMarginStart + dx;
+        double newMarginTop = pipDragStartMarginTop + dy;
+        pipUserMarginStartFraction = (newMarginStart - rect.X) / rect.Width;
+        pipUserMarginTopFraction = (newMarginTop - rect.Y) / rect.Height;
         ApplyPipLayout();
     }
 
@@ -522,11 +539,18 @@ public partial class MainWindow
         {
             return;
         }
+        var rect = ComputePrimaryVideoRect();
+        if (rect.Width <= 0)
+        {
+            return;
+        }
         double dx = overlayX - pipGestureOverlayStartX;
         double dy = overlayY - pipGestureOverlayStartY;
         double aspect = viewModel.Secondary?.VideoAspect ?? (16.0 / 9.0);
         double dw = PipLayoutCalc.ProjectAspectResize(dx, dy, aspect);
-        pipUserWidth = pipResizeStartWidth + (int)Math.Round(dw);
+        // Convert the new pixel width to a fraction of the video rect's width — see pipUserWidthFraction's docstring for why fractions and why relative to the rect rather than the widget.
+        double newWidth = pipResizeStartWidth + dw;
+        pipUserWidthFraction = newWidth / rect.Width;
         ApplyPipLayout();
     }
 
