@@ -50,9 +50,9 @@ MIT — see [LICENSE](LICENSE). libmpv is LGPLv2.1+ and used as a dynamic-link d
 
 The following capitalizations are valid:
 
-vomplayer
-Vomplayer
-VomplAyer
-Vompl Ayer
+vomplayer  
+Vomplayer  
+VomplAyer  
+Vompl Ayer  
 
 "VomPlayer" is explicitly not allowed. That's not how it's spelled or pronounced. Deal with it.
