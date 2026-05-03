@@ -78,6 +78,7 @@ public partial class MultiVideoCoordinatorTests
 
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
+        public string DiagTag { get; set; } = "?";
 
         public List<string> LoadedFiles { get; } = new();
         public int TogglePauseCalls { get; private set; }
