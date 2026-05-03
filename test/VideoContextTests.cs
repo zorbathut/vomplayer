@@ -66,6 +66,9 @@ public partial class VideoContextTests
         private double? videoAspect;
 
         [ObservableProperty]
+        private double? videoFps;
+
+        [ObservableProperty]
         private string? mediaTitle;
 
         public event Action? FileLoaded;

@@ -72,6 +72,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private double? videoAspect;
 
+    // Source's container frame rate from mpv's `container-fps` property. Null when no file is loaded, no video stream is present, or mpv reports an unusable value (≤ 0 or unavailable). Reset on LoadFile to null so the coordinator's StepFrame absolute-delta math doesn't briefly use the previous file's fps in the gap between LoadFile and the new file's first container-fps observation.
+    [ObservableProperty]
+    private double? videoFps;
+
     // Mirror of mpv's `media-title`. Null on no-file-loaded; reset preemptively in LoadFile so the previous file's title can't survive past a swap (it would otherwise linger until mpv's first observation lands on the new file).
     [ObservableProperty]
     private string? mediaTitle;
@@ -165,6 +169,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             // Display dimensions, fired together by mpv after a file's video stream is decoded enough to know its display aspect (sample aspect ratio applied). Either property changing recomputes VideoAspect; the synthesized initial fires land null and clear it. mpv reports them in pixel-correct units regardless of decoder, so VideoAspect stays correct for anamorphic sources.
             h.ObserveProperty("dwidth", MpvFormat.Int64);
             h.ObserveProperty("dheight", MpvFormat.Int64);
+            // container-fps fires after the source's video stream is decoded enough to know its frame rate. Initial synthesized fire pre-load lands null and clears VideoFps.
+            h.ObserveProperty("container-fps", MpvFormat.Double);
             // mpv's media-title falls back to the filename when no metadata title tag is present; the synthesized initial fire lands null pre-LoadFile.
             h.ObserveProperty("media-title", MpvFormat.String);
         });
@@ -186,6 +192,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         lastDwidth = null;
         lastDheight = null;
         VideoAspect = null;
+        // Same race rationale: the coordinator's StepFrame uses Primary.VideoFps to compute the absolute-seconds delta, and a stale value from the previous file would mis-step Secondary.
+        VideoFps = null;
         // Same race rationale as the dwidth/dheight clear: stop the previous file's title from surviving past a load while mpv works out the new file's media-title.
         MediaTitle = null;
         dispatcher.Post(h =>
@@ -411,6 +419,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
             case "dheight":
                 lastDheight = change.Value.AsInt64;
                 UpdateVideoAspect();
+                break;
+            case "container-fps":
+                // Filter ≤ 0 to null: mpv reports 0 (or property-unavailable, which AsDouble surfaces as null) for audio-only files / pre-load / sources where the container omits a frame rate. Coordinator treats null as "fall back to fan-out" rather than dividing by zero.
+                double? fps = change.Value.AsDouble;
+                VideoFps = fps.HasValue && fps.Value > 0 ? fps : null;
                 break;
             case "media-title":
                 UpdateMediaTitle(change.Value.AsString);

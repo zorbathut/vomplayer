@@ -65,6 +65,9 @@ public partial class ViewModelMainTests
         private double? videoAspect;
 
         [ObservableProperty]
+        private double? videoFps;
+
+        [ObservableProperty]
         private string? mediaTitle;
 
         public event Action? FileLoaded;

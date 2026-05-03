@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -214,6 +215,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         // VideoContext does its own null checks; this ctor's only added value is forwarding PropertyChanged so the proxy properties above re-fire under their own names on the VM (existing OnViewModelPropertyChanged handlers in MainWindow rely on the property names matching the VM's surface, not the context's).
         Primary = new VideoContext(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         Primary.PropertyChanged += OnContextPropertyChanged;
+        // File-load resets Primary.Position to 0; an in-flight implicit-burst anchor from the previous file would mis-anchor the first SeekTo against the new file. Subscribe directly to the playback (not VideoContext, since the anchor is purely a coordinator concern and doesn't need to flow through the context's mirror plumbing).
+        playback.FileLoaded += InvalidateSyncSeekAnchor;
     }
 
     // Take ownership of `secondary` and switch into PiP mode. Caller (MainWindow) constructs the secondary VideoContext (with its own Playback) and hands it over here. The VM then disables per-context auto-advance on both and starts driving lockstep advance itself. Idempotent: calling EnablePip while already in PiP mode is a no-op (the supplied secondary is NOT swapped in — caller should DisablePip first).
@@ -231,6 +234,9 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         Primary.AutoAdvanceEnabled = false;
         secondary.AutoAdvanceEnabled = false;
         secondary.PropertyChanged += OnContextPropertyChanged;
+        // Same FileLoaded subscription as Primary — a Secondary file load between SeekTos within the burst window would otherwise produce a Primary-anchored delta against a Secondary that just reset to 0.
+        secondary.Playback.FileLoaded += InvalidateSyncSeekAnchor;
+        InvalidateSyncSeekAnchor();
         IsPipEnabled = true;
     }
 
@@ -246,8 +252,10 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         if (secondary != null)
         {
             secondary.PropertyChanged -= OnContextPropertyChanged;
+            secondary.Playback.FileLoaded -= InvalidateSyncSeekAnchor;
             secondary.Dispose();
         }
+        InvalidateSyncSeekAnchor();
         Primary.AutoAdvanceEnabled = true;
         if (SelectedSlot != null)
         {
@@ -295,6 +303,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Auto-generated [ObservableProperty] partial hook fired AFTER SelectedSlot's value updates. We use it to push the selection swap through to the view: re-fire PropertyChanged for every proxy property so existing OnViewModelPropertyChanged handlers re-read against the new target context's values (volume slider snaps to target's volume, seek bar to target's position, etc.).
     partial void OnSelectedSlotChanged(VideoSlot? value)
     {
+        // Mode transition (sync ↔ isolated) invalidates the anchor: the next sync-mode SeekTo should start fresh against Primary's actual position rather than the last commanded target from the previous mode.
+        InvalidateSyncSeekAnchor();
         for (int i = 0; i < ProxyPropertyNames.Length; i++)
         {
             OnPropertyChanged(ProxyPropertyNames[i]);
@@ -410,16 +420,20 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     public void OpenFile(string pathOrUri)
     {
+        // FileLoaded eventually invalidates the SeekTo anchor too, but it's async — eager invalidation closes the window where a SeekTo issued just after OpenFile (still within the burst threshold) would compute a delta against a target commanded against the previous file.
+        InvalidateSyncSeekAnchor();
         SingleTarget.OpenFile(pathOrUri);
     }
 
     public void LoadPaths(IReadOnlyList<string> paths, bool replace)
     {
+        InvalidateSyncSeekAnchor();
         SingleTarget.LoadPaths(paths, replace);
     }
 
     public void PlayPlaylistItem(int index)
     {
+        InvalidateSyncSeekAnchor();
         SingleTarget.PlayPlaylistItem(index);
     }
 
@@ -437,16 +451,53 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         initialFileLoaded = true;
     }
 
+    // Sync-mode "absolute delta" contract: Primary takes the user-targeted move; Secondary mirrors the same absolute-seconds delta so videos of different lengths or starting offsets stay locked at the relative offset the user has established. Isolated mode (SelectedContext != null) routes everything to the selected stream and bypasses all of this.
+    //
+    // Implicit-burst anchor: the scrubber fires SeekTo per motion event (drag), per scroll-wheel tick, and per rapid hotkey press — all faster than mpv echoes time-pos back into Primary.Position. Reading Primary.Position fresh on each SeekTo would anchor against stale data and Secondary would cumulatively overshoot. We track the last commanded Primary target and its timestamp; SeekTos within SyncSeekImplicitBurstTicks (250 ms) of the previous one anchor against the stored target rather than re-reading Position. The anchor is also invalidated by any other transport that mutates Primary.Position outside this loop (SeekRelative, Step*, OpenFile, LoadPaths, PlayPlaylistItem) and by file-load events (Primary or Secondary), so the next SeekTo after such an event re-anchors against fresh state.
+    private double? lastSyncSeekPrimaryTargetSeconds;
+    private long lastSyncSeekTimestampTicks;
+    private static readonly long SyncSeekImplicitBurstTicks = (long)(Stopwatch.Frequency * 0.25);
+    // Wallclock indirection so tests can drive the burst-window expiration deterministically. Production uses Stopwatch.GetTimestamp.
+    internal Func<long> NowProvider { get; set; } = Stopwatch.GetTimestamp;
+
     public void SeekTo(double normalizedPosition)
     {
-        foreach (var ctx in RoutingTargets())
+        if (SelectedContext != null)
         {
-            ctx.SeekTo(normalizedPosition);
+            SelectedContext.SeekTo(normalizedPosition);
+            return;
+        }
+        double primaryTargetSeconds = normalizedPosition * Primary.Duration.TotalSeconds;
+        long now = NowProvider();
+        double anchorSeconds;
+        if (lastSyncSeekPrimaryTargetSeconds.HasValue && (now - lastSyncSeekTimestampTicks) <= SyncSeekImplicitBurstTicks)
+        {
+            anchorSeconds = lastSyncSeekPrimaryTargetSeconds.Value;
+        }
+        else
+        {
+            anchorSeconds = Primary.Position.TotalSeconds;
+        }
+        lastSyncSeekPrimaryTargetSeconds = primaryTargetSeconds;
+        lastSyncSeekTimestampTicks = now;
+        double deltaSeconds = primaryTargetSeconds - anchorSeconds;
+        Primary.SeekTo(normalizedPosition);
+        if (Secondary != null)
+        {
+            Secondary.SeekRelative(deltaSeconds);
         }
     }
 
+    // Clear the implicit-burst anchor so the next SeekTo re-anchors against Primary.Position. Called from anywhere that mutates Primary's position outside SeekTo (SeekRelative, Step*, OpenFile, etc.) and from lifecycle events that reset the Primary–Secondary relationship (file load, EnablePip / DisablePip, selection-mode transitions).
+    private void InvalidateSyncSeekAnchor()
+    {
+        lastSyncSeekPrimaryTargetSeconds = null;
+    }
+
+    // Already absolute-delta and uniform across both contexts — mpv handles per-context edge clamping. Same fan-out for both isolated and sync modes; isolated reduces to a one-element loop. Invalidates the SeekTo anchor since this mutates Primary's position outside the SeekTo loop.
     public void SeekRelative(double seconds)
     {
+        InvalidateSyncSeekAnchor();
         foreach (var ctx in RoutingTargets())
         {
             ctx.SeekRelative(seconds);
@@ -455,26 +506,97 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     public void StepFrameForward()
     {
-        foreach (var ctx in RoutingTargets())
-        {
-            ctx.StepFrameForward();
-        }
+        StepFrameInternal(forward: true);
     }
 
     public void StepFrameBack()
     {
-        foreach (var ctx in RoutingTargets())
+        StepFrameInternal(forward: false);
+    }
+
+    // Sync-mode StepFrame: advance Primary by one frame (mpv's atomic frame-step / frame-back-step, which also pauses Primary as a side effect). On Secondary, fire mpv's frame-step too — that's atomic-pause-and-step on its end, which avoids the SetPaused/SeekRelative race where mpv could decode a few frames between the two dispatcher commands while Secondary is mid-playback. Then apply a corrective SeekRelative on Secondary equal to the *difference* between Primary's frame duration and Secondary's, so Secondary's net move matches Primary's frame duration regardless of fps mismatch. When Secondary's own fps is unknown, assume it matches Primary's (correction = 0). When Primary's fps is unknown, fall back to per-context frame-step — drift is bounded to ~one frame per step.
+    private void StepFrameInternal(bool forward)
+    {
+        InvalidateSyncSeekAnchor();
+        if (SelectedContext != null)
         {
-            ctx.StepFrameBack();
+            if (forward) { SelectedContext.StepFrameForward(); } else { SelectedContext.StepFrameBack(); }
+            return;
+        }
+        if (Secondary == null)
+        {
+            if (forward) { Primary.StepFrameForward(); } else { Primary.StepFrameBack(); }
+            return;
+        }
+        if (forward) { Primary.StepFrameForward(); Secondary.StepFrameForward(); }
+        else { Primary.StepFrameBack(); Secondary.StepFrameBack(); }
+        double? primaryFps = Primary.VideoFps;
+        if (primaryFps == null)
+        {
+            return;
+        }
+        double secondaryFps = Secondary.VideoFps ?? primaryFps.Value;
+        double primaryFrameDelta = (forward ? 1.0 : -1.0) / primaryFps.Value;
+        double secondaryFrameDelta = (forward ? 1.0 : -1.0) / secondaryFps;
+        double correctionSeconds = primaryFrameDelta - secondaryFrameDelta;
+        if (correctionSeconds != 0.0)
+        {
+            Secondary.SeekRelative(correctionSeconds);
         }
     }
 
+    // Sync-mode StepChapter: derive Primary's resulting target from its mirror Chapters list and apply the same absolute-seconds delta to Secondary. The general `targetIndex = currentIndex + delta` math handles the pre-chapter-0 case (currentIndex == -1) too: `add chapter +1` from there lands at chapter 0 (-1 + 1 = 0), and `add chapter -1` underflows to -2 → fan-out fallback (correctly, since there's nothing before chapter 0). Out-of-range past either end falls back to per-context StepChapter so both mpv-clamp independently — reproducing mpv's exact clamp-seek semantics VM-side isn't worth the fragility. When Primary has no chapters at all, Primary.StepChapter is a no-op upstream; we still issue Secondary.StepChapter so Secondary's own chapters (if any) advance.
     public void StepChapter(int delta)
     {
-        foreach (var ctx in RoutingTargets())
+        InvalidateSyncSeekAnchor();
+        if (SelectedContext != null)
         {
-            ctx.StepChapter(delta);
+            SelectedContext.StepChapter(delta);
+            return;
         }
+        if (Secondary == null)
+        {
+            Primary.StepChapter(delta);
+            return;
+        }
+        var chapters = Primary.Chapters;
+        if (chapters.Count == 0)
+        {
+            Primary.StepChapter(delta);
+            Secondary.StepChapter(delta);
+            return;
+        }
+        double primaryPos = Primary.Position.TotalSeconds;
+        int currentIndex = FindCurrentChapterIndex(chapters, primaryPos);
+        int targetIndex = currentIndex + delta;
+        if (targetIndex < 0 || targetIndex >= chapters.Count)
+        {
+            Primary.StepChapter(delta);
+            Secondary.StepChapter(delta);
+            return;
+        }
+        double primaryTargetSeconds = chapters[targetIndex].TimeSeconds;
+        double deltaSeconds = primaryTargetSeconds - primaryPos;
+        Primary.StepChapter(delta);
+        Secondary.SeekRelative(deltaSeconds);
+    }
+
+    // Largest index whose chapter time ≤ position — mpv's "current chapter" semantics (chapter K is current while position is in [chapters[K].time, chapters[K+1].time)). Returns -1 when position is before chapter 0's time (mpv reports "no current chapter" in that case). Linear scan because chapter counts are small (typically <50).
+    private static int FindCurrentChapterIndex(IReadOnlyList<MediaChapter> chapters, double positionSeconds)
+    {
+        int found = -1;
+        for (int i = 0; i < chapters.Count; i++)
+        {
+            if (chapters[i].TimeSeconds <= positionSeconds)
+            {
+                found = i;
+            }
+            else
+            {
+                break;
+            }
+        }
+        return found;
     }
 
     public void SetVolume(double percent)
@@ -500,6 +622,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             DisablePip();
         }
         Primary.PropertyChanged -= OnContextPropertyChanged;
+        Primary.Playback.FileLoaded -= InvalidateSyncSeekAnchor;
         Primary.Dispose();
     }
 }

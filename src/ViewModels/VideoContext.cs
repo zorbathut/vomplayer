@@ -119,6 +119,10 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     [ObservableProperty]
     private double? videoAspect;
 
+    // Mirror of IPlayback.VideoFps (container frame rate). Null when no file is loaded, no video stream is present, or mpv hasn't reported a usable value. Read by the coordinator's sync-mode StepFrame to compute the absolute-seconds delta of one Primary frame (1/Primary.VideoFps).
+    [ObservableProperty]
+    private double? videoFps;
+
     // Mirror of IPlayback.MediaTitle. Null when no file is loaded. Drives the main window's title bar.
     [ObservableProperty]
     private string? mediaTitle;
@@ -855,6 +859,9 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
                 break;
             case nameof(IPlayback.VideoAspect):
                 VideoAspect = playback.VideoAspect;
+                break;
+            case nameof(IPlayback.VideoFps):
+                VideoFps = playback.VideoFps;
                 break;
             case nameof(IPlayback.MediaTitle):
                 MediaTitle = playback.MediaTitle;

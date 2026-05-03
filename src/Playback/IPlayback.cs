@@ -46,6 +46,9 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Display aspect of the loaded source (dwidth/dheight, square-pixel rectangle the video should render into). Null when no file is loaded or no video stream is present. Drives the PiP layout's per-source aspect-correct sizing.
     double? VideoAspect { get; }
 
+    // Source's container frame rate (fps). Null when no file is loaded, no video stream is present, or mpv hasn't decided yet (synthesized initial fire pre-load lands null). Used by the coordinator's sync-mode StepFrame: the absolute-seconds delta of "advance one frame on Primary" is 1/Primary.VideoFps, which we then apply to Secondary so the two streams stay locked to the same content offset across asymmetric frame rates. For VFR sources mpv reports the average; the resulting Secondary delta is approximate but stays bounded within a frame's worth of drift per step.
+    double? VideoFps { get; }
+
     // Mirror of mpv's `media-title` property: the source's metadata title (container/stream tag) when present, falling back to the filename without path/extension. Null when no file is loaded. For yt-dlp-downloaded URLs the cached file is named `%(title)s.%(ext)s`, so the fallback still surfaces the upstream video title rather than a hash. Drives the main-window title display.
     string? MediaTitle { get; }
 
