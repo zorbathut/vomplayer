@@ -334,6 +334,10 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             return;
         }
+        // Capture pause state before advancing so we can preserve a user-paused half across the lockstep transition. AdvanceAndLoadIfPossible → playback.LoadFile, which unconditionally issues pause=no on the dispatcher. Without the re-apply below, a context the user deliberately paused (e.g. paused mid-wait while the other half played out to its EOF) would unpause on the next track. Re-paused via VideoContext.SetPaused, which serializes after LoadFile on the same dispatcher; final mpv state matches the captured one. Running contexts get no extra command — LoadFile's pause=no carries through. Note: SetPaused gates on Duration > 0; we rely on the Duration mirror still holding the previous file's positive value at this point (mpv property updates land via the main-thread observer pump, which can't run during this synchronous call).
+        bool primaryWasPaused = Primary.IsPaused;
+        bool secondaryWasPaused = Secondary.IsPaused;
+
         insideLockstepAdvance = true;
         try
         {
@@ -343,6 +347,15 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         finally
         {
             insideLockstepAdvance = false;
+        }
+
+        if (primaryWasPaused)
+        {
+            Primary.SetPaused(true);
+        }
+        if (secondaryWasPaused)
+        {
+            Secondary.SetPaused(true);
         }
     }
 

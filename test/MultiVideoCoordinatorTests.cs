@@ -261,6 +261,33 @@ public partial class MultiVideoCoordinatorTests
     }
 
     [Test]
+    public void PipOnBothAtEofPreservesPausedContextPauseState()
+    {
+        // User paused one half (Primary) while waiting for the longer half (Secondary) to finish. Lockstep advance must NOT unpause the half the user deliberately paused. Playback.LoadFile always issues pause=no on the dispatcher; the coordinator re-applies pause=true via SetPaused after AdvanceAndLoadIfPossible so the paused context lands paused on the next track.
+        using var h = new Harness();
+        h.Vm.LoadPaths(new[] { "/a1.mp4", "/a2.mp4" }, replace: true);
+        h.EnablePip();
+        h.Vm.Secondary!.LoadPaths(new[] { "/b1.mp4", "/b2.mp4" }, replace: true);
+
+        // Both contexts running, then user pauses primary.
+        h.PrimaryPlayback.IsPaused = false;
+        h.SecondaryPlayback!.IsPaused = false;
+        h.PrimaryPlayback.IsPaused = true;
+
+        Harness.ReachFileEof(h.Vm.Primary, h.PrimaryPlayback);
+        Harness.ReachFileEof(h.Vm.Secondary!, h.SecondaryPlayback!);
+
+        // Both advanced.
+        Assert.That(h.Vm.Primary.Playlist.CurrentIndex, Is.EqualTo(1));
+        Assert.That(h.Vm.Secondary!.Playlist.CurrentIndex, Is.EqualTo(1));
+
+        // Primary was paused → exactly one SetPaused(true) recorded, and it lands AFTER both LoadFile calls completed (synchronous main-thread path; VM doesn't issue any SetPaused before the advance, only after). An incorrectly-ordered fix that re-paused before LoadFile would still pass the membership check, so we pin the exact log shape.
+        Assert.That(h.PrimaryPlayback.SetPausedCalls, Is.EqualTo(new[] { true }));
+        // Secondary was running → coordinator must not touch it at all. LoadFile's pause=no in real Playback carries through unmodified.
+        Assert.That(h.SecondaryPlayback!.SetPausedCalls, Is.Empty);
+    }
+
+    [Test]
     public void NoSelectionTransportFansOutToBoth()
     {
         using var h = new Harness();
