@@ -57,14 +57,19 @@ internal sealed partial class VomplVideoSurface : IDisposable
         SetGeometryNative(handle, x, y, clampedW, clampedH, clampedScale);
     }
 
-    // Place this subsurface directly above `sibling` (which must be a subsurface of the same parent — invariant enforced by the protocol). Used to put the picture-in-picture subsurface above the primary one. The native call commits the parent + flushes synchronously so stacking lands atomically rather than waiting for GTK's next redraw.
-    public void PlaceAbove(VomplVideoSurface sibling)
+    // Place this subsurface directly above `sibling` (which must be a subsurface of the same parent — invariant enforced by the protocol), or directly above the parent wl_surface when `sibling` is null. The above-parent form is used during the PiP-only-secondary-loaded transient to make the PiP composite over the still-visible noVideoBg placeholder; restore by passing the primary sibling. The native call commits the parent + flushes synchronously so stacking lands atomically rather than waiting for GTK's next redraw.
+    public void PlaceAbove(VomplVideoSurface? sibling)
     {
-        if (handle == IntPtr.Zero || sibling == null || sibling.handle == IntPtr.Zero)
+        if (handle == IntPtr.Zero)
         {
             return;
         }
-        PlaceAboveNative(handle, sibling.handle);
+        IntPtr siblingHandle = (sibling != null) ? sibling.handle : IntPtr.Zero;
+        if (sibling != null && siblingHandle == IntPtr.Zero)
+        {
+            return;
+        }
+        PlaceAboveNative(handle, siblingHandle);
     }
 
     public int MakeCurrent()
@@ -222,6 +227,7 @@ internal sealed partial class VomplVideoSurface : IDisposable
     [LibraryImport(Lib, EntryPoint = "vompl_video_surface_set_geometry")]
     private static partial void SetGeometryNative(IntPtr vs, int x, int y, int w, int h, int bufferScale);
 
+    // sibling=IntPtr.Zero means "place above parent" (see vompl_video_surface_place_above's docstring).
     [LibraryImport(Lib, EntryPoint = "vompl_video_surface_place_above")]
     private static partial void PlaceAboveNative(IntPtr vs, IntPtr sibling);
 

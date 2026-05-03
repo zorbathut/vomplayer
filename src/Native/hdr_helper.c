@@ -857,13 +857,14 @@ void vompl_video_surface_set_geometry(struct vompl_video_surface *vs, int x, int
     wl_display_flush(vs->display);
 }
 
-// Stack `vs` directly above `sibling` in the parent's subsurface stacking order. Both surfaces must be subsurfaces of the same parent; the protocol enforces that, but we don't double-check here. wl_subsurface.place_above is double-buffered (takes effect on the NEXT parent commit), so without an explicit commit here the new stacking would only land on the first frame after GTK happens to redraw the parent — visible as a one-frame flash where the "above" surface composites under the "below" one. Atomic stacking matters most for picture-in-picture: consumers call this once after creating both subsurfaces and expect the order to apply immediately.
+// Stack `vs` directly above `sibling` in the parent's subsurface stacking order, or directly above the parent wl_surface itself when `sibling` is NULL. Both `vs` and a non-NULL `sibling` must be subsurfaces of the same parent; the protocol enforces that, but we don't double-check here. wl_subsurface.place_above is double-buffered (takes effect on the NEXT parent commit), so without an explicit commit here the new stacking would only land on the first frame after GTK happens to redraw the parent — visible as a one-frame flash where the "above" surface composites under the "below" one. Atomic stacking matters most for picture-in-picture: consumers call this once after creating both subsurfaces and expect the order to apply immediately.
 //
-// Stacking invariant: vompl_video_surface_create calls wl_subsurface_place_below(parent) so each new subsurface lands directly below the GTK chrome on creation. A subsequent place_above(primary) on the secondary moves it directly above the primary while still below the chrome. If a future change reorders the create / place_above sequence — e.g., creates the secondary BEFORE place_below(parent) lands — the relative ordering is undefined and PiP can flash below primary on first frame.
+// Stacking invariant: vompl_video_surface_create calls wl_subsurface_place_below(parent) so each new subsurface lands directly below the GTK chrome on creation. A subsequent place_above(primary) on the secondary moves it directly above the primary while still below the chrome. The NULL-sibling form (above parent) is the explicit opt-out used during the PiP-only-secondary-loaded transient where the parent's noVideoBg placeholder must remain opaque-black over the primary's region but the secondary subsurface still needs to be visible; restore by calling again with sibling=primary once primary renders. If a future change reorders the create / place_above sequence — e.g., creates the secondary BEFORE place_below(parent) lands — the relative ordering is undefined and PiP can flash below primary on first frame.
 void vompl_video_surface_place_above(struct vompl_video_surface *vs, struct vompl_video_surface *sibling)
 {
-    if (!vs || !sibling) { return; }
-    wl_subsurface_place_above(vs->wl_subsurface, sibling->wl_surface);
+    if (!vs) { return; }
+    struct wl_surface *reference = sibling ? sibling->wl_surface : vs->parent;
+    wl_subsurface_place_above(vs->wl_subsurface, reference);
     wl_surface_commit(vs->parent);
     wl_display_flush(vs->display);
 }

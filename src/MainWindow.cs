@@ -187,7 +187,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             playback.AttachRenderSurface(d => surface.SetMpvDispatcher(d));
             surface.RenderContextReady += OnVideoRenderContextReadyWayland;
             surface.RenderFailed += OnVideoRenderFailed;
-            surface.FirstFrameRendered += OnVideoFirstFrameRendered;
+            surface.FirstFrameRendered += OnPrimaryFirstFrameRendered;
             videoArea = area;
             videoSurface = surface;
             videoWidget = area;
@@ -593,9 +593,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         viewModel.OnRenderContextReady();
     }
 
-    private void OnVideoFirstFrameRendered()
+    // Latches true on the primary's first rendered frame; never reset (the primary VideoSurface lives for the window's lifetime). Read by OnSecondaryFirstFrameRendered to decide whether to restack the secondary above the parent — see that method for the full rationale.
+    private bool primaryFirstFrameRendered;
+
+    private void OnPrimaryFirstFrameRendered()
     {
+        primaryFirstFrameRendered = true;
         noVideoBg.SetVisible(false);
+        // Restore the secondary's normal "above primary, below parent" stacking. Idempotent in the common case where it was never restacked above the parent (one extra wl_subsurface_place_above + commit; harmless). Hide noVideoBg first so the secondary stays continuously visible during the restack: the alternative order would briefly leave the secondary below an opaque-black noVideoBg between the place_above and the SetVisible.
+        if (secondarySurface != null && videoSurface != null)
+        {
+            secondarySurface.PlaceAbove(videoSurface);
+        }
     }
 
     // GLArea path: always SDR. The old main-surface HDR attach produced a blown-out UI (GTK widgets render sRGB values into a surface KWin interprets as PQ) and can't be toggled per-file without destroying the GTK surface, so this path is SDR-only; HDR content is tonemapped by mpv's auto targeting.

@@ -251,7 +251,7 @@ public partial class MainWindow
         {
             secondarySurface.RenderContextReady -= OnSecondaryRenderContextReadyWayland;
             secondarySurface.RenderFailed -= OnVideoRenderFailed;
-            secondarySurface.FirstFrameRendered -= OnVideoFirstFrameRendered;
+            secondarySurface.FirstFrameRendered -= OnSecondaryFirstFrameRendered;
             secondarySurface.Dispose();
             secondarySurface = null;
         }
@@ -287,8 +287,8 @@ public partial class MainWindow
         var surface2 = new VideoSurface(this, area2);
         surface2.RenderContextReady += OnSecondaryRenderContextReadyWayland;
         surface2.RenderFailed += OnVideoRenderFailed;
-        // noVideoBg is a black fill on the parent surface that hides on the FIRST primary-rendered frame. Without subscribing here too, a user who enables PiP and only loads content into the secondary would see PiP rendering correctly into its subsurface but invisible behind the still-opaque-black parent surface (subsurface is placed below parent — see hdr_helper.c). FirstFrameRendered is fire-once per surface; OnVideoFirstFrameRendered's SetVisible(false) is idempotent, so multiple sources hooking it is safe.
-        surface2.FirstFrameRendered += OnVideoFirstFrameRendered;
+        // Asymmetric with primary's hook (which just hides noVideoBg). See OnSecondaryFirstFrameRendered for the rationale.
+        surface2.FirstFrameRendered += OnSecondaryFirstFrameRendered;
         secondarySurface = surface2;
         secondaryPlayback!.AttachRenderSurface(d => surface2.SetMpvDispatcher(d));
         // Stack PiP above primary so the smaller surface composites on top of the larger video buffer. wl_subsurface.place_above is double-buffered, so the native shim commits the parent immediately to make the new ordering atomic — see vompl_video_surface_place_above's docstring.
@@ -407,6 +407,17 @@ public partial class MainWindow
     private void OnSecondaryRenderContextReadyGLArea()
     {
         // GLArea fallback path: HDR is not supported per ARCHITECTURE.md, so there's no IHdrSink to attach. Nothing to do beyond letting mpv take over rendering through the dispatcher attached in BuildSecondaryVideoView.
+    }
+
+    private void OnSecondaryFirstFrameRendered()
+    {
+        // If primary already rendered, noVideoBg is gone and the secondary is correctly stacked above primary (still below parent). Nothing to do.
+        if (primaryFirstFrameRendered)
+        {
+            return;
+        }
+        // Primary hasn't rendered yet but the secondary just produced its first frame. Hiding noVideoBg here (the symmetric thing OnPrimaryFirstFrameRendered does) would expose the transparent parent main surface in the primary's region — desktop shows through. Instead, restack the secondary subsurface above the parent so the PiP composites over the still-visible noVideoBg. OnPrimaryFirstFrameRendered restores the secondary to its normal "above primary, below parent" stacking when primary eventually renders.
+        secondarySurface?.PlaceAboveParent();
     }
 
     private void OnPrimaryAreaGeometryChangedForPip(int x, int y, int w, int h, int scale)

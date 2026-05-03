@@ -138,6 +138,16 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
         surface.PlaceAbove(other.surface);
     }
 
+    // Stack this subsurface above the GTK parent main wl_surface (above any opaque GTK content on it). Used by MainWindow during the PiP-secondary-rendered-but-primary-not transient, so the secondary is visible despite the still-shown opaque noVideoBg on the parent. Restore via PlaceAbove(primary) when the primary first frame fires.
+    public void PlaceAboveParent()
+    {
+        if (surface == null)
+        {
+            return;
+        }
+        surface.PlaceAbove(null);
+    }
+
     // Called by MainWindow via playback.AttachRenderSurface(dispatcher => videoSurface.SetMpvDispatcher(dispatcher)). If the window is already realized, the render context is built now; otherwise the dispatcher is stashed and the render context is built on OnRealize. Internal because MpvDispatcher is internal.
     internal void SetMpvDispatcher(MpvDispatcher d)
     {
