@@ -44,6 +44,12 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     public string? InitialFile { get; set; }
     private bool initialFileLoaded;
 
+    // Sync-mode offset invariant the post-edge correction defends: Secondary.Position == Primary.Position + targetOffsetSeconds. Null when slave is inactive (no PiP, selected mode active, or the offset hasn't been established yet — see capture/clear rules around EnablePip / OnSelectedSlotChanged / FileLoaded).
+    private double? targetOffsetSeconds;
+
+    // Raised on each sync-mode transport edge (PlayPause-to-playing, SeekTo, SeekRelative, StepChapter) so MainWindow can schedule the deferred post-edge corrective seek. No payload — the handler reads current state when the timer eventually fires.
+    public event Action? PostEdgeCorrectionRequested;
+
     // The context the user has explicitly selected via the toolbar, or null if no selection (broadcast/sync mode). Read-only; mutate via SetSelected.
     public VideoContext? SelectedContext
     {
@@ -222,6 +228,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         Primary.PropertyChanged += OnContextPropertyChanged;
         // File-load resets Primary.Position to 0; an in-flight implicit-burst anchor from the previous file would mis-anchor the first SeekTo against the new file. Subscribe directly to the playback (not VideoContext, since the anchor is purely a coordinator concern and doesn't need to flow through the context's mirror plumbing).
         playback.FileLoaded += InvalidateSyncSeekAnchor;
+        // Same race rationale as the burst-anchor invalidation: a Primary file load between sync-mode operations resets Position to 0 and breaks the captured offset. The lazy fallback inside ApplyPostEdgeCorrection re-establishes a fresh offset on the next correction edge.
+        playback.FileLoaded += ClearTargetOffset;
     }
 
     // Take ownership of `secondary` and switch into PiP mode. Caller (MainWindow) constructs the secondary VideoContext (with its own Playback) and hands it over here. The VM then disables per-context auto-advance on both and starts driving lockstep advance itself. Idempotent: calling EnablePip while already in PiP mode is a no-op (the supplied secondary is NOT swapped in — caller should DisablePip first).
@@ -242,7 +250,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         secondary.PropertyChanged += OnContextPropertyChanged;
         // Same FileLoaded subscription as Primary — a Secondary file load between SeekTos within the burst window would otherwise produce a Primary-anchored delta against a Secondary that just reset to 0.
         secondary.Playback.FileLoaded += InvalidateSyncSeekAnchor;
+        // Mirror Primary's targetOffset clear on Secondary's loads.
+        secondary.Playback.FileLoaded += ClearTargetOffset;
         InvalidateSyncSeekAnchor();
+        // Initial offset: both contexts start at content time 0. Cleared by either FileLoaded handler above the moment a real file lands. (If both contexts are already mid-playback when EnablePip lands — uncommon but possible — the initial 0 is wrong; the next correction edge re-captures via the lazy fallback inside ApplyPostEdgeCorrection.)
+        targetOffsetSeconds = 0;
         IsPipEnabled = true;
     }
 
@@ -259,9 +271,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             secondary.PropertyChanged -= OnContextPropertyChanged;
             secondary.Playback.FileLoaded -= InvalidateSyncSeekAnchor;
+            secondary.Playback.FileLoaded -= ClearTargetOffset;
             secondary.Dispose();
         }
         InvalidateSyncSeekAnchor();
+        ClearTargetOffset();
         Primary.AutoAdvanceEnabled = true;
         if (SelectedSlot != null)
         {
@@ -311,6 +325,17 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     {
         // Mode transition (sync ↔ isolated) invalidates the anchor: the next sync-mode SeekTo should start fresh against Primary's actual position rather than the last commanded target from the previous mode.
         InvalidateSyncSeekAnchor();
+        // Sync-mode targetOffset bookkeeping. Setter equality gating means every fire here is a real transition, so we just branch on the new value:
+        //   - newValue != null  ⇒ entering selected mode (slave inactive). Clear the offset; the user is about to deliberately move one stream alone.
+        //   - newValue == null  ⇒ returning to sync. Capture from current positions — the user just demonstrated their intended offset by leaving isolated mode at this configuration.
+        if (value != null)
+        {
+            targetOffsetSeconds = null;
+        }
+        else if (Secondary != null)
+        {
+            targetOffsetSeconds = Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds;
+        }
         for (int i = 0; i < ProxyPropertyNames.Length; i++)
         {
             OnPropertyChanged(ProxyPropertyNames[i]);
@@ -420,6 +445,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             Secondary.SetPaused(target);
         }
+        // Schedule a corrective seek for the post-play settle (independent dispatcher latency + decoder startup time). The MainWindow-side timer coalesces multiple edges within its delay window into one correction. Eager re-capture of the offset HERE was rejected: it would overwrite a known-good offset with whatever drift accumulated during the prior play session, baking in the very wall-clock skew the correction is meant to defend against. The legitimate user "I just set up the offset" moment is the selected→null transition, which OnSelectedSlotChanged handles.
+        if (!target && Secondary != null)
+        {
+            PostEdgeCorrectionRequested?.Invoke();
+        }
     }
 
     public void SelectVideo(int? trackId)
@@ -510,6 +540,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         if (Secondary != null)
         {
             Secondary.SeekRelative(deltaSeconds);
+            // Sync-mode SeekTo: even with both videos commanded to the same content-time delta, the two `+exact` seeks land at slightly different wall-clock times (codec asymmetry / hr-seek rewind distance). Schedule a deferred corrective seek to absorb that wall-clock skew once both have settled.
+            PostEdgeCorrectionRequested?.Invoke();
         }
     }
 
@@ -518,6 +550,51 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     {
         lastSyncSeekPrimaryTargetSeconds = null;
     }
+
+    // FileLoaded handler: when either Primary or Secondary loads a new file, mpv resets the loaded context's position to 0, breaking the captured sync-mode offset entirely. The next sync-mode transport edge (or the lazy fallback inside ApplyPostEdgeCorrection) re-establishes the offset against fresh post-load state.
+    private void ClearTargetOffset()
+    {
+        targetOffsetSeconds = null;
+    }
+
+    // Post-edge corrective seek: pulls Secondary back to Primary.Position + targetOffsetSeconds. Internal so MainWindow's coalescing GLib timer (and tests) can drive it. See plan: PiP Sync — Post-Edge Corrective Seek.
+    internal void ApplyPostEdgeCorrection()
+    {
+        // Secondary == null is the canonical "PiP is off" check; IsPipEnabled tracks the same invariant by construction (set true after Secondary is assigned in EnablePip, false after Secondary is nulled in DisablePip).
+        if (Secondary == null || SelectedSlot != null)
+        {
+            return;
+        }
+        if (Primary.Playback.IsPaused || Secondary.Playback.IsPaused)
+        {
+            return;
+        }
+        if (Primary.Playback.IsSeeking || Secondary.Playback.IsSeeking)
+        {
+            // Slow-codec hr-seek may not have completed by the timer's delay window. Skipping is preferable to firing a corrective seek on top of an in-flight user seek; the next user transport edge will reschedule.
+            return;
+        }
+        if (Primary.Playback.DurationSeconds <= 0 || Secondary.Playback.DurationSeconds <= 0)
+        {
+            return;
+        }
+        // Lazy capture: if a path that doesn't go through PlayPause / selected→null landed us here without an offset (lockstep advance, file-load auto-play, EnablePip with both already playing), capture from current positions and skip drift measurement this round. The next edge will trigger another correction.
+        if (!targetOffsetSeconds.HasValue)
+        {
+            targetOffsetSeconds = Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds;
+            return;
+        }
+        double drift = (Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds) - targetOffsetSeconds.Value;
+        if (Math.Abs(drift) < PostEdgeCorrectionThresholdSeconds)
+        {
+            return;
+        }
+        double targetSeconds = Primary.Playback.PositionSeconds + targetOffsetSeconds.Value;
+        Secondary.Playback.Seek(targetSeconds);
+    }
+
+    // 20 ms — one frame at 50 fps; well below the 40 ms lipsync detection threshold. Below this, doing nothing is preferable to a corrective snap.
+    private const double PostEdgeCorrectionThresholdSeconds = 0.020;
 
     // Already absolute-delta and uniform across both contexts — mpv handles per-context edge clamping. Same fan-out for both isolated and sync modes; isolated reduces to a one-element loop. Invalidates the SeekTo anchor since this mutates Primary's position outside the SeekTo loop.
     public void SeekRelative(double seconds)
@@ -530,6 +607,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             string tag = ctx == Primary ? "primary" : "secondary";
             Vomplayer.Playback.SyncDiag.Log($"  → fan-out #{++n} to {tag}");
             ctx.SeekRelative(seconds);
+        }
+        // Sync-mode fan-out: same wall-clock skew rationale as SeekTo — both seeks land at slightly different real times. Schedule corrective seek. Selected mode bypasses (only one context received the seek; nothing to correct).
+        if (SelectedContext == null && Secondary != null)
+        {
+            PostEdgeCorrectionRequested?.Invoke();
         }
     }
 
@@ -603,6 +685,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             Vomplayer.Playback.SyncDiag.Log("  → no chapters on primary; fan-out");
             Primary.StepChapter(delta);
             Secondary.StepChapter(delta);
+            // Per-context fan-out lands the two videos at independent chapter timestamps — the previously-captured offset no longer reflects user intent. Clear so the next correction edge lazy-captures from the post-fan-out state instead of trying to defend the stale invariant. We deliberately do NOT raise PostEdgeCorrectionRequested here: a correction would yank Secondary back to the OLD offset, undoing the fan-out the user implicitly accepted.
+            targetOffsetSeconds = null;
             return;
         }
         double primaryPos = Primary.Position.TotalSeconds;
@@ -613,6 +697,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             Vomplayer.Playback.SyncDiag.Log($"  → out-of-range targetIndex={targetIndex} (chapters={chapters.Count}); fan-out");
             Primary.StepChapter(delta);
             Secondary.StepChapter(delta);
+            // Same rationale as the no-chapters fan-out above.
+            targetOffsetSeconds = null;
             return;
         }
         double primaryTargetSeconds = chapters[targetIndex].TimeSeconds;
@@ -620,6 +706,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         Vomplayer.Playback.SyncDiag.Log($"  → primary chapter {currentIndex}→{targetIndex} target={primaryTargetSeconds:F3} primaryPos={primaryPos:F3} deltaSeconds={deltaSeconds:F3}");
         Primary.StepChapter(delta);
         Secondary.SeekRelative(deltaSeconds);
+        // Same post-edge correction rationale as SeekTo: both seeks finish at independent wall-clock times.
+        PostEdgeCorrectionRequested?.Invoke();
     }
 
     // Largest index whose chapter time ≤ position — mpv's "current chapter" semantics (chapter K is current while position is in [chapters[K].time, chapters[K+1].time)). Returns -1 when position is before chapter 0's time (mpv reports "no current chapter" in that case). Linear scan because chapter counts are small (typically <50).
@@ -664,6 +752,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         Primary.PropertyChanged -= OnContextPropertyChanged;
         Primary.Playback.FileLoaded -= InvalidateSyncSeekAnchor;
+        Primary.Playback.FileLoaded -= ClearTargetOffset;
+        PostEdgeCorrectionRequested = null;
         Primary.Dispose();
     }
 }

@@ -810,4 +810,399 @@ public partial class MultiVideoCoordinatorTests
         h.PrimaryPlayback.IsEofReached = true;
         Assert.That(h.Vm.Primary.Playlist.CurrentIndex, Is.EqualTo(0));
     }
+
+    // === Post-edge correction tests (PiP Sync — Post-Edge Corrective Seek) ===
+
+    // Drive both contexts past their gate prerequisites: a positive duration on each, plus IsPaused=false. Used by the correction tests below to focus on the offset/drift logic without re-asserting gate plumbing in every test. Test 9 (CorrectionGateBlocksWhenSeeking) deliberately bypasses this.
+    private static void ReadySyncMode(Harness h)
+    {
+        h.PrimaryPlayback.DurationSeconds = 60;
+        h.SecondaryPlayback!.DurationSeconds = 60;
+        h.PrimaryPlayback.IsPaused = false;
+        h.SecondaryPlayback!.IsPaused = false;
+    }
+
+    [Test]
+    public void EnablePipCapturesZeroOffset()
+    {
+        // EnablePip lands with both contexts at content time 0 → captured offset is 0 by construction. Distinguish "captured 0" from "captured null" / "captured stale value": after equal-advance there's no drift to correct, but introducing a 50 ms gap *should* produce a corrective Seek targeting Primary.Pos + 0 = Primary.Pos. If EnablePip had left targetOffset null, the first call would lazy-capture (no Seek) instead of correcting against 0.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 10.050;  // drift = (10.050 - 10) - 0 = 50 ms
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 10.0 }), "EnablePip captured offset=0; drift fires correction at Primary.Pos + 0");
+    }
+
+    [Test]
+    public void FileLoadedOnPrimaryClearsOffset()
+    {
+        // FileLoaded resets one context's position to 0; the previous offset is no longer meaningful. After clear, the next correction takes the lazy-fallback path: capture from current positions, no Seek that round.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        // Establish a non-trivial offset by transitioning out of selected mode.
+        h.PrimaryPlayback.PositionSeconds = 5;
+        h.SecondaryPlayback!.PositionSeconds = 12;  // offset = 7
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // capture: offset = 12 - 5 = 7
+
+        // Sanity: an immediate correction with the same positions sees drift 0.
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+
+        // FileLoaded clears the offset.
+        h.PrimaryPlayback.RaiseFileLoaded();
+        // Move Secondary 1s out of where it would be expected against the OLD offset (7s ahead of Primary). If clear didn't happen, drift = (12 - 5) - 7 = 0 → no seek; we'd miss the failure. So instead, advance Secondary further and rely on the lazy-fallback observation: post-clear, the first correction lazy-captures (no seek), and a SECOND correction with drift > threshold against that NEW capture confirms the clear path went through the lazy fallback.
+        h.SecondaryPlayback!.PositionSeconds = 13;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty, "first post-clear tick should lazy-capture, not seek");
+
+        // Now that the new offset is captured (= 13 - 5 = 8), introduce real drift and see a corrective seek.
+        h.SecondaryPlayback!.PositionSeconds = 13.5;  // drift = (13.5 - 5) - 8 = 0.5 > threshold
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 5.0 + 8.0 }), "second tick corrects against fresh-captured offset");
+    }
+
+    [Test]
+    public void FileLoadedOnSecondaryClearsOffset()
+    {
+        // Symmetric: Secondary FileLoaded must also clear (Secondary's position got reset to 0).
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.PositionSeconds = 5;
+        h.SecondaryPlayback!.PositionSeconds = 12;
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);
+        // Offset captured = 7.
+
+        h.SecondaryPlayback!.RaiseFileLoaded();
+        // Lazy-capture round: no seek even with what would be drift against the OLD offset.
+        h.PrimaryPlayback.PositionSeconds = 6;
+        h.SecondaryPlayback!.PositionSeconds = 14;  // delta = 8, would be drift=1 against old offset 7
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty, "FileLoaded cleared offset → lazy-capture takes the round");
+    }
+
+    [Test]
+    public void SelectedToSyncCapturesNewOffset()
+    {
+        // The selected→null transition is the user's "I just established this offset deliberately" signal. After capture, an in-sync advance with the same offset should be a no-op; introducing drift after that should produce a corrective seek to the captured-offset target.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 0;
+
+        // User selects Secondary, frame-steps to align it +5s ahead.
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.SecondaryPlayback!.PositionSeconds = 5;
+        // Returns to sync. Capture: offset = 5 - 0 = 5.
+        h.Vm.SetSelected(null);
+
+        // No drift: both advance by 10s, offset preserved.
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 15;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+
+        // Drift introduced: Secondary 100ms behind expected. Correction targets Primary.Pos + offset = 10 + 5 = 15.
+        h.SecondaryPlayback!.PositionSeconds = 14.9;  // drift = -0.1, > threshold
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 15.0 }));
+    }
+
+    [Test]
+    public void SyncToSelectedClearsOffsetAndGatesCorrection()
+    {
+        // Entering selected mode disables the slave: ApplyPostEdgeCorrection must early-out on a non-null SelectedSlot regardless of drift size or offset state.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 0;
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Primary);
+
+        // Even with a huge implied drift, no Seek call.
+        h.SecondaryPlayback!.PositionSeconds = 30;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+    }
+
+    [Test]
+    public void PlayPauseTransitionToPlayingRaisesEvent()
+    {
+        // PlayPause's sync-broadcast branch when target=false must fire PostEdgeCorrectionRequested so the deferred corrective seek can absorb dispatcher-startup skew.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.IsPaused = true;
+        h.SecondaryPlayback!.IsPaused = true;
+
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+
+        h.Vm.PlayPauseCommand.Execute(null);
+        Assert.That(eventCount, Is.EqualTo(1), "transition to playing fires the correction event exactly once");
+    }
+
+    [Test]
+    public void PlayPauseTransitionToPausedDoesNotRaiseEvent()
+    {
+        // The reverse direction (target=true, transitioning to paused) doesn't introduce wall-clock skew; no correction is needed.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        // Both already playing.
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+
+        h.Vm.PlayPauseCommand.Execute(null);  // target = !IsPaused = true (pause)
+        Assert.That(eventCount, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void SyncSeekToRaisesEvent()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+        h.Vm.SeekTo(0.5);
+        Assert.That(eventCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void SyncSeekRelativeRaisesEvent()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+        h.Vm.SeekRelative(5);
+        Assert.That(eventCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void SyncStepChapterAbsoluteDeltaRaisesEvent()
+    {
+        // Absolute-delta path (Primary has chapters, target in range): both videos commanded at independent dispatcher latencies → schedule corrective seek.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.Chapters = new[]
+        {
+            new MediaChapter(0, "Intro", 0),
+            new MediaChapter(1, "Act 1", 60),
+        };
+        h.PrimaryPlayback.PositionSeconds = 10;
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+        h.Vm.StepChapter(1);
+        Assert.That(eventCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void SyncStepChapterFanOutNoChaptersClearsOffsetAndDoesNotRaise()
+    {
+        // Fan-out fallback (no chapters on Primary): each context advances per its own mpv. Offset is no longer meaningful — clear it so the next correction edge lazy-captures rather than defending stale state. Crucially, do NOT raise the correction event: a corrective seek would yank Secondary back to the old offset and undo the fan-out the user implicitly accepted.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        // Establish a non-zero offset.
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 5;
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // captures offset = 5
+
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+        h.Vm.StepChapter(1);  // Primary has no chapters → fan-out
+        Assert.That(eventCount, Is.EqualTo(0), "fan-out path must not raise the correction event");
+
+        // Verify offset was cleared: an arbitrary subsequent correction takes the lazy-capture path, not a seek defending offset=5.
+        h.PrimaryPlayback.PositionSeconds = 30;
+        h.SecondaryPlayback!.PositionSeconds = 99;  // drift vs old offset would be (99 - 30) - 5 = 64; would seek if offset=5 were still cached
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty, "offset cleared → lazy-capture, no defending the old invariant");
+    }
+
+    [Test]
+    public void SyncStepChapterFanOutOutOfRangeClearsOffsetAndDoesNotRaise()
+    {
+        // Same fan-out semantics when targetIndex is out of range (stepping past the last chapter / before the first).
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.Chapters = new[]
+        {
+            new MediaChapter(0, "Intro", 0),
+            new MediaChapter(1, "Outro", 200),
+        };
+        h.PrimaryPlayback.PositionSeconds = 250;  // currently in last chapter
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 5;
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // captures offset = 5
+
+        h.PrimaryPlayback.PositionSeconds = 250;
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+        h.Vm.StepChapter(1);  // out-of-range past end
+        Assert.That(eventCount, Is.EqualTo(0));
+
+        h.PrimaryPlayback.PositionSeconds = 300;
+        h.SecondaryPlayback!.PositionSeconds = 999;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+    }
+
+    [Test]
+    public void SelectedModeTransportDoesNotRaiseEvent()
+    {
+        // Isolated-mode transport doesn't touch the off-target context, so no sync-skew can develop and no correction is needed.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+        h.Vm.SeekTo(0.5);
+        h.Vm.SeekRelative(5);
+        h.Vm.PlayPauseCommand.Execute(null);
+        Assert.That(eventCount, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void CorrectionGateBlocksWhenSeeking()
+    {
+        // IsSeeking on either context blocks the correction. The 500 ms scheduling window may fire while a slow codec's hr-seek is still in flight; we'd rather skip than fire a corrective seek on top of an in-flight user seek.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // capture offset = 0
+
+        h.SecondaryPlayback!.PositionSeconds = 5;  // would be drift 5
+        h.SecondaryPlayback!.IsSeeking = true;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+
+        h.SecondaryPlayback!.IsSeeking = false;
+        h.PrimaryPlayback.IsSeeking = true;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+    }
+
+    [Test]
+    public void CorrectionBelowThresholdNoOp()
+    {
+        // 10 ms drift is below the 20 ms threshold. The correction snap would itself be more disruptive than the residual.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // capture offset = 0
+
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 10.010;  // drift = +10 ms
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+    }
+
+    [Test]
+    public void CorrectionAboveThresholdSeeks()
+    {
+        // 50 ms drift exceeds threshold → exactly one Secondary.Seek to Primary.Pos + offset, regardless of drift sign.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);
+
+        // Secondary ahead.
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 10.050;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 10.0 }));
+
+        // Secondary behind — same Seek target (absolute, sign-agnostic).
+        h.SecondaryPlayback!.SeekCalls.Clear();
+        h.SecondaryPlayback!.PositionSeconds = 9.950;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 10.0 }));
+    }
+
+    [Test]
+    public void CorrectionDoesNotRescheduleItself()
+    {
+        // Regression check: ApplyPostEdgeCorrection must NOT raise PostEdgeCorrectionRequested. The event is raised at user-edge call sites only; if the corrective seek itself rescheduled, we'd have a feedback loop chasing every correction's settling.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 10.050;
+
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls.Count, Is.EqualTo(1), "corrective seek issued");
+        Assert.That(eventCount, Is.EqualTo(0), "Apply must not re-raise the request event");
+    }
+
+    [Test]
+    public void DisablePipClearsOffsetThenReEnableStartsFresh()
+    {
+        // After DisablePip, the offset must be cleared. Re-EnablePip starts at offset=0 again — verify by establishing a non-zero offset, disabling, re-enabling, and confirming the new EnablePip captures fresh state (a correction with both at equal positions is no-op, proving offset is back to 0 from EnablePip's reset).
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 5;
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // captures offset = 5
+
+        h.Vm.DisablePip();
+        h.EnablePip();             // Vm.Secondary is a fresh context; offset reset to 0.
+        ReadySyncMode(h);
+
+        // With offset=0, equal positions → no drift, no seek.
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 10;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty, "fresh EnablePip must not have inherited offset=5 from prior session");
+
+        // And drift against the fresh offset=0 fires correctly.
+        h.SecondaryPlayback!.PositionSeconds = 10.050;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 10.0 }), "correction targets Primary.Pos + 0");
+    }
+
+    [Test]
+    public void CorrectionLazyCapturesWhenOffsetIsNull()
+    {
+        // The lazy-fallback path: file-load auto-play / lockstep advance / EnablePip-while-already-playing all leave targetOffset null when the first correction edge fires. The correction takes that round to capture from current positions, no seek issued.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.PrimaryPlayback.RaiseFileLoaded();  // clears offset
+
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 13;
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty, "first tick lazy-captures");
+
+        // Now drift against the captured offset (3) is detectable.
+        h.SecondaryPlayback!.PositionSeconds = 13.050;  // drift = (13.05 - 10) - 3 = +0.050
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 13.0 }));
+    }
 }

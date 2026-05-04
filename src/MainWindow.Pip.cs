@@ -40,6 +40,11 @@ public partial class MainWindow
     // Coalescer for the post-ApplyPipLayout geometry refresh. ApplyPipLayout fires per drag-update event (potentially many times per frame); we only need one refresh per frame.
     private bool pipGeometryRefreshScheduled;
 
+    // Single coalescing GLib timeout for the post-edge corrective seek (PiP Sync — Post-Edge Corrective Seek). Set on each PostEdgeCorrectionRequested fire from the VM; if a previous timeout is still pending, it's removed first so a flurry of edges (e.g. scrubber drag firing many SeekTos) collapses to one correction after the last edge.
+    private uint pendingCorrectionTimeoutId;
+    // 500 ms — empirical 95th-percentile coverage of `+exact` hr-seek completion + IsSeeking property echo round-trip on ordinary content. Raise to 1000 if practice shows the IsSeeking gate inside ApplyPostEdgeCorrection routinely skips slow-codec corrections.
+    private const uint PostEdgeCorrectionDelayMs = 500;
+
     // App-level commit threshold for drag-to-move. Larger than GTK's gtk-dnd-drag-threshold (default 8 px) because GTK's threshold is empirically crossed by hand tremor / mouse jitter during what the user considers a normal click — under that threshold, GestureDrag fires drag-begin, our handler claims the sequence, and the sibling GestureClick's `released` signal is denied → PlayPause never runs. Bumping this app-side gates the SetState(Claimed) call until motion is unambiguous enough to commit. Picked at 16 px (~1/8" on typical DPI) — comfortably above tremor, comfortably below intentional drag motion.
     private const double PipMoveClaimThresholdPx = 16.0;
     private bool pipMoveClaimed;
@@ -204,6 +209,8 @@ public partial class MainWindow
 
         // Track the primary's video aspect: a primary file load/unload changes the letterbox/pillarbox layout, which moves the video display rect the PiP is positioned relative to. ApplyPipLayout reads the current rect on each call, so we just need to re-trigger it when the aspect flips.
         viewModel.Primary.PropertyChanged += OnPrimaryContextPropertyChangedForPip;
+        // Subscribe the post-edge correction scheduler. The VM raises this on every sync-mode transport edge that introduces wall-clock skew; we coalesce via the pending-timeout id so rapid edges produce one correction at the end.
+        viewModel.PostEdgeCorrectionRequested += OnPostEdgeCorrectionRequested;
 
         // PiP UI bookkeeping: re-bind the playlist panel to whichever context is active (Primary on first enable; SetActive may have been called pre-enable in tests, but in production EnablePip lands with active=Primary). Recompute the active CSS class and re-stack the OSD controlsBox if we're already fullscreen so it stays above the new PiP overlay child.
         RebindPlaylistPanelToTarget();
@@ -231,6 +238,13 @@ public partial class MainWindow
             viewModel.Secondary.PropertyChanged -= OnSecondaryContextPropertyChanged;
         }
         viewModel.Primary.PropertyChanged -= OnPrimaryContextPropertyChangedForPip;
+        // Unsubscribe BEFORE viewModel.DisablePip() so any in-flight VM-side state changes during teardown can't ghost-fire a correction request. Cancel the pending timeout so a queued tick can't land on a half-disposed Secondary.
+        viewModel.PostEdgeCorrectionRequested -= OnPostEdgeCorrectionRequested;
+        if (pendingCorrectionTimeoutId != 0)
+        {
+            GLib.Functions.SourceRemove(pendingCorrectionTimeoutId);
+            pendingCorrectionTimeoutId = 0;
+        }
         // VM teardown comes first: it disposes the VideoContext (which detaches the HDR sink + unsubscribes Source/Output handlers); doing this before the surface is destroyed lets the SDR pre-stage call inside DetachHdrSink land on a still-live surface.
         viewModel.DisablePip();
 
@@ -477,6 +491,27 @@ public partial class MainWindow
                 secondaryArea?.RefreshGeometry();
                 return false;
             });
+    }
+
+    // Coalescing scheduler. SourceRemove on a non-zero pending id is idempotent and cheap; the new TimeoutAdd resets the wall-clock countdown so a rapid burst of edges (e.g. scrubber drag) produces one correction PostEdgeCorrectionDelayMs after the LAST edge, not one per edge.
+    private void OnPostEdgeCorrectionRequested()
+    {
+        if (pendingCorrectionTimeoutId != 0)
+        {
+            GLib.Functions.SourceRemove(pendingCorrectionTimeoutId);
+            pendingCorrectionTimeoutId = 0;
+        }
+        pendingCorrectionTimeoutId = GLib.Functions.TimeoutAdd(
+            (int)GLib.Constants.PRIORITY_DEFAULT,
+            PostEdgeCorrectionDelayMs,
+            OnPostEdgeCorrectionTimeout);
+    }
+
+    private bool OnPostEdgeCorrectionTimeout()
+    {
+        pendingCorrectionTimeoutId = 0;
+        viewModel.ApplyPostEdgeCorrection();
+        return false;
     }
 
     private void OnPipMoveDragBegin(Gtk.GestureDrag sender, Gtk.GestureDrag.DragBeginSignalArgs args)
