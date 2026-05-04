@@ -992,6 +992,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             controlsBox.SetVisible(true);
             ReparentStreamSelectorForFullscreen(false);
         }
+        // Re-derive the stream-selector visibility from IsPipEnabled at the tail of every fullscreen transition. Mirrors the unconditional controlsBox.SetVisible(true) above: the auto-hide timer may have cleared the toolbar's Visible flag, and ReparentStreamSelectorForFullscreen only handles parent/CSS — without this, toggling fullscreen while the UI is auto-hidden brings the control bar back but leaves the PiP chooser invisible.
+        UpdateStreamSelectorVisibility();
     }
 
     // Reparent the stream-selector toolbar between rootBox (windowed: a solid layout row that displaces the video) and videoOverlay (fullscreen: floats at the top of the video). Same pattern as controlsBox below, but anchored at top. The toolbar's visibility is governed independently by IsPipEnabled, so this method only handles the parent + alignment + CSS swap.
