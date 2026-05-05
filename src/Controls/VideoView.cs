@@ -96,23 +96,14 @@ public class VideoView : Gtk.GLArea
     private void OnMpvUpdateRequested()
     {
         // mpv update callback fires on its internal render thread. Hop to the main thread before touching the widget.
-        GLib.Functions.IdleAdd(
-            (int)GLib.Constants.PRIORITY_DEFAULT,
-            () =>
-            {
-                QueueRender();
-                return false;
-            });
+        Vomplayer.Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT, QueueRender);
     }
 
     private void OnMpvRenderFailed(int code)
     {
-        GLib.Functions.IdleAdd(
-            (int)GLib.Constants.PRIORITY_DEFAULT,
-            () =>
-            {
-                RenderFailed?.Invoke(code);
-                return false;
-            });
+        Vomplayer.Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT, () =>
+        {
+            RenderFailed?.Invoke(code);
+        });
     }
 }

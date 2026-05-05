@@ -182,13 +182,7 @@ public partial class MainWindow
         }
         // Secondary Playback. Mirrors Program.cs's wiring — a fresh Playback instance with its own dispatcher worker thread + mpv client. The IdleAdd post-to-main-thread closure is identical to the primary's; it doesn't share state, just shape.
         var pb = new Playback.Playback(
-            a => GLib.Functions.IdleAdd(
-                (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
-                () =>
-                {
-                    a();
-                    return false;
-                }));
+            a => Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, a));
         pb.Initialize();
         secondaryPlayback = pb;
 
@@ -483,14 +477,11 @@ public partial class MainWindow
             return;
         }
         pipGeometryRefreshScheduled = true;
-        GLib.Functions.IdleAdd(
-            (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
-            () =>
-            {
-                pipGeometryRefreshScheduled = false;
-                secondaryArea?.RefreshGeometry();
-                return false;
-            });
+        Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
+        {
+            pipGeometryRefreshScheduled = false;
+            secondaryArea?.RefreshGeometry();
+        });
     }
 
     // Coalescing scheduler. SourceRemove on a non-zero pending id is idempotent and cheap; the new TimeoutAdd resets the wall-clock countdown so a rapid burst of edges (e.g. scrubber drag) produces one correction PostEdgeCorrectionDelayMs after the LAST edge, not one per edge.

@@ -67,8 +67,9 @@ public sealed class UrlDownloadCache
         {
             relative = File.ReadAllText(manifest).Trim();
         }
-        catch (IOException)
+        catch (IOException ex)
         {
+            Console.Error.WriteLine($"[vompl] url-cache: read manifest {manifest} failed: {ex.Message}; treating as cache miss");
             return null;
         }
         if (string.IsNullOrEmpty(relative))
@@ -155,7 +156,7 @@ public sealed class UrlDownloadCache
         }
         catch (IOException)
         {
-            // Touching is best-effort — if it fails, the worst case is the entry gets cleaned up earlier than expected. Don't disrupt the play path for it.
+            // Touching is best-effort — if it fails, the worst case is the entry gets cleaned up earlier than expected. Don't disrupt the play path for it. Intentionally silent (not "swallowed"): a read-only cache directory would otherwise log on every URL play, which is pure noise — the failure is by design tolerable. If a real bug ever needs to be diagnosed here, replace this with throw + handle at the caller, not blanket logging.
         }
     }
 }

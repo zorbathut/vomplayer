@@ -93,9 +93,10 @@ public sealed class TrackPreferences : ITrackPreferences
             // Path.GetDirectoryName returns "" for paths with no directory component (after GetFullPath, this is unusual but defensive — and an empty string would crash Record's IsNullOrEmpty check rather than be skipped silently). Treat as non-savable.
             return string.IsNullOrEmpty(dir) ? null : dir;
         }
-        catch
+        catch (Exception ex)
         {
-            // Path.GetFullPath throws on invalid characters in some platforms; treat as non-savable rather than crashing the menu action that triggered the call.
+            // Path.GetFullPath throws on invalid characters in some platforms; treat as non-savable rather than crashing the menu action that triggered the call. Logged per the never-swallow policy so a real bug producing a stream of these isn't invisible.
+            Console.Error.WriteLine($"[vompl] track-prefs: GetFullPath('{pathOrUri}') failed: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }

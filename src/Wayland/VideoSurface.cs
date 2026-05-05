@@ -274,13 +274,10 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
 
     private void OnMpvRenderFailed(int code)
     {
-        GLib.Functions.IdleAdd(
-            (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
-            () =>
-            {
-                RenderFailed?.Invoke(code);
-                return false;
-            });
+        Vomplayer.Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
+        {
+            RenderFailed?.Invoke(code);
+        });
     }
 
     // Thread-safe via Interlocked: callable from both mpv's render thread (OnMpvUpdateRequested) and the main thread (OnAreaGeometryChanged, TryCreateRenderContext). Idempotent — at most one IdleAdd in flight.
@@ -290,14 +287,11 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
         {
             return;
         }
-        GLib.Functions.IdleAdd(
-            (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
-            () =>
-            {
-                Interlocked.Exchange(ref renderQueued, 0);
-                DoRender();
-                return false;
-            });
+        Vomplayer.Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
+        {
+            Interlocked.Exchange(ref renderQueued, 0);
+            DoRender();
+        });
     }
 
     private void DoRender()
@@ -393,12 +387,9 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
         }
         lastPublishedOutputIsHdr = current;
         // Defer the invoke: this fires from Wayland dispatch on the main thread, and consumers (MainWindow.ApplyHdrPolicy) call mpv.SetProperty which synchronously waits on mpv's core thread. The core then waits on the render thread — which is *this* main thread. Synchronous invocation would deadlock the main loop. Punting to a fresh GMainContext iteration breaks the cycle, matching Playback.UpdateSourceHdr's postToMainThread pattern for SourceHdrChanged.
-        GLib.Functions.IdleAdd(
-            (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
-            () =>
-            {
-                CurrentOutputHdrChanged?.Invoke();
-                return false;
-            });
+        Vomplayer.Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
+        {
+            CurrentOutputHdrChanged?.Invoke();
+        });
     }
 }

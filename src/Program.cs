@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using Vomplayer.UserData;
 
 namespace Vomplayer;
@@ -7,6 +8,18 @@ public static class Program
 {
     public static int Main(string[] args)
     {
+        // Cheap last-resort safety nets for the never-swallow policy. Most surfacing already works through GirCore's MainLoopSynchronizationContext (which catches Post exceptions and routes them to GLib.UnhandledException → stderr + Environment.Exit(1)) — so async-RelayCommand faults and signal-handler throws are already loud by default. These two handlers cover the residual cases the SyncContext doesn't see: finalizer-thread exceptions and faulted Tasks that get GC'd while still unobserved.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            var ex = e.ExceptionObject as Exception;
+            Console.Error.WriteLine($"[vomplayer] UNHANDLED EXCEPTION (terminating={e.IsTerminating}): {ex?.ToString() ?? e.ExceptionObject?.ToString() ?? "<null>"}");
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Console.Error.WriteLine($"[vomplayer] UNOBSERVED TASK EXCEPTION: {e.Exception}");
+            e.SetObserved();
+        };
+
         string? initialFile = null;
         foreach (var a in args)
         {
@@ -43,13 +56,7 @@ public static class Program
         LibC.ForceCNumericLocale();
 
         var playback = new Playback.Playback(
-            a => GLib.Functions.IdleAdd(
-                (int)GLib.Constants.PRIORITY_DEFAULT_IDLE,
-                () =>
-                {
-                    a();
-                    return false;
-                }));
+            a => Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, a));
         playback.Initialize();
 
         var window = new MainWindow(app, playback, recentFiles, trackPreferences, userConfig, configPath, initialFile);
