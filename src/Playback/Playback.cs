@@ -205,12 +205,14 @@ public sealed partial class Playback : ObservableObject, IPlayback
             // Pin volume-max to 100 so the [0, 100] slider range is the authoritative contract: any `add volume +5` past 100 clamps in mpv (rather than letting mpv's default 130 amplify past what the UI can display, which would produce silent gain-above-1 the user couldn't see). If a future per-source amplification feature wants headroom, raise volume-max and widen the slider together.
             h.SetOption("volume-max", "100");
 
-            // VOMPL_LOG_MPV=<path> routes mpv's full log to that file at -v level. Needed for debugging hwdec negotiation (which backends were tried, why they were rejected) and anything else mpv normally prints to its terminal — we run with terminal=no, so there's no other way to see this output. Path is taken literally; no ~ expansion. Value must be a writable path; mpv errors out if it isn't.
+            // mpv has a per-prefix `msg-level` filter that runs BEFORE mpv_request_log_messages decides what to deliver to client-API consumers, and the default is `ffmpeg=warn` — so AV_LOG_VERBOSE messages from ffmpeg's hwdec backends (which is where the actual rejection reasons live: "Cannot open DRM device /dev/dri/renderD128: <errno>", "vaInitialize returned -3 (unknown libva error)", etc.) are dropped server-side. Setting all=v lifts that filter so the transcript actually surfaces the *why* of a failed hwdec negotiation. Cost is some extra noise from non-hwdec subsystems, but the dispatcher-side prefix filter on the client side drops those before they cross threads.
+            h.SetOption("msg-level", "all=v");
+
+            // VOMPL_LOG_MPV=<path> additionally routes the full v-level log to that file. Needed for offline debugging or for capturing logs across a session that's longer than the in-process transcript ring. Path is taken literally; no ~ expansion. Value must be a writable path; mpv errors out if it isn't.
             var mpvLogPath = Environment.GetEnvironmentVariable("VOMPL_LOG_MPV");
             if (!string.IsNullOrEmpty(mpvLogPath))
             {
                 h.SetOption("log-file", mpvLogPath);
-                h.SetOption("msg-level", "all=v");
             }
 
             // Stream log messages to us at "v" level so the hwdec transcript can capture the full negotiation trail (vd / backend / ffmpeg lines that explain why a backend was picked or rejected). Captured into a bounded ring inside OnMpvLogMessage; the diagnostic overlay surfaces it. Independent of VOMPL_LOG_MPV — the env var routes to a file via mpv's log-file option, this routes via the client-API event stream and stays in-process. Called BEFORE Initialize per mpv's documentation, which explicitly notes "You can call this on a uninitialized handle" and that doing so is required to receive any messages emitted during initialization itself (which includes the first hwdec auto-probe lines on `vo=libmpv` / `hwdec=auto-safe` setup).
