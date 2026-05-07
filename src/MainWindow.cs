@@ -35,22 +35,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     [LibraryImport(GtkLib, EntryPoint = "gdk_event_get_event_type")]
     private static partial int GdkEventGetEventType(IntPtr evt);
 
-    // GdkFileList accessors. GirCore 0.7.0 binds GdkFileList.NewFromArray / NewFromList but NOT gdk_file_list_get_files (the only way to walk the contents from C#). Raw P/Invoke matches the established style for things GirCore doesn't bind cleanly (cf. g_signal_connect_data above). gdk symbols ship inside libgtk-4.so.1 on every target we care about (GTK doesn't split libgdk on its modern release line).
-    [LibraryImport(GtkLib, EntryPoint = "gdk_file_list_get_files")]
-    private static partial IntPtr GdkFileListGetFiles(IntPtr fileList);
-
-    [LibraryImport(GioLib, EntryPoint = "g_file_get_path")]
-    private static partial IntPtr GFileGetPath(IntPtr gfile);
-
-    [LibraryImport(GioLib, EntryPoint = "g_file_get_uri")]
-    private static partial IntPtr GFileGetUri(IntPtr gfile);
-
-    [LibraryImport(GLibLib, EntryPoint = "g_free")]
-    private static partial void GFree(IntPtr ptr);
-
-    [LibraryImport(GLibLib, EntryPoint = "g_slist_free")]
-    private static partial void GSListFree(IntPtr list);
-
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int SeekLegacyEventCallback(IntPtr sender, IntPtr evt, IntPtr userData);
 
@@ -324,18 +308,15 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         AttachClickToFocus(videoWidget, ViewModelMain.VideoSlot.Primary);
 
         // Per-widget drop target on the primary video region. Always routes to Primary regardless of active slot — so a drop on the main video area can't accidentally land in Secondary just because Secondary is currently active. Window-level drop (registered below) is the active-aware fallback for chrome / margin drops.
-        var primaryDrop = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
-        primaryDrop.OnDrop += OnPrimaryFileDrop;
+        var primaryDrop = UriListDropTarget.Create(paths => HandlePrimaryDrop(paths));
         videoWidget.AddController(primaryDrop);
 
-        // Drag-and-drop loading. Register a Gdk.FileList drop target — both single- and multi-file drags deserialize into a 1-or-N element FileList from any file-manager / browser source that offers text/uri-list (universal). GirCore 0.7.0 doesn't bind GdkFileList.GetFiles, so we walk the underlying GSList ourselves via P/Invoke (see GdkFileListGetFiles + ExtractAndExpandPaths). Window-level target REPLACES the playlist; the panel-level target wired below APPENDS. GTK4's drop dispatch picks the topmost widget under the pointer that matches the offered formats, so a drop on the panel triggers ONLY the panel's target — replace and append are properly disjoint without a propagation dance. Copy|Move|Link is accepted because Wayland/X11 sources negotiate the action set with the destination; we read the file either way.
-        var dropTarget = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
-        dropTarget.OnDrop += OnWindowFileDrop;
+        // Drag-and-drop loading. We use Gtk.DropTargetAsync via UriListDropTarget rather than the older Gtk.DropTarget(Gdk.FileList) path because GTK 4's content-deserializer machinery for FileList drops in a Flatpak sandbox always tries to mediate via the FileTransfer/Documents portals — which hard-rejects paths outside the trusted-roots list (e.g. Steam Deck /var/mnt/* drops). UriListDropTarget calls gdk_drop_read_async with explicit mime list ["text/uri-list"], bypassing the deserializer machinery entirely and the portal call with it. With --filesystem=host:ro in the manifest, the sandbox already has read access to whatever the source dropped. See UriListDropTarget.cs's header for full details. Window-level target REPLACES the playlist; the panel-level target wired below APPENDS. GTK4's drop dispatch picks the topmost widget under the pointer that matches the offered formats, so a drop on the panel triggers ONLY the panel's target — replace and append are properly disjoint without a propagation dance. Copy|Move|Link is accepted because Wayland/X11 sources negotiate the action set with the destination; we read the file either way.
+        var dropTarget = UriListDropTarget.Create(paths => HandleWindowDrop(paths));
         AddController(dropTarget);
 
-        // Panel-level append target. Same FileList GType, attached to the panel's drop area (the inner ListBox, so drops on the scrollbar don't accidentally consume). Only matched when the user drops onto the panel itself.
-        var panelDropTarget = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
-        panelDropTarget.OnDrop += OnPanelFileDrop;
+        // Panel-level append target, attached to the panel's drop area (the inner ListBox, so drops on the scrollbar don't accidentally consume). Only matched when the user drops onto the panel itself.
+        var panelDropTarget = UriListDropTarget.Create(paths => HandlePanelDrop(paths));
         playlistPanel.DropArea.AddController(panelDropTarget);
 
         // Mirror the real fullscreen state rather than treating a local bool as authority. Covers compositor/WM-initiated un-fullscreen that bypasses our key/gesture paths.
@@ -696,13 +677,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         ArmControlsHideTimer();
     }
 
-    private bool OnWindowFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
+    private void HandleWindowDrop(List<string> paths)
     {
-        var paths = ExtractAndExpandPaths(args.Value);
         if (paths.Count == 0)
         {
-            // Empty payload (typically: a directory drop that had no recognized video files inside). Don't orphan currently-playing media. Return false so the drag source sees the drop as rejected; per CLAUDE.md (silent error handling banned) log when the input itself was malformed (no files at all in the FileList) but stay quiet for the legitimate zero-match case.
-            return false;
+            // Empty payload (typically: a directory drop that had no recognized video files inside). Don't orphan currently-playing media — UriListDropTarget already called drop.Finish, we just ignore.
+            return;
         }
         viewModel.LoadPaths(paths, replace: true);
         // Auto-show the panel for multi-item playlists so first-time users see the result of their drop. Single-file drops don't reveal — the user already sees their file playing.
@@ -710,68 +690,15 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             ShowPlaylistPanel();
         }
-        return true;
     }
 
-    private bool OnPanelFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
+    private void HandlePanelDrop(List<string> paths)
     {
-        var paths = ExtractAndExpandPaths(args.Value);
         if (paths.Count == 0)
         {
-            return false;
+            return;
         }
         viewModel.LoadPaths(paths, replace: false);
-        return true;
-    }
-
-    // Pulls a flat list of paths (or URIs for non-local sources) out of a Gdk.FileList GValue, then expands any local-directory entries to their recursive video-file contents (extension-filtered). Direct file entries are kept as-is — the user's explicit drop is authoritative for "is this playable?", we don't second-guess by extension. URIs (where g_file_get_path returned NULL and we fell back to g_file_get_uri) skip the directory-expansion check entirely.
-    //
-    // GdkFileList is a boxed type, so args.Value.GetBoxed() returns the IntPtr to the boxed payload (NOT GetObject(), which is GObject-only and would return null here). gdk_file_list_get_files returns (transfer container) — the GSList container is caller-owned (g_slist_free), the GFile elements are owned by the FileList.
-    private List<string> ExtractAndExpandPaths(GObject.Value value)
-    {
-        var raw = new List<string>();
-        IntPtr fileListPtr = value.GetBoxed();
-        if (fileListPtr == IntPtr.Zero)
-        {
-            Console.Error.WriteLine("[vompl] dnd: dropped value's boxed payload was null; ignoring");
-            return new List<string>();
-        }
-        IntPtr gslist = GdkFileListGetFiles(fileListPtr);
-        IntPtr node = gslist;
-        while (node != IntPtr.Zero)
-        {
-            IntPtr gfile = Marshal.ReadIntPtr(node, 0);                    // GSList.data
-            if (gfile != IntPtr.Zero)
-            {
-                IntPtr pathPtr = GFileGetPath(gfile);
-                if (pathPtr != IntPtr.Zero)
-                {
-                    var p = Marshal.PtrToStringUTF8(pathPtr);
-                    GFree(pathPtr);
-                    if (!string.IsNullOrEmpty(p))
-                    {
-                        raw.Add(p);
-                    }
-                }
-                else
-                {
-                    IntPtr uriPtr = GFileGetUri(gfile);
-                    if (uriPtr != IntPtr.Zero)
-                    {
-                        var u = Marshal.PtrToStringUTF8(uriPtr);
-                        GFree(uriPtr);
-                        if (!string.IsNullOrEmpty(u))
-                        {
-                            raw.Add(u);
-                        }
-                    }
-                }
-            }
-            node = Marshal.ReadIntPtr(node, IntPtr.Size);                  // GSList.next
-        }
-        GSListFree(gslist);
-
-        return MediaExtensions.ExpandPaths(raw, msg => Console.Error.WriteLine($"[vompl] dnd: {msg}"));
     }
 
     // Single dispatch site for HotkeyMap-bound actions. Returns true when the input has been consumed so the key controller can short-circuit propagation; the click handler ignores the return value because GestureClick doesn't propagate the same way. ExitFullscreen returns false when not actually fullscreen so the bound key (typically Escape) doesn't get silently swallowed in non-fullscreen state — matches the pre-customization behavior.

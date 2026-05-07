@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using Vomplayer.Controls;
@@ -707,33 +708,25 @@ public partial class MainWindow
 
     private void AttachSecondaryDropTarget(Gtk.Widget widget)
     {
-        var dropTarget = Gtk.DropTarget.New(Gdk.FileList.GetGType(), Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
-        dropTarget.OnDrop += OnSecondaryFileDrop;
+        var dropTarget = Util.UriListDropTarget.Create(paths => HandleSecondaryDrop(paths));
         widget.AddController(dropTarget);
     }
 
-    private bool OnSecondaryFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
+    private void HandleSecondaryDrop(List<string> paths)
     {
-        if (viewModel.Secondary == null)
+        if (viewModel.Secondary == null || paths.Count == 0)
         {
-            return false;
-        }
-        var paths = ExtractAndExpandPaths(args.Value);
-        if (paths.Count == 0)
-        {
-            return false;
+            return;
         }
         // Drop on the PiP region always targets Secondary, regardless of which slot is currently active. (Per-widget drop target wins over the window-level drop, which routes to active.)
         viewModel.Secondary.LoadPaths(paths, replace: true);
-        return true;
     }
 
-    private bool OnPrimaryFileDrop(Gtk.DropTarget sender, Gtk.DropTarget.DropSignalArgs args)
+    private void HandlePrimaryDrop(List<string> paths)
     {
-        var paths = ExtractAndExpandPaths(args.Value);
         if (paths.Count == 0)
         {
-            return false;
+            return;
         }
         // Drop on the primary video area always targets Primary, regardless of active. (When PiP is off this is identical to the window-level drop's target.)
         viewModel.Primary.LoadPaths(paths, replace: true);
@@ -741,7 +734,6 @@ public partial class MainWindow
         {
             ShowPlaylistPanel();
         }
-        return true;
     }
 
     // Apply the selected CSS class to whichever video widget represents the currently-selected slot, or remove the highlight from all when no selection. The class adds a 2 px inset white outline so the user can see at a glance that the next input goes to that stream alone (vs. broadcast/sync when no widget is highlighted).
