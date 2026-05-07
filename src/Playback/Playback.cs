@@ -44,6 +44,63 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private string? hwdecCurrent;
 
+    // Bounded transcript of mpv log lines whose prefix root matches HwdecLogPrefixRoots — i.e. the messages that explain *why* a hwdec backend was tried/picked/rejected. Captured at "v" level so the full negotiation path is visible. Cleared on LoadFile (via dispatcher epoch — see below) so each file's transcript starts fresh; bounded to TranscriptMaxLines via FIFO eviction so a chatty source can't grow it unbounded. The list is touched only on the main thread (LogMessageReceived is forwarded through postToMainThread upstream); the IPlayback getter has the same constraint.
+    private const int TranscriptMaxLines = 256;
+    private readonly Queue<string> hwdecTranscript = new(TranscriptMaxLines);
+    public IReadOnlyList<string> HwdecTranscript
+    {
+        get
+        {
+            return hwdecTranscript.ToArray();
+        }
+    }
+
+    // Per-LoadFile epoch, incremented on the dispatcher worker just before the loadfile command is issued, stamped onto each LogMessage at the moment dispatcher.LogMessageReceived fires (also dispatcher worker), and compared against mainLogEpoch on the main thread when a stamped message lands. The race this fixes: a synchronous main-thread Clear in LoadFile interleaves wrong with in-flight log events — A's tail messages are already queued to main idle by the time main calls Clear, then they land *after* the clear and pollute the new file's transcript. With the epoch carrier, ordering is enforced by the dispatcher worker FIFO (which sequences mpv emissions vs the loadfile command), and main only clears when an epoch-bumped message arrives.
+    private int dispatcherLogEpoch;
+    private int mainLogEpoch;
+
+    // Prefix roots for mpv components that participate in hwdec negotiation. Match is "prefix == root || prefix starts with root + '/'", so `ffmpeg` catches `ffmpeg/h264`, `ffmpeg/vaapi_hwaccel`, etc. The hwdec rejection reason can land under any of these depending on the failure point: top-level "Trying X / X failed" lines under `vd`; codec-init rejections under `ffmpeg/<codec>`; backend-init rejections under the backend's own prefix or `ffmpeg/<hwaccel>`; format-conversion failures under `autoconvert`; VO consumer rejections under `vo`. Mac/Windows backends (`videotoolbox`, `d3d11va`) are unused on Linux but cost nothing to keep listed.
+    private static readonly string[] HwdecLogPrefixRoots =
+    {
+        "vd",
+        "vo",
+        "ffmpeg",
+        "lavc",
+        "vaapi",
+        "vdpau",
+        "nvdec",
+        "videotoolbox",
+        "d3d11va",
+        "cuda",
+        "hwdec",
+        "autoconvert",
+    };
+
+    internal static bool IsHwdecLogPrefix(string prefix)
+    {
+        if (string.IsNullOrEmpty(prefix))
+        {
+            return false;
+        }
+        foreach (var root in HwdecLogPrefixRoots)
+        {
+            if (prefix.Length == root.Length)
+            {
+                if (prefix == root)
+                {
+                    return true;
+                }
+            }
+            else if (prefix.Length > root.Length
+                && prefix[root.Length] == '/'
+                && prefix.AsSpan(0, root.Length).SequenceEqual(root))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Snapshots of mpv's tracks per kind. Replaced wholesale (not mutated) so PropertyChanged signals "re-read everything". Driven by an observation on `track-list/count` — every add/remove of any track kind fires the count change, and we re-walk track-list/N/* on the dispatcher thread. A single dispatcher post drives the read so the three per-kind buckets come out of one walk, avoiding three round-trip passes that would each re-open the mid-walk-reorder window described on ReadTracksFromMpv. (Per-kind UI consumers still see the three property updates land sequentially on the main thread, not atomically — the comment used to claim otherwise.)
     [ObservableProperty]
     private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
@@ -117,7 +174,19 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.PropertyChanged += c => postToMainThread(() => OnMpvPropertyChanged(c));
         dispatcher.FileLoaded += () => postToMainThread(OnMpvFileLoaded);
         dispatcher.FileEnded += e => postToMainThread(() => OnMpvFileEnded(e));
+        dispatcher.LogMessageReceived += OnDispatcherLogMessage;
         dispatcher.Shutdown += () => postToMainThread(OnMpvShutdown);
+    }
+
+    // Runs on the dispatcher worker. Filters by prefix root *before* paying for the cross-thread post — at "v" level mpv emits dozens-to-hundreds of lines per second on a malformed source, and hwdec-only matches are typically <1% of that. Stamps the current epoch onto each accepted message so main-thread receipt can correlate it against the LoadFile boundary (see the dispatcherLogEpoch / mainLogEpoch comments for the race rationale).
+    private void OnDispatcherLogMessage(LogMessage message)
+    {
+        if (!IsHwdecLogPrefix(message.Prefix))
+        {
+            return;
+        }
+        var epoch = dispatcherLogEpoch;
+        postToMainThread(() => OnMpvLogMessage(message, epoch));
     }
 
     public void Initialize()
@@ -143,6 +212,9 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 h.SetOption("log-file", mpvLogPath);
                 h.SetOption("msg-level", "all=v");
             }
+
+            // Stream log messages to us at "v" level so the hwdec transcript can capture the full negotiation trail (vd / backend / ffmpeg lines that explain why a backend was picked or rejected). Captured into a bounded ring inside OnMpvLogMessage; the diagnostic overlay surfaces it. Independent of VOMPL_LOG_MPV — the env var routes to a file via mpv's log-file option, this routes via the client-API event stream and stays in-process. Called BEFORE Initialize per mpv's documentation, which explicitly notes "You can call this on a uninitialized handle" and that doing so is required to receive any messages emitted during initialization itself (which includes the first hwdec auto-probe lines on `vo=libmpv` / `hwdec=auto-safe` setup).
+            h.RequestLogMessages("v");
 
             h.Initialize();
 
@@ -201,9 +273,24 @@ public sealed partial class Playback : ObservableObject, IPlayback
         MediaTitle = null;
         dispatcher.Post(h =>
         {
+            // Bump the per-file epoch BEFORE issuing loadfile so any log-message events that fire from this point forward are stamped with the new epoch. Tail messages from the previous file that mpv emitted before this point have already been observed by the dispatcher worker (FIFO between events and posted commands) and were stamped with the old epoch — so when both land on main, mainLogEpoch can tell them apart and clear the transcript at the boundary. Also post a clear-marker to main so we still flip the transcript even if the new file produces no log messages of its own (cached hwdec decision, audio-only file, etc.).
+            dispatcherLogEpoch++;
+            var epochSnapshot = dispatcherLogEpoch;
+            postToMainThread(() => AdvanceLogEpoch(epochSnapshot));
             h.Command("loadfile", path);
             h.SetProperty("pause", "no");
         });
+    }
+
+    // Main-thread epoch sync. Called both from LoadFile's posted marker (so a load that produces no log messages still clears the previous file's transcript) and implicitly from OnMpvLogMessage when an epoch-bumped message lands. Idempotent on equal epochs; clears the transcript on advance.
+    private void AdvanceLogEpoch(int epoch)
+    {
+        if (epoch <= mainLogEpoch)
+        {
+            return;
+        }
+        mainLogEpoch = epoch;
+        hwdecTranscript.Clear();
     }
 
     // Called after the Wayland color-management shim attaches a PQ/BT.2020 description to the subsurface. mpv's gl_video pipeline must then emit PQ pass-through (no tone-map within mpv) so the compositor's libplacebo-backed pipeline can do PQ→SDR (or PQ→HDR pass-through, depending on output) using its own curves, which match smplayer/`vo=gpu-next` quality. If HDR is never applied (non-Linux, X11, compositor without wp-color-management-v1, or current source is SDR), we never call this and mpv keeps its `target-*=auto` defaults so gl_video can fall back to its own tone-map.
@@ -684,6 +771,33 @@ public sealed partial class Playback : ObservableObject, IPlayback
     internal void UpdateCurrentSubtitleId(int? value)
     {
         CurrentSubtitleId = value;
+    }
+
+    // Runs on the main thread (OnDispatcherLogMessage forwards via postToMainThread). Pre-filtered upstream — every message landing here passed IsHwdecLogPrefix. Carries the dispatcher-side epoch so the LoadFile boundary clear lands at the right point in the sequence relative to in-flight events. Verbatim formatting matches mpv's terminal output style ("[prefix/level] text") so the dump is recognizable to anyone who's debugged mpv at the command line.
+    private void OnMpvLogMessage(LogMessage message, int epoch)
+    {
+        AdvanceLogEpoch(epoch);
+        if (hwdecTranscript.Count >= TranscriptMaxLines)
+        {
+            hwdecTranscript.Dequeue();
+        }
+        hwdecTranscript.Enqueue($"[{message.Prefix}/{message.Level}] {message.Text}");
+    }
+
+    // Internal test seam — drives the full main-thread path (epoch advance + filter + ring append) without an mpv pump. Tests pass the message and the epoch they want stamped; production passes the epoch captured on the dispatcher worker. The pre-dispatcher prefix filter is applied here too so tests exercise the same accept/reject decision.
+    internal void IngestLogMessageForTest(LogMessage message, int epoch)
+    {
+        if (!IsHwdecLogPrefix(message.Prefix))
+        {
+            return;
+        }
+        OnMpvLogMessage(message, epoch);
+    }
+
+    // Internal seam to drive the LoadFile epoch advance directly without a real loadfile command. Mirrors what AdvanceLogEpoch does on the actual production path.
+    internal void AdvanceLogEpochForTest(int epoch)
+    {
+        AdvanceLogEpoch(epoch);
     }
 
     // Internal so PlaybackTests can drive the state change without spinning up mpv's event pump. Logs only on real transitions so a file-loaded spam doesn't pollute stderr; the log is the current user-visible "did hwaccel work" signal until a UI surface consumes HwdecCurrent. Null and empty are coalesced because mpv reports both forms depending on context (initial synthesized fire vs no-hwdec state).

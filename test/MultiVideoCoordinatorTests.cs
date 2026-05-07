@@ -78,6 +78,7 @@ public partial class MultiVideoCoordinatorTests
 
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
+        public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
         public string DiagTag { get; set; } = "?";
 
         public List<string> LoadedFiles { get; } = new();

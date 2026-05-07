@@ -43,6 +43,9 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // The hwdec backend mpv settled on for the current source ("vaapi", "no", null when no file is loaded, etc.). Read by the diagnostic overlay's `hwdec=` row only.
     string? HwdecCurrent { get; }
 
+    // Bounded transcript of mpv log lines from the components that drive hwdec negotiation (vd / backend / ffmpeg). Captured at "v" level so the full "tried X, X failed because Y, selected Z" trail is preserved. Cleared per file. Read by the diagnostic overlay; printed to stdout when the overlay is shown.
+    IReadOnlyList<string> HwdecTranscript { get; }
+
     // Display aspect of the loaded source (dwidth/dheight, square-pixel rectangle the video should render into). Null when no file is loaded or no video stream is present. Drives the PiP layout's per-source aspect-correct sizing.
     double? VideoAspect { get; }
 

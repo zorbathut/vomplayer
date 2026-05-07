@@ -43,6 +43,10 @@ internal static partial class LibMpv
     [LibraryImport(Lib, EntryPoint = "mpv_command")]
     public static partial int Command(IntPtr ctx, IntPtr[] args);
 
+    // Asks libmpv to deliver log messages at or above `minLevel` via MPV_EVENT_LOG_MESSAGE. Levels (lowest-detail to most): "no" "fatal" "error" "warn" "info" "status" "v" "debug" "trace". Pass "no" to disable. Each delivered event carries an mpv_event_log_message struct (see EventLogMessage). Safe to call before or after Initialize. mpv terminates the message text with a single newline; consumers should strip it before display.
+    [LibraryImport(Lib, EntryPoint = "mpv_request_log_messages", StringMarshalling = StringMarshalling.Utf8)]
+    public static partial int RequestLogMessages(IntPtr ctx, string minLevel);
+
     [LibraryImport(Lib, EntryPoint = "mpv_command_string", StringMarshalling = StringMarshalling.Utf8)]
     public static partial int CommandString(IntPtr ctx, string args);
 
@@ -109,6 +113,16 @@ internal static partial class LibMpv
         public IntPtr Name;
         public MpvFormat Format;
         public IntPtr Data;
+    }
+
+    // Layout matches mpv_event_log_message: const char* prefix, level, text, then mpv_log_level (int). Pointers are owned by libmpv and only valid for the duration of the event dispatch — copy strings out before yielding.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct EventLogMessage
+    {
+        public IntPtr Prefix;
+        public IntPtr Level;
+        public IntPtr Text;
+        public int LogLevel;
     }
 }
 

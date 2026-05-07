@@ -230,6 +230,101 @@ public class PlaybackTests
     }
 
     [Test]
+    public void HwdecTranscriptDefaultsEmpty()
+    {
+        using var pb = new Playback.Playback(a => a());
+        Assert.That(pb.HwdecTranscript, Is.Empty);
+    }
+
+    [Test]
+    public void HwdecTranscriptCapturesHwdecPrefixedLines()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd", "v", "Looking at hwdec auto-safe."), 0);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vaapi", "warn", "Profile not supported."), 0);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd", "info", "Selecting hardware decoder vaapi-copy."), 0);
+        Assert.That(pb.HwdecTranscript, Is.EqualTo(new[]
+        {
+            "[vd/v] Looking at hwdec auto-safe.",
+            "[vaapi/warn] Profile not supported.",
+            "[vd/info] Selecting hardware decoder vaapi-copy.",
+        }));
+    }
+
+    [Test]
+    public void HwdecTranscriptCapturesSubprefixedLines()
+    {
+        // Real mpv 0.40 emits hwdec-rejection lines under sub-prefixes like ffmpeg/h264_vaapi or vd/lavc — the strict-equality filter that an earlier draft used would have dropped them. Verify the prefix-root match catches the slash-suffixed forms.
+        using var pb = new Playback.Playback(a => a());
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("ffmpeg/h264_vaapi", "warn", "Failed to initialise VAAPI connection: -1"), 0);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd/lavc", "v", "Decoder reconfig"), 0);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vo/gpu", "info", "Using vaapi (copy) as hwdec interop"), 0);
+        Assert.That(pb.HwdecTranscript, Is.EqualTo(new[]
+        {
+            "[ffmpeg/h264_vaapi/warn] Failed to initialise VAAPI connection: -1",
+            "[vd/lavc/v] Decoder reconfig",
+            "[vo/gpu/info] Using vaapi (copy) as hwdec interop",
+        }));
+    }
+
+    [Test]
+    public void HwdecTranscriptDropsUnrelatedPrefixes()
+    {
+        using var pb = new Playback.Playback(a => a());
+        // cplayer is mpv's own command-line front-end; ao is audio-out; both fire chatty "v"-level messages we don't want polluting the hwdec trail. Note `vdec_lavc` is NOT a real mpv prefix but verifies the root-match doesn't accidentally match `vd` against an unrelated identifier sharing the prefix's letters.
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("cplayer", "v", "Playing: foo.mp4"), 0);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("ao", "v", "Audio out reconfig."), 0);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vdec_lavc", "v", "Spurious match guard."), 0);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd", "v", "Trying hardware decoding via vaapi."), 0);
+        Assert.That(pb.HwdecTranscript, Is.EqualTo(new[]
+        {
+            "[vd/v] Trying hardware decoding via vaapi.",
+        }));
+    }
+
+    [Test]
+    public void HwdecTranscriptEvictsOldestPastLimit()
+    {
+        // Bound is 256; push past it and verify the queue shrunk to bound and the oldest line was dropped.
+        using var pb = new Playback.Playback(a => a());
+        const int total = 300;
+        for (int i = 0; i < total; i++)
+        {
+            pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd", "v", $"line {i}"), 0);
+        }
+        Assert.That(pb.HwdecTranscript, Has.Count.EqualTo(256));
+        Assert.That(pb.HwdecTranscript[0], Is.EqualTo($"[vd/v] line {total - 256}"));
+        Assert.That(pb.HwdecTranscript[255], Is.EqualTo($"[vd/v] line {total - 1}"));
+    }
+
+    [Test]
+    public void HwdecTranscriptClearsOnEpochAdvance()
+    {
+        // The LoadFile boundary doesn't clear synchronously — instead, the dispatcher worker bumps an epoch counter and stamps it onto subsequent log messages, and main-thread receipt clears the transcript when an epoch-bumped message (or an explicit epoch-advance marker) arrives. Verify both paths: bump via a higher-epoch message, and bump via the explicit AdvanceLogEpoch marker (used by LoadFile so a load with no log emissions still clears).
+        using var pb = new Playback.Playback(a => a());
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd", "v", "previous-file tail"), 0);
+        Assert.That(pb.HwdecTranscript, Has.Count.EqualTo(1));
+
+        // Path 1: epoch advanced by an arriving message.
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd", "v", "new-file probe"), 1);
+        Assert.That(pb.HwdecTranscript, Is.EqualTo(new[] { "[vd/v] new-file probe" }));
+
+        // Path 2: explicit epoch advance clears even when no new message follows yet.
+        pb.AdvanceLogEpochForTest(2);
+        Assert.That(pb.HwdecTranscript, Is.Empty);
+    }
+
+    [Test]
+    public void HwdecTranscriptIgnoresStaleEpoch()
+    {
+        // Once main has advanced past an epoch, late-arriving lower-epoch messages still get appended (they're not racing the boundary; they belong to the file whose epoch they carry, which has already become "old"). The clear is on advance, not on rejection; we deliberately don't try to drop tail noise that already passed the prefix filter — the next epoch-bump clears it. Pin this behavior so a future rewrite can't tighten it without an explicit decision.
+        using var pb = new Playback.Playback(a => a());
+        pb.AdvanceLogEpochForTest(2);
+        pb.IngestLogMessageForTest(new Vomplayer.Mpv.LogMessage("vd", "v", "stale tail"), 1);
+        Assert.That(pb.HwdecTranscript, Is.EqualTo(new[] { "[vd/v] stale tail" }));
+    }
+
+    [Test]
     public void HwdecCurrentNotifiesOnlyOnTransition()
     {
         using var pb = new Playback.Playback(a => a());

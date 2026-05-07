@@ -16,6 +16,9 @@ public sealed class MpvException : Exception
 
 public readonly record struct PropertyChange(string Name, MpvPropertyValue Value, ulong Id);
 
+// Snapshot of one mpv MPV_EVENT_LOG_MESSAGE. Prefix is the subsystem ("vd", "vaapi", "ffmpeg/video", …); Level is mpv's level string ("v", "info", "warn", …); Text is the message body with mpv's trailing newline stripped. All three are managed copies — the underlying mpv pointers don't outlive the event dispatch.
+public readonly record struct LogMessage(string Prefix, string Level, string Text);
+
 public readonly record struct MpvPropertyValue(object? Raw)
 {
     public double? AsDouble
@@ -76,6 +79,7 @@ internal sealed class MpvClient : IDisposable
     public event Action? FileLoaded;
     public event Action<int>? FileEnded;
     public event Action<PropertyChange>? PropertyChanged;
+    public event Action<LogMessage>? LogMessageReceived;
     public event Action? Shutdown;
 
     public MpvClient()
@@ -103,6 +107,11 @@ internal sealed class MpvClient : IDisposable
     public void Initialize()
     {
         Check(LibMpv.Initialize(ctx));
+    }
+
+    public void RequestLogMessages(string minLevel)
+    {
+        Check(LibMpv.RequestLogMessages(ctx, minLevel));
     }
 
     public void Command(params string[] args)
@@ -227,6 +236,14 @@ internal sealed class MpvClient : IDisposable
                 var value = ReadPropertyValue(prop);
                 PropertyChanged?.Invoke(new PropertyChange(name, value, evt.ReplyUserData));
                 break;
+            case MpvEventId.LogMessage when evt.Data != IntPtr.Zero:
+                var lm = Marshal.PtrToStructure<LibMpv.EventLogMessage>(evt.Data);
+                var prefix = Marshal.PtrToStringUTF8(lm.Prefix) ?? "";
+                var level = Marshal.PtrToStringUTF8(lm.Level) ?? "";
+                // mpv-emitted text always ends in '\n'; trim it so consumers don't have to. TrimEnd is safe on an empty string and copes with double-newline corner cases.
+                var text = (Marshal.PtrToStringUTF8(lm.Text) ?? "").TrimEnd('\n', '\r');
+                LogMessageReceived?.Invoke(new LogMessage(prefix, level, text));
+                break;
         }
     }
 
@@ -277,6 +294,7 @@ internal sealed class MpvClient : IDisposable
         FileLoaded = null;
         FileEnded = null;
         PropertyChanged = null;
+        LogMessageReceived = null;
         Shutdown = null;
         LibMpv.TerminateDestroy(ctx);
         ctx = IntPtr.Zero;

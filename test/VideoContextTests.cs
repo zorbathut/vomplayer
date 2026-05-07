@@ -78,6 +78,7 @@ public partial class VideoContextTests
 
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
+        public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
         public string DiagTag { get; set; } = "?";
         public int EnableHdrOutputCalls { get; private set; }
         public int DisableHdrOutputCalls { get; private set; }

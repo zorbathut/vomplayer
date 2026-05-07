@@ -76,6 +76,7 @@ public sealed class DiagnosticOverlay : IDisposable
         {
             return;
         }
+        DumpHwdecTranscript();
         Refresh();
         box.SetVisible(true);
         if (timeoutId == 0)
@@ -84,6 +85,23 @@ public sealed class DiagnosticOverlay : IDisposable
                 (int)GLib.Constants.PRIORITY_DEFAULT,
                 UpdateIntervalMs,
                 OnTick);
+        }
+    }
+
+    // Prints the active context's hwdec transcript to stdout — the negotiation trail mpv reported during the current file's load (or live since that load if hwdec re-negotiated). Useful for diagnosing hwdec=no on a file when smplayer / vlc / etc. handle it: the lines explain which backends were tried and why they were rejected. Will move into the overlay UI once the format is compacted; for now stdout is the cheap path and the user opted into seeing it by toggling the overlay.
+    private void DumpHwdecTranscript()
+    {
+        var ctx = activeContextProvider();
+        var transcript = ctx.Playback.HwdecTranscript;
+        Console.WriteLine($"[vomplayer] hwdec transcript ({transcript.Count} lines):");
+        if (transcript.Count == 0)
+        {
+            Console.WriteLine("  (empty — no hwdec-related log lines captured for the current file)");
+            return;
+        }
+        foreach (var line in transcript)
+        {
+            Console.WriteLine($"  {line}");
         }
     }
 

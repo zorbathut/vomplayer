@@ -26,6 +26,7 @@ internal sealed class MpvDispatcher : IDisposable
     public event Action? FileLoaded;
     public event Action<int>? FileEnded;
     public event Action<PropertyChange>? PropertyChanged;
+    public event Action<LogMessage>? LogMessageReceived;
     public event Action? Shutdown;
 
     public MpvDispatcher()
@@ -34,6 +35,7 @@ internal sealed class MpvDispatcher : IDisposable
         client.FileLoaded += OnClientFileLoaded;
         client.FileEnded += OnClientFileEnded;
         client.PropertyChanged += OnClientPropertyChanged;
+        client.LogMessageReceived += OnClientLogMessage;
         client.Shutdown += OnClientShutdown;
         // Fires on libmpv's event thread — we only queue work, we don't touch the client from there.
         client.EventAvailable += OnClientEventAvailable;
@@ -109,6 +111,11 @@ internal sealed class MpvDispatcher : IDisposable
         PropertyChanged?.Invoke(change);
     }
 
+    private void OnClientLogMessage(LogMessage message)
+    {
+        LogMessageReceived?.Invoke(message);
+    }
+
     private void OnClientShutdown()
     {
         Shutdown?.Invoke();
@@ -140,10 +147,12 @@ internal sealed class MpvDispatcher : IDisposable
         client.FileLoaded -= OnClientFileLoaded;
         client.FileEnded -= OnClientFileEnded;
         client.PropertyChanged -= OnClientPropertyChanged;
+        client.LogMessageReceived -= OnClientLogMessage;
         client.Shutdown -= OnClientShutdown;
         FileLoaded = null;
         FileEnded = null;
         PropertyChanged = null;
+        LogMessageReceived = null;
         Shutdown = null;
         queue.CompleteAdding();
         // Bounded join: if the worker is stuck inside a blocking mpv_set_property_string waiting for a render-context ACK, and the render context has already been destroyed (normal Dispose ordering — render surface disposes before Playback), mpv unblocks quickly. But if Dispose is called while the render context is still alive AND a blocking set is in flight, we'd wait forever — main thread is us, and mpv's render ACK needs main. The timeout makes that failure mode loud instead of a silent process hang. Callers should dispose the render surface before the dispatcher to avoid this path.
@@ -182,6 +191,11 @@ internal readonly ref struct MpvHandle
     public void Initialize()
     {
         client.Initialize();
+    }
+
+    public void RequestLogMessages(string minLevel)
+    {
+        client.RequestLogMessages(minLevel);
     }
 
     public void Command(params string[] args)
