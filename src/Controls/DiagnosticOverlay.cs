@@ -57,7 +57,7 @@ public sealed class DiagnosticOverlay : IDisposable
         box.SetCanTarget(false);
         box.AddCssClass("vompl-diagnostic");
 
-        labels = new Gtk.Label[5];
+        labels = new Gtk.Label[7];
         for (int i = 0; i < labels.Length; i++)
         {
             var label = Gtk.Label.New("");
@@ -150,6 +150,8 @@ public sealed class DiagnosticOverlay : IDisposable
             vrrClass = surface.GetVrrClassification();
             measuredHzCenti = surface.VrrMeasuredHzCenti;
         }
+        VrrRange? outputVrrRange = ctx.VrrSink?.CurrentOutputVrrRange;
+        string? connectorName = surface?.CurrentOutputConnectorName;
         return new DiagnosticSnapshot(
             Hwdec: ctx.Playback.HwdecCurrent,
             IsSourceHdr: ctx.Playback.IsSourceHdr,
@@ -157,7 +159,14 @@ public sealed class DiagnosticOverlay : IDisposable
             HdrActive: ctx.ActiveHdrState == VideoContext.HdrActiveState.Hdr,
             VrrClass: vrrClass,
             VrrMeasuredHzCenti: measuredHzCenti,
-            IsWaylandPath: isWaylandPath);
+            IsWaylandPath: isWaylandPath,
+            SourceFps: ctx.Playback.VideoFps,
+            EstimatedVfFps: ctx.Playback.EstimatedVfFps,
+            IsSourceFpsTrusted: ctx.Playback.IsSourceFpsTrusted,
+            FpsTrustReason: ctx.Playback.FpsTrustReason,
+            OutputVrrRange: outputVrrRange,
+            ConnectorName: connectorName,
+            LastDecision: ctx.LastVrrDecision);
     }
 
     public void Dispose()

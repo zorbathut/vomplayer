@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -133,6 +134,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     [ObservableProperty]
     private double? videoFps;
 
+    // Mirror of mpv's `estimated-vf-fps`, the rolling-average decoded frame rate. Drives the FPS trust monitor; surfaced via EstimatedVfFps for the diagnostic overlay. Null pre-load and on audio-only files.
+    [ObservableProperty]
+    private double? estimatedVfFps;
+
     // Mirror of mpv's `media-title`. Null on no-file-loaded; reset preemptively in LoadFile so the previous file's title can't survive past a swap (it would otherwise linger until mpv's first observation lands on the new file).
     [ObservableProperty]
     private string? mediaTitle;
@@ -156,19 +161,56 @@ public sealed partial class Playback : ObservableObject, IPlayback
     // Diagnostic tag for VOMPL_LOG_SYNC=1 traces. Set by wiring code that knows which slot this Playback belongs to ("primary" / "secondary"); empty by default so untagged instances log as "?". Only consumed by SyncDiag.Log call sites in this file.
     public string DiagTag { get; set; } = "?";
 
+    // Trust monitor for the declared container-fps. Reset at LoadFile (declared=0 makes it inert) and again when container-fps lands with a real value. Estimated-vf-fps observations feed into it; transitions to Untrusted fire IsSourceFpsTrustedChanged (deduped against the last published bool).
+    private readonly FpsTrustMonitor fpsTrustMonitor = new();
+    private readonly Func<double> nowSecondsProvider;
+    // Mirror of fpsTrustMonitor.State for cheap reads from outside (no lock; main-thread-only). Defaults true so the initial state matches a freshly-loaded CFR file. Synced into the monitor by InvalidateTrustState whenever the underlying state could have changed.
+    private bool isSourceFpsTrusted = true;
+    // Tracks the previous IsSeeking value across observations so we can detect the true→false edge (seek-end) and feed the monitor's warmup reset.
+    private bool wasSeeking;
+
+    public bool IsSourceFpsTrusted
+    {
+        get
+        {
+            return isSourceFpsTrusted;
+        }
+    }
+
+    public string FpsTrustReason
+    {
+        get
+        {
+            return fpsTrustMonitor.LastReason;
+        }
+    }
+
     public event Action? FileLoaded;
     public event Action<int>? FileEnded;
     public event Action? TracksReloaded;
     // Fires on the main thread (via the same postToMainThread pump as other mpv property changes) whenever the source's HDR status flips. Reset to false on LoadFile and FileEnded so every file starts in a known SDR-safe state; the observer upgrades to true once mpv reports a `pq` or `hlg` gamma.
     public event Action<bool>? SourceHdrChanged;
+    // Fires on the main thread when the FPS trust state transitions. Sticky-Untrusted within a file load means at most one transition per file in the trusted→untrusted direction; the inverse (re-trust on a new LoadFile) also fires.
+    public event Action<bool>? IsSourceFpsTrustedChanged;
 
     public Playback(Action<Action> postToMainThread)
+        : this(postToMainThread, MakeDefaultClock())
+    {
+    }
+
+    // Test seam: tests pass a synthetic clock so trust-monitor warmup/sustained-disagreement timing is deterministic. Production default is a per-instance Stopwatch (Primary and Secondary PiP get independent origins, but each monitor reads only relative-to-its-own-origin durations so it doesn't matter).
+    internal Playback(Action<Action> postToMainThread, Func<double> nowSecondsProvider)
     {
         if (postToMainThread == null)
         {
             throw new ArgumentNullException(nameof(postToMainThread));
         }
+        if (nowSecondsProvider == null)
+        {
+            throw new ArgumentNullException(nameof(nowSecondsProvider));
+        }
         this.postToMainThread = postToMainThread;
+        this.nowSecondsProvider = nowSecondsProvider;
         dispatcher = new MpvDispatcher();
         // Events fire on the dispatcher thread (post-DrainEvents). Marshal onto the UI main thread before touching ObservableObject properties.
         dispatcher.PropertyChanged += c => postToMainThread(() => OnMpvPropertyChanged(c));
@@ -176,6 +218,12 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.FileEnded += e => postToMainThread(() => OnMpvFileEnded(e));
         dispatcher.LogMessageReceived += OnDispatcherLogMessage;
         dispatcher.Shutdown += () => postToMainThread(OnMpvShutdown);
+    }
+
+    private static Func<double> MakeDefaultClock()
+    {
+        var sw = Stopwatch.StartNew();
+        return () => sw.Elapsed.TotalSeconds;
     }
 
     // Runs on the dispatcher worker. Filters by prefix root *before* paying for the cross-thread post — at "v" level mpv emits dozens-to-hundreds of lines per second on a malformed source, and hwdec-only matches are typically <1% of that. Stamps the current epoch onto each accepted message so main-thread receipt can correlate it against the LoadFile boundary (see the dispatcherLogEpoch / mainLogEpoch comments for the race rationale).
@@ -201,6 +249,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.SetOption("terminal", "no");
             // auto-safe is mpv's curated set of hwdec backends that are known to work with GL interop on the current platform/driver combination — includes vaapi, nvdec, videotoolbox, d3d11va, plus their copy-back variants where the zero-copy path is unavailable. Unlike "auto" it excludes blacklisted driver/backend combos; unlike hand-picking a backend it degrades gracefully to software when nothing is available. Must be set before Initialize(); runtime changes also work but the startup path is simpler. Fallback is automatic — if the selected backend fails on a specific file mpv drops to software and updates hwdec-current accordingly.
             h.SetOption("hwdec", "auto-safe");
+
+            // Default video-sync=audio is preserved deliberately for VRR — display-resample and interpolation both pin presentation to display refresh and defeat VRR per mpv issues #6137 / #15748. The `vf=fps=...` filter is applied at runtime by VideoContext.ApplyVrrPolicy via Command("vf", "set", ...) once we know the source FPS and the current output's VRR window; nothing is set at init.
 
             // Pin volume-max to 100 so the [0, 100] slider range is the authoritative contract: any `add volume +5` past 100 clamps in mpv (rather than letting mpv's default 130 amplify past what the UI can display, which would produce silent gain-above-1 the user couldn't see). If a future per-source amplification feature wants headroom, raise volume-max and widen the slider together.
             h.SetOption("volume-max", "100");
@@ -248,6 +298,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.ObserveProperty("dheight", MpvFormat.Int64);
             // container-fps fires after the source's video stream is decoded enough to know its frame rate. Initial synthesized fire pre-load lands null and clears VideoFps.
             h.ObserveProperty("container-fps", MpvFormat.Double);
+            // estimated-vf-fps is mpv's rolling-average measurement from decoded frames. Updates a few times per second once decoding is underway; null pre-load and on audio-only files. Drives the FPS trust monitor's divergence check; surfaced via EstimatedVfFps for the diagnostic overlay.
+            h.ObserveProperty("estimated-vf-fps", MpvFormat.Double);
             // mpv's media-title falls back to the filename when no metadata title tag is present; the synthesized initial fire lands null pre-LoadFile.
             h.ObserveProperty("media-title", MpvFormat.String);
         });
@@ -271,8 +323,16 @@ public sealed partial class Playback : ObservableObject, IPlayback
         VideoAspect = null;
         // Same race rationale: the coordinator's StepFrame uses Primary.VideoFps to compute the absolute-seconds delta, and a stale value from the previous file would mis-step Secondary.
         VideoFps = null;
+        EstimatedVfFps = null;
         // Same race rationale as the dwidth/dheight clear: stop the previous file's title from surviving past a load while mpv works out the new file's media-title.
         MediaTitle = null;
+        // Reset the trust monitor with declared=0 so any in-flight Untrusted state from the previous file does not survive into this one. The container-fps observation will re-init with the real declared rate (and pick the well-known-CFR tolerance) once it lands. Specifically covers two scenarios that the per-property-change path doesn't: (a) audio-only files after a VFR file — container-fps never lands so OnFileLoaded(realFps,…) is never called, and without this preempt the monitor would stay Untrusted for the audio file's lifetime (cosmetic, since ApplyVrrPolicy bails on null sourceFps anyway, but the diagnostic overlay would lie); (b) two consecutive video files where the per-property-change container-fps observer happens to fire before a stale tail event has been drained.
+        fpsTrustMonitor.OnFileLoaded(0, nowSecondsProvider());
+        EmitTrustStateIfChanged();
+        // Reset wasSeeking so a LoadFile that arrives while the previous file was seeking doesn't leave us with a stale true→false edge waiting to fire spuriously against the new file.
+        wasSeeking = false;
+        // Clear the runtime fps filter preemptively so the previous file's multiplier doesn't briefly apply to the new file's first decoded frames before VideoContext.ApplyVrrPolicy re-decides.
+        ClearFrameMultiplier();
         dispatcher.Post(h =>
         {
             // Bump the per-file epoch BEFORE issuing loadfile so any log-message events that fire from this point forward are stamped with the new epoch. Tail messages from the previous file that mpv emitted before this point have already been observed by the dispatcher worker (FIFO between events and posted commands) and were stamped with the old epoch — so when both land on main, mainLogEpoch can tell them apart and clear the transcript at the boundary. Also post a clear-marker to main so we still flip the transcript even if the new file produces no log messages of its own (cached hwdec decision, audio-only file, etc.).
@@ -319,6 +379,59 @@ public sealed partial class Playback : ObservableObject, IPlayback
             h.SetProperty("target-trc", "auto");
             h.SetProperty("target-peak", "auto");
         });
+    }
+
+    // Label our runtime fps entry so we can identify and remove it later without disturbing any other vf authors. Using `vf add @label:filter` + `vf remove @label` is more robust than `vf set` / `vf clr`: (a) it doesn't clobber other entries (future filter UI, user mpv.conf, orientation-from-EXIF rotate), and (b) `vf clr` was empirically failing to remove the previously-set entry across LoadFile boundaries — exact mechanism unclear, but the labelled form sidesteps it by referring to our entry by name.
+    private const string FrameMultiplierVfLabel = "vompl-fps";
+    // Tracks whether we currently have a labelled entry in mpv's chain. Read+written on the main thread only (Set/Clear are called from there). Used to skip a redundant `vf remove` when no entry exists, which mpv would otherwise log as an error. The actual mpv chain state may briefly diverge from this flag in flight (a posted Set hasn't been processed yet) but every Set/Clear posts a self-consistent sequence so the chain converges to match the flag's value.
+    private bool frameMultiplierApplied;
+
+    // Apply (or replace) our labelled fps entry so mpv emits frames at outputFps. The dispatcher post is a remove-then-add pair when a previous entry exists; the remove is wrapped in try/catch because mpv returns a (non-fatal) error when the named filter isn't present. Format the rate with three decimals so 47.952 (NTSC ×2) round-trips cleanly through mpv's expression parser.
+    public void SetFrameMultiplier(double outputFps)
+    {
+        if (!double.IsFinite(outputFps) || outputFps <= 0)
+        {
+            return;
+        }
+        // Tell the trust monitor: estimated-vf-fps should converge to outputFps now, not the declared source rate. Without this update, applying our own ×N filter would be detected as sustained divergence (mpv reads N×source post-filter), the monitor would flip Untrusted, and ApplyVrrPolicy would unwind the filter — a loop. Restarts warmup so the rebuilt filter chain has time to stabilize.
+        fpsTrustMonitor.SetExpectedFps(outputFps, nowSecondsProvider());
+        var s = outputFps.ToString("0.000", CultureInfo.InvariantCulture);
+        bool wasApplied = frameMultiplierApplied;
+        frameMultiplierApplied = true;
+        dispatcher.Post(h =>
+        {
+            if (wasApplied)
+            {
+                TryRemoveLabelledFilter(h);
+            }
+            h.Command("vf", "add", "@" + FrameMultiplierVfLabel + ":fps=fps=" + s);
+        });
+    }
+
+    // Drop our labelled fps entry, leaving any other vf entries (none today, but defended for future) intact.
+    public void ClearFrameMultiplier()
+    {
+        // Filter chain reverts to passthrough; estimated-vf-fps should now converge to declared source rate. VideoFps may be null (LoadFile preempt before container-fps lands) — pass 0 in that case to keep the monitor inert until the next OnFileLoaded with a real declared rate.
+        fpsTrustMonitor.SetExpectedFps(VideoFps ?? 0.0, nowSecondsProvider());
+        if (!frameMultiplierApplied)
+        {
+            return;
+        }
+        frameMultiplierApplied = false;
+        dispatcher.Post(h => TryRemoveLabelledFilter(h));
+    }
+
+    private static void TryRemoveLabelledFilter(MpvHandle h)
+    {
+        try
+        {
+            h.Command("vf", "remove", "@" + FrameMultiplierVfLabel);
+        }
+        catch (MpvException ex)
+        {
+            // Removing a label that isn't currently in the chain returns an error from mpv. That can happen in narrow races (the user's mpv config cleared our label out from under us, or a previous remove succeeded but our state tracking missed it). Benign — the goal state is "label not present" and that's what we have.
+            Console.Error.WriteLine($"[vomplayer] vf remove @{FrameMultiplierVfLabel} returned {ex.Code}: {ex.Message}");
+        }
     }
 
     public void TogglePause()
@@ -485,7 +598,16 @@ public sealed partial class Playback : ObservableObject, IPlayback
                 IsPaused = change.Value.AsFlag ?? true;
                 break;
             case "seeking":
-                IsSeeking = change.Value.AsFlag ?? false;
+                bool nowSeeking = change.Value.AsFlag ?? false;
+                bool wasSeekingPrev = wasSeeking;
+                wasSeeking = nowSeeking;
+                IsSeeking = nowSeeking;
+                if (wasSeekingPrev && !nowSeeking)
+                {
+                    // Seek-end: restart the trust monitor's warmup so post-seek estimated-vf-fps spikes (mpv re-stabilizes its rolling average over the next second or two) don't accumulate as disagreement.
+                    fpsTrustMonitor.OnSeekEnded(nowSecondsProvider());
+                    // No state transition possible from OnSeekEnded — sticky-Untrusted stays sticky, accumulator just resets — so no IsSourceFpsTrustedChanged emission needed.
+                }
                 break;
             case "core-idle":
                 IsCoreIdle = change.Value.AsFlag ?? true;
@@ -532,7 +654,24 @@ public sealed partial class Playback : ObservableObject, IPlayback
             case "container-fps":
                 // Filter ≤ 0 to null: mpv reports 0 (or property-unavailable, which AsDouble surfaces as null) for audio-only files / pre-load / sources where the container omits a frame rate. Coordinator treats null as "fall back to fan-out" rather than dividing by zero.
                 double? fps = change.Value.AsDouble;
-                VideoFps = fps.HasValue && fps.Value > 0 ? fps : null;
+                double? validFps = fps.HasValue && fps.Value > 0 ? fps : null;
+                bool fpsValueChanged = !Nullable.Equals(VideoFps, validFps);
+                VideoFps = validFps;
+                if (fpsValueChanged && validFps.HasValue)
+                {
+                    // Re-init the trust monitor with the freshly-known declared rate. The LoadFile preemptive reset set declared=0; this is where we set the real tolerance band and warmup origin. Any prior-file Untrusted state gets reset to Trusted here, which is correct — a new file deserves fresh evaluation.
+                    fpsTrustMonitor.OnFileLoaded(validFps.Value, nowSecondsProvider());
+                    EmitTrustStateIfChanged();
+                }
+                break;
+            case "estimated-vf-fps":
+                double? est = change.Value.AsDouble;
+                EstimatedVfFps = est.HasValue && est.Value > 0 ? est : null;
+                if (EstimatedVfFps.HasValue)
+                {
+                    fpsTrustMonitor.OnEstimatedFps(EstimatedVfFps.Value, nowSecondsProvider());
+                    EmitTrustStateIfChanged();
+                }
                 break;
             case "media-title":
                 UpdateMediaTitle(change.Value.AsString);
@@ -850,6 +989,24 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
     }
 
+    // Resyncs the cached IsSourceFpsTrusted bool against the monitor's State and fires IsSourceFpsTrustedChanged on transitions. Same postToMainThread defer as SourceHdrChanged: VideoContext.ApplyVrrPolicy fires SetFrameMultiplier/ClearFrameMultiplier through the dispatcher, which can synchronously block the main thread; punting the event delivery breaks any same-tick-deadlock cycle. In tests postToMainThread is a => a() so the fire stays synchronous.
+    private void EmitTrustStateIfChanged()
+    {
+        bool now = fpsTrustMonitor.State == FpsTrust.Trusted;
+        if (now == isSourceFpsTrusted)
+        {
+            return;
+        }
+        isSourceFpsTrusted = now;
+        postToMainThread(() => IsSourceFpsTrustedChanged?.Invoke(now));
+    }
+
+    // Test seam: drive a property-change through the SAME path as production's mpv observer (the private `OnMpvPropertyChanged` switch). Tests use this to lock in the wiring between observed properties and downstream state — the trust monitor, the VRR-policy inputs, the HDR observer, etc — so a refactor of the switch surfaces in tests rather than running silently. Note the deliberate symmetry with how `OnMpvPropertyChanged` is fed in production (via `dispatcher.PropertyChanged` → `postToMainThread`); tests use a synchronous postToMainThread so the call lands inline.
+    internal void IngestPropertyChangeForTest(Mpv.PropertyChange change)
+    {
+        OnMpvPropertyChanged(change);
+    }
+
     // Internal so PlaybackTests can drive transition behavior directly without spinning up mpv's event pump (see test file comment). Keeps the higher-level dispatcher (OnMpvPropertyChanged) private — only the minimum transition surface is exposed.
     internal void UpdateSourceHdr(string? gamma)
     {
@@ -891,6 +1048,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         FileEnded = null;
         TracksReloaded = null;
         SourceHdrChanged = null;
+        IsSourceFpsTrustedChanged = null;
         dispatcher.Dispose();
     }
 }

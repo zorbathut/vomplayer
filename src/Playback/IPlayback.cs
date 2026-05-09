@@ -52,6 +52,15 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Source's container frame rate (fps). Null when no file is loaded, no video stream is present, or mpv hasn't decided yet (synthesized initial fire pre-load lands null). Used by the coordinator's sync-mode StepFrame: the absolute-seconds delta of "advance one frame on Primary" is 1/Primary.VideoFps, which we then apply to Secondary so the two streams stay locked to the same content offset across asymmetric frame rates. For VFR sources mpv reports the average; the resulting Secondary delta is approximate but stays bounded within a frame's worth of drift per step.
     double? VideoFps { get; }
 
+    // Mirror of mpv's `estimated-vf-fps` — rolling-average decoded frame rate. Drives the FPS trust monitor (Playback owns the monitor); surfaced here for the diagnostic overlay. Null pre-load and on audio-only files.
+    double? EstimatedVfFps { get; }
+
+    // True iff the FPS trust monitor still believes the declared container-fps. False only after sustained estimated-vs-declared divergence within a file. Reset to true on every LoadFile. Drives VideoContext.ApplyVrrPolicy to clear the multiplier on VFR / mistagged-CFR sources.
+    bool IsSourceFpsTrusted { get; }
+
+    // Diagnostic-only string explaining the most recent trust transition (e.g. "divergence sustained 4.2s (declared=25.000, est=15.100)"). Empty until the monitor first flips; carries through subsequent in-state observations until the next transition.
+    string FpsTrustReason { get; }
+
     // Mirror of mpv's `media-title` property: the source's metadata title (container/stream tag) when present, falling back to the filename without path/extension. Null when no file is loaded. For yt-dlp-downloaded URLs the cached file is named `%(title)s.%(ext)s`, so the fallback still surfaces the upstream video title rather than a hash. Drives the main-window title display.
     string? MediaTitle { get; }
 
@@ -64,6 +73,8 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     event Action? TracksReloaded;
     // Fires on transitions of IsSourceHdr (PQ/HLG ↔ neither). VideoContext subscribes to drive its ApplyHdrPolicy.
     event Action<bool>? SourceHdrChanged;
+    // Fires on transitions of IsSourceFpsTrusted. VideoContext subscribes to drive ApplyVrrPolicy. Sticky-Untrusted-within-a-load means at most one transition (true→false) per file load; the inverse re-trust on a fresh LoadFile / new container-fps land also fires.
+    event Action<bool>? IsSourceFpsTrustedChanged;
 
     void Initialize();
     void LoadFile(string path);
@@ -95,4 +106,8 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     void EnableHdrOutput();
     // Drop the PQ targets so mpv falls back to its auto target-* defaults (SDR tone-mapping handled by mpv's gl_video pipeline). See Playback.cs for why we don't pin gamma2.2 explicitly.
     void DisableHdrOutput();
+
+    // Apply the VRR frame-multiplication filter so mpv emits frames at outputFps. Replaces any prior fps filter; expects to be paired with ClearFrameMultiplier on file unload / out-of-VRR-window transitions. Implemented via mpv's `vf set` command — SetProperty("vf", ...) reinitializes the entire video chain (visible flash, possible hwdec re-negotiation), the command path mutates the chain in place.
+    void SetFrameMultiplier(double outputFps);
+    void ClearFrameMultiplier();
 }

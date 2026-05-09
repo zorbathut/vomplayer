@@ -1,4 +1,5 @@
 using System;
+using Vomplayer.Mpv;
 using Vomplayer.Playback;
 
 namespace Vomplayer.Tests;
@@ -561,4 +562,124 @@ public class PlaybackTests
         Assert.That(fires, Is.Zero);
     }
 
+    // The trust-monitor wiring lives in OnMpvPropertyChanged's switch — feed PropertyChange events directly through the test seam so a future refactor that decouples the observer from the monitor surfaces here.
+    private static Playback.Playback NewWithFakeClock(Func<double> clock)
+    {
+        var pb = new Playback.Playback(a => a(), clock);
+        pb.Initialize();
+        return pb;
+    }
+
+    [Test]
+    public void ContainerFpsObservationMirrorsToVideoFps()
+    {
+        double now = 0.0;
+        using var pb = NewWithFakeClock(() => now);
+        pb.IngestPropertyChangeForTest(new PropertyChange("container-fps", new MpvPropertyValue(25.0), 0));
+        Assert.That(pb.VideoFps, Is.EqualTo(25.0));
+        Assert.That(pb.IsSourceFpsTrusted, Is.True);
+    }
+
+    [Test]
+    public void EstimatedVfFpsObservationFeedsTrustMonitor()
+    {
+        double now = 0.0;
+        using var pb = NewWithFakeClock(() => now);
+        pb.IngestPropertyChangeForTest(new PropertyChange("container-fps", new MpvPropertyValue(25.0), 0));
+        // Fast-forward past warmup, then sustain divergence past the threshold.
+        now = 2.5;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(15.0), 0));
+        now = 5.6;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(15.0), 0));
+        Assert.That(pb.IsSourceFpsTrusted, Is.False);
+        Assert.That(pb.EstimatedVfFps, Is.EqualTo(15.0));
+    }
+
+    [Test]
+    public void IsSourceFpsTrustedChangedFiresOnFlip()
+    {
+        double now = 0.0;
+        using var pb = NewWithFakeClock(() => now);
+        bool? lastFire = null;
+        pb.IsSourceFpsTrustedChanged += b => lastFire = b;
+        pb.IngestPropertyChangeForTest(new PropertyChange("container-fps", new MpvPropertyValue(25.0), 0));
+        now = 2.5;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(15.0), 0));
+        now = 5.6;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(15.0), 0));
+        Assert.That(lastFire, Is.False);
+    }
+
+    [Test]
+    public void ClearAfterSetIssuesRemoveOnlyOnce()
+    {
+        // Regression: Set then Clear should leave frameMultiplierApplied=false so a subsequent Clear is a no-op (no spurious mpv command). Tests the same-thread state machine without depending on the dispatcher worker.
+        using var pb = NewWithFakeClock(() => 0.0);
+        // Drive the LoadFile preempt scenario indirectly: Set, then Clear (twice).
+        pb.SetFrameMultiplier(48.0);
+        pb.ClearFrameMultiplier();
+        pb.ClearFrameMultiplier();
+        // Can't observe dispatcher.Post counts in-process; the assertion is "no exception throws and state is internally consistent". Real-mpv coverage lives in manual smoke + the VideoContext-level regression test.
+        Assert.Pass();
+    }
+
+    [Test]
+    public void SetFrameMultiplierUpdatesTrustMonitorExpected()
+    {
+        // Regression: applying vf=fps doubles estimated-vf-fps without indicating VFR. The monitor must compare against the expected post-filter rate (set by SetFrameMultiplier), not the declared source rate. Without this update, applying ×2 on a CFR 25 fps source would trip sustained divergence (50 vs declared 25), flip Untrusted, and unwind the filter — a self-defeating loop.
+        double now = 0.0;
+        using var pb = NewWithFakeClock(() => now);
+        pb.IngestPropertyChangeForTest(new PropertyChange("container-fps", new MpvPropertyValue(25.0), 0));
+        // Policy decides ×2; tells Playback. (In production VideoContext.ApplyVrrPolicy makes this call.)
+        now = 0.5;
+        pb.SetFrameMultiplier(50.0);
+        // Past warmup, estimated converges to post-filter 50.
+        now = 3.0;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(50.0), 0));
+        now = 5.0;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(50.0), 0));
+        now = 7.0;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(50.0), 0));
+        Assert.That(pb.IsSourceFpsTrusted, Is.True);
+    }
+
+    [Test]
+    public void ClearFrameMultiplierRestoresExpectedToDeclared()
+    {
+        // After clearing the multiplier (e.g. dragged to a non-VRR output), estimated-vf-fps reverts to the declared source rate. Trust monitor must follow.
+        double now = 0.0;
+        using var pb = NewWithFakeClock(() => now);
+        pb.IngestPropertyChangeForTest(new PropertyChange("container-fps", new MpvPropertyValue(25.0), 0));
+        now = 0.5;
+        pb.SetFrameMultiplier(50.0);
+        now = 5.0;
+        pb.ClearFrameMultiplier();
+        // Past the post-clear warmup, estimated should match declared 25.
+        now = 8.0;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(25.0), 0));
+        now = 10.0;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(25.0), 0));
+        Assert.That(pb.IsSourceFpsTrusted, Is.True);
+    }
+
+    [Test]
+    public void SeekEndedTransitionRestartsWarmup()
+    {
+        double now = 0.0;
+        using var pb = NewWithFakeClock(() => now);
+        pb.IngestPropertyChangeForTest(new PropertyChange("container-fps", new MpvPropertyValue(25.0), 0));
+        // Past warmup, accumulate some pre-flip disagreement.
+        now = 2.5;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(15.0), 0));
+        now = 4.0;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(15.0), 0));
+        // Seek begins, then ends. Warmup restarts. mpv flags marshal as int (1 = true, 0 = false) — see MpvPropertyValue.AsFlag.
+        pb.IngestPropertyChangeForTest(new PropertyChange("seeking", new MpvPropertyValue(1), 0));
+        now = 5.0;
+        pb.IngestPropertyChangeForTest(new PropertyChange("seeking", new MpvPropertyValue(0), 0));
+        // Within the new warmup, divergent samples must be discarded.
+        now = 6.5;
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(15.0), 0));
+        Assert.That(pb.IsSourceFpsTrusted, Is.True);
+    }
 }

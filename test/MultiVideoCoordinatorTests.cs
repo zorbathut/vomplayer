@@ -69,17 +69,24 @@ public partial class MultiVideoCoordinatorTests
         private double? videoFps;
 
         [ObservableProperty]
+        private double? estimatedVfFps;
+
+        [ObservableProperty]
         private string? mediaTitle;
 
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
         public event Action? TracksReloaded;
         public event Action<bool>? SourceHdrChanged;
+        public event Action<bool>? IsSourceFpsTrustedChanged;
 
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
         public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
         public string DiagTag { get; set; } = "?";
+
+        public bool IsSourceFpsTrusted { get; set; } = true;
+        public string FpsTrustReason { get; set; } = "";
 
         public List<string> LoadedFiles { get; } = new();
         public int TogglePauseCalls { get; private set; }
@@ -93,6 +100,8 @@ public partial class MultiVideoCoordinatorTests
         public int ToggleMuteCalls { get; private set; }
         public int EnableHdrOutputCalls { get; private set; }
         public int DisableHdrOutputCalls { get; private set; }
+        public List<double> SetFrameMultiplierCalls { get; } = new();
+        public int ClearFrameMultiplierCalls { get; private set; }
 
         public void Initialize() { }
         public void LoadFile(string path) { LoadedFiles.Add(path); }
@@ -113,11 +122,14 @@ public partial class MultiVideoCoordinatorTests
         public void ToggleMute() { ToggleMuteCalls++; IsMuted = !IsMuted; }
         public void EnableHdrOutput() { EnableHdrOutputCalls++; }
         public void DisableHdrOutput() { DisableHdrOutputCalls++; }
+        public void SetFrameMultiplier(double outputFps) { SetFrameMultiplierCalls.Add(outputFps); }
+        public void ClearFrameMultiplier() { ClearFrameMultiplierCalls++; }
 
         public void RaiseFileLoaded() { FileLoaded?.Invoke(); }
         public void RaiseFileEnded(int reason) { FileEnded?.Invoke(reason); }
         public void RaiseTracksReloaded() { TracksReloaded?.Invoke(); }
         public void RaiseSourceHdrChanged(bool isHdr) { IsSourceHdr = isHdr; SourceHdrChanged?.Invoke(isHdr); }
+        public void RaiseIsSourceFpsTrustedChanged(bool trusted) { IsSourceFpsTrusted = trusted; IsSourceFpsTrustedChanged?.Invoke(trusted); }
 
         public void Dispose() { }
     }

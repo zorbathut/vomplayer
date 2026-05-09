@@ -410,6 +410,7 @@ public partial class MainWindow
         if (secondarySurface != null && viewModel.Secondary != null)
         {
             viewModel.Secondary.AttachHdrSink(secondarySurface);
+            viewModel.Secondary.AttachVrrSink(secondarySurface);
         }
     }
 

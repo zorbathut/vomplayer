@@ -32,6 +32,8 @@ typedef void (*vompl_output_mode_fn)(uint32_t registry_name, int32_t refresh_mhz
 typedef void (*vompl_output_removed_fn)(uint32_t registry_name);
 // Forwards the raw tf_named observation for an output's preferred image description. has_tf_named is 0 if no tf_named event arrived before the info `done` (compositor described the TF some other way, or the description failed). Classification into HDR/SDR lives in C# (HdrClassifier).
 typedef void (*vompl_output_image_info_fn)(uint32_t registry_name, int has_tf_named, uint32_t tf_named);
+// Forwards the wl_output v4 .name event (the DRM connector name like "HDMI-A-1"). Empty / NULL on compositors that bind v < 4 or that never emit the event. Consumed by C# WaylandOutputRegistry, which uses the name to look up EDID + the resolved VRR window.
+typedef void (*vompl_output_name_fn)(uint32_t registry_name, const char *name);
 
 typedef void (*vompl_surface_enter_fn)(void *data, uint32_t registry_name);
 typedef void (*vompl_surface_leave_fn)(void *data, uint32_t registry_name);
@@ -41,6 +43,7 @@ typedef void (*vompl_feedback_discarded_fn)(void *data);
 static vompl_output_mode_fn g_output_mode_cb;
 static vompl_output_removed_fn g_output_removed_cb;
 static vompl_output_image_info_fn g_output_image_info_cb;
+static vompl_output_name_fn g_output_name_cb;
 
 //---------------------------------------------------------------
 // Process-global Wayland globals, resolved lazily on first use.
@@ -54,6 +57,8 @@ struct output_info
     struct wl_output *output;
     uint32_t registry_name;
     int32_t cached_mode_mhz;
+    // Connector name from wl_output v4 .name (e.g. "HDMI-A-1"). NULL until either the .name event lands or the compositor doesn't advertise v ≥ 4. Owned heap copy; freed in globals_reg_global_remove.
+    char *cached_name;
     int cached_image_info_valid;
     int cached_has_tf_named;
     uint32_t cached_tf_named;
@@ -89,12 +94,13 @@ static uint32_t lookup_output_registry_name(struct wl_output *o)
     return 0;
 }
 
-// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes + image info so consumer state catches up). The replay decouples ordering between vompl_set_output_callbacks and whatever triggers ensure_globals.
-void vompl_set_output_callbacks(vompl_output_mode_fn mode, vompl_output_removed_fn removed, vompl_output_image_info_fn image_info)
+// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes + image info + names so consumer state catches up). The replay decouples ordering between vompl_set_output_callbacks and whatever triggers ensure_globals.
+void vompl_set_output_callbacks(vompl_output_mode_fn mode, vompl_output_removed_fn removed, vompl_output_image_info_fn image_info, vompl_output_name_fn name)
 {
     g_output_mode_cb = mode;
     g_output_removed_cb = removed;
     g_output_image_info_cb = image_info;
+    g_output_name_cb = name;
     for (struct output_info *it = g_outputs; it; it = it->next)
     {
         if (it->cached_mode_mhz != 0 && g_output_mode_cb)
@@ -104,6 +110,10 @@ void vompl_set_output_callbacks(vompl_output_mode_fn mode, vompl_output_removed_
         if (it->cached_image_info_valid && g_output_image_info_cb)
         {
             g_output_image_info_cb(it->registry_name, it->cached_has_tf_named, it->cached_tf_named);
+        }
+        if (it->cached_name && g_output_name_cb)
+        {
+            g_output_name_cb(it->registry_name, it->cached_name);
         }
     }
 }
@@ -135,7 +145,18 @@ static void output_handle_mode(void *data, struct wl_output *o,
 
 static void output_handle_done(void *data, struct wl_output *o) { (void)data; (void)o; }
 static void output_handle_scale(void *data, struct wl_output *o, int32_t scale) { (void)data; (void)o; (void)scale; }
-static void output_handle_name(void *data, struct wl_output *o, const char *name) { (void)data; (void)o; (void)name; }
+// wl_output v4 connector name. Cached as an owned heap string so the consumer can re-read after the listener returns; replay path in vompl_set_output_callbacks delivers it on late callback registration. Per spec, .name is sent at most once before the first .done; we still tolerate repeats by freeing+reallocating.
+static void output_handle_name(void *data, struct wl_output *o, const char *name)
+{
+    (void)o;
+    struct output_info *info = data;
+    free(info->cached_name);
+    info->cached_name = name ? strdup(name) : NULL;
+    if (g_output_name_cb)
+    {
+        g_output_name_cb(info->registry_name, info->cached_name ? info->cached_name : "");
+    }
+}
 static void output_handle_description(void *data, struct wl_output *o, const char *d) { (void)data; (void)o; (void)d; }
 
 static const struct wl_output_listener output_listener_impl = {
@@ -401,6 +422,7 @@ static void globals_reg_global_remove(void *data, struct wl_registry *reg, uint3
                 dead->cm_output = NULL;
             }
             wl_output_destroy(dead->output);
+            free(dead->cached_name);
             free(dead);
             return;
         }

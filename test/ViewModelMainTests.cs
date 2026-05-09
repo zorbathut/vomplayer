@@ -68,12 +68,16 @@ public partial class ViewModelMainTests
         private double? videoFps;
 
         [ObservableProperty]
+        private double? estimatedVfFps;
+
+        [ObservableProperty]
         private string? mediaTitle;
 
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
         public event Action? TracksReloaded;
         public event Action<bool>? SourceHdrChanged;
+        public event Action<bool>? IsSourceFpsTrustedChanged;
 
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
@@ -81,6 +85,10 @@ public partial class ViewModelMainTests
         public string DiagTag { get; set; } = "?";
         public int EnableHdrOutputCalls { get; private set; }
         public int DisableHdrOutputCalls { get; private set; }
+        public bool IsSourceFpsTrusted { get; set; } = true;
+        public string FpsTrustReason { get; set; } = "";
+        public List<double> SetFrameMultiplierCalls { get; } = new();
+        public int ClearFrameMultiplierCalls { get; private set; }
 
         public int InitializeCalls { get; private set; }
         public int TogglePauseCalls { get; private set; }
@@ -207,10 +215,19 @@ public partial class ViewModelMainTests
             DisableHdrOutputCalls++;
         }
 
+        public void SetFrameMultiplier(double outputFps) { SetFrameMultiplierCalls.Add(outputFps); }
+        public void ClearFrameMultiplier() { ClearFrameMultiplierCalls++; }
+
         public void RaiseSourceHdrChanged(bool isHdr)
         {
             IsSourceHdr = isHdr;
             SourceHdrChanged?.Invoke(isHdr);
+        }
+
+        public void RaiseIsSourceFpsTrustedChanged(bool trusted)
+        {
+            IsSourceFpsTrusted = trusted;
+            IsSourceFpsTrustedChanged?.Invoke(trusted);
         }
 
         public void RaiseFileLoaded()

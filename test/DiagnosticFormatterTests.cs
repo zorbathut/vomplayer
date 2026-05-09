@@ -15,7 +15,14 @@ public class DiagnosticFormatterTests
             HdrActive: false,
             VrrClass: VrrClassification.Fixed,
             VrrMeasuredHzCenti: 6000,
-            IsWaylandPath: true);
+            IsWaylandPath: true,
+            SourceFps: 25.0,
+            EstimatedVfFps: 25.001,
+            IsSourceFpsTrusted: true,
+            FpsTrustReason: "",
+            OutputVrrRange: new VrrRange(48, 60),
+            ConnectorName: "HDMI-A-1",
+            LastDecision: new VrrDecision(2, 50.0, "ok"));
     }
 
     [Test]
@@ -189,7 +196,14 @@ public class DiagnosticFormatterTests
             HdrActive: true,
             VrrClass: VrrClassification.Fixed,
             VrrMeasuredHzCenti: 6000,
-            IsWaylandPath: true);
+            IsWaylandPath: true,
+            SourceFps: 25.0,
+            EstimatedVfFps: 25.001,
+            IsSourceFpsTrusted: true,
+            FpsTrustReason: "",
+            OutputVrrRange: new VrrRange(48, 60),
+            ConnectorName: "HDMI-A-1",
+            LastDecision: new VrrDecision(2, 50.0, "ok"));
         Assert.That(DiagnosticFormatter.FormatLines(s), Is.EqualTo(new[]
         {
             "hwdec:   vaapi",
@@ -197,6 +211,91 @@ public class DiagnosticFormatterTests
             "display: HDR",
             "active:  HDR (intended)",
             "VRR:     FIXED @ 60.00 Hz",
+            "fps:     25.000 src / 25.001 est (trusted)",
+            "vrr:     ×2 → 50.000 [48-60 HDMI-A-1] (active)",
         }));
+    }
+
+    [Test]
+    public void FpsLineRendersTrustedTwentyFiveFps()
+    {
+        var s = Baseline();
+        Assert.That(DiagnosticFormatter.FormatLines(s)[5], Is.EqualTo("fps:     25.000 src / 25.001 est (trusted)"));
+    }
+
+    [Test]
+    public void FpsLineRendersUntrustedWithReason()
+    {
+        var s = Baseline() with
+        {
+            SourceFps = 27.3,
+            EstimatedVfFps = 23.1,
+            IsSourceFpsTrusted = false,
+            FpsTrustReason = "divergence sustained 4.2s (declared=27.300, est=23.100)",
+        };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[5], Does.StartWith("fps:     27.300 src / 23.100 est (untrusted: "));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[5], Does.Contain("divergence sustained 4.2s"));
+    }
+
+    [Test]
+    public void FpsLineRendersNoSourceWhenBothNull()
+    {
+        var s = Baseline() with { SourceFps = null, EstimatedVfFps = null };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[5], Is.EqualTo("fps:     (no source)"));
+    }
+
+    [Test]
+    public void FpsLineRendersQuestionMarkForMissingValues()
+    {
+        var s = Baseline() with { EstimatedVfFps = null };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[5], Is.EqualTo("fps:     25.000 src / ? est (trusted)"));
+    }
+
+    [Test]
+    public void VrrPolicyLineRendersActiveDouble()
+    {
+        var s = Baseline();
+        Assert.That(DiagnosticFormatter.FormatLines(s)[6], Is.EqualTo("vrr:     ×2 → 50.000 [48-60 HDMI-A-1] (active)"));
+    }
+
+    [Test]
+    public void VrrPolicyLineRendersWindowUnknown()
+    {
+        var s = Baseline() with
+        {
+            OutputVrrRange = null,
+            LastDecision = new VrrDecision(1, 25.0, "VRR window unknown"),
+        };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[6], Is.EqualTo("vrr:     ×1 → 25.000 [HDMI-A-1, window unknown] (no filter — VRR window unknown)"));
+    }
+
+    [Test]
+    public void VrrPolicyLineRendersUntrustedNoFilter()
+    {
+        var s = Baseline() with
+        {
+            IsSourceFpsTrusted = false,
+            LastDecision = new VrrDecision(1, 27.3, "source FPS untrusted (likely VFR)"),
+        };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[6], Does.Contain("(no filter — source FPS untrusted"));
+    }
+
+    [Test]
+    public void VrrPolicyLineOnGlareaRendersNA()
+    {
+        var s = Baseline() with { IsWaylandPath = false };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[6], Is.EqualTo("vrr:     N/A (GLArea)"));
+    }
+
+    [Test]
+    public void VrrPolicyLineRendersUnknownConnector()
+    {
+        var s = Baseline() with
+        {
+            ConnectorName = null,
+            OutputVrrRange = null,
+            LastDecision = new VrrDecision(1, 25.0, "VRR window unknown"),
+        };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[6], Is.EqualTo("vrr:     ×1 → 25.000 [?, window unknown] (no filter — VRR window unknown)"));
     }
 }

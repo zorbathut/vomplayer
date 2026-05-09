@@ -255,6 +255,7 @@ internal static partial class VomplOutputCallbacks
     private static readonly OutputModeCallback modeDelegate = OnMode;
     private static readonly OutputRemovedCallback removedDelegate = OnRemoved;
     private static readonly OutputImageInfoCallback imageInfoDelegate = OnImageInfo;
+    private static readonly OutputNameCallback nameDelegate = OnName;
     private static readonly bool logHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
     private static bool registered;
 
@@ -264,7 +265,7 @@ internal static partial class VomplOutputCallbacks
         {
             return;
         }
-        SetOutputCallbacks(modeDelegate, removedDelegate, imageInfoDelegate);
+        SetOutputCallbacks(modeDelegate, removedDelegate, imageInfoDelegate, nameDelegate);
         registered = true;
     }
 
@@ -310,6 +311,20 @@ internal static partial class VomplOutputCallbacks
         }
     }
 
+    // wl_output v4 .name forwards a UTF-8 connector string (e.g. "HDMI-A-1"). Marshalled in as IntPtr to keep Mono/CoreCLR's marshaler from copying eagerly when the value is empty/null on pre-v4 compositors; PtrToStringUTF8 handles both null and the empty case.
+    private static void OnName(uint registryName, IntPtr namePtr)
+    {
+        try
+        {
+            string name = namePtr == IntPtr.Zero ? string.Empty : (Marshal.PtrToStringUTF8(namePtr) ?? string.Empty);
+            WaylandOutputRegistry.OnOutputName(registryName, name);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[vomplayer] WaylandOutputRegistry.OnOutputName threw: {ex}");
+        }
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void OutputModeCallback(uint registryName, int refreshMhz);
 
@@ -319,6 +334,9 @@ internal static partial class VomplOutputCallbacks
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void OutputImageInfoCallback(uint registryName, int hasTfNamed, uint tfNamed);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void OutputNameCallback(uint registryName, IntPtr namePtr);
+
     [LibraryImport(Lib, EntryPoint = "vompl_set_output_callbacks")]
-    private static partial void SetOutputCallbacks(OutputModeCallback mode, OutputRemovedCallback removed, OutputImageInfoCallback imageInfo);
+    private static partial void SetOutputCallbacks(OutputModeCallback mode, OutputRemovedCallback removed, OutputImageInfoCallback imageInfo, OutputNameCallback name);
 }

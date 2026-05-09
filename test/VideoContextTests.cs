@@ -71,10 +71,14 @@ public partial class VideoContextTests
         [ObservableProperty]
         private string? mediaTitle;
 
+        [ObservableProperty]
+        private double? estimatedVfFps;
+
         public event Action? FileLoaded;
         public event Action<int>? FileEnded;
         public event Action? TracksReloaded;
         public event Action<bool>? SourceHdrChanged;
+        public event Action<bool>? IsSourceFpsTrustedChanged;
 
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
@@ -82,6 +86,11 @@ public partial class VideoContextTests
         public string DiagTag { get; set; } = "?";
         public int EnableHdrOutputCalls { get; private set; }
         public int DisableHdrOutputCalls { get; private set; }
+
+        public bool IsSourceFpsTrusted { get; set; } = true;
+        public string FpsTrustReason { get; set; } = "";
+        public List<double> SetFrameMultiplierCalls { get; } = new();
+        public int ClearFrameMultiplierCalls { get; private set; }
 
         public List<string> LoadedFiles { get; } = new();
 
@@ -104,11 +113,14 @@ public partial class VideoContextTests
         public void ToggleMute() { IsMuted = !IsMuted; }
         public void EnableHdrOutput() { EnableHdrOutputCalls++; }
         public void DisableHdrOutput() { DisableHdrOutputCalls++; }
+        public void SetFrameMultiplier(double outputFps) { SetFrameMultiplierCalls.Add(outputFps); }
+        public void ClearFrameMultiplier() { ClearFrameMultiplierCalls++; }
 
         public void RaiseFileLoaded() { FileLoaded?.Invoke(); }
         public void RaiseFileEnded(int reason) { FileEnded?.Invoke(reason); }
         public void RaiseTracksReloaded() { TracksReloaded?.Invoke(); }
         public void RaiseSourceHdrChanged(bool isHdr) { IsSourceHdr = isHdr; SourceHdrChanged?.Invoke(isHdr); }
+        public void RaiseIsSourceFpsTrustedChanged(bool trusted) { IsSourceFpsTrusted = trusted; IsSourceFpsTrustedChanged?.Invoke(trusted); }
 
         public void Dispose() { }
     }
@@ -150,6 +162,14 @@ public partial class VideoContextTests
             return new UrlProgressHandle(new NoopDisposable(), new Progress<UrlDownloadProgress>(_ => { }));
         }
         private sealed class NoopDisposable : IDisposable { public void Dispose() { } }
+    }
+
+    private sealed class FakeVrrSink : IVrrSink
+    {
+        public VrrRange? Range { get; set; }
+        public VrrRange? CurrentOutputVrrRange { get { return Range; } }
+        public event Action? CurrentOutputVrrRangeChanged;
+        public void RaiseChanged() { CurrentOutputVrrRangeChanged?.Invoke(); }
     }
 
     // Minimal IHdrSink for HDR-policy tests. Records every SetHdr call (in order) so tests can assert pre-stage / enable / disable sequences. CurrentOutputHdrChanged firing simulates compositor-side output transitions; tests use it to drive ApplyHdrPolicy on output-side change.
@@ -429,5 +449,115 @@ public partial class VideoContextTests
         // Auto-advance fires by default; observe the post-advance state.
         Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(1));
         Assert.That(ctx.IsAtPlayableEof, Is.False, "post-advance LoadCurrentItem reset currentFileLoaded → IsAtPlayableEof drops to false");
+    }
+
+    [Test]
+    public void AttachVrrSinkAppliesPolicyImmediately()
+    {
+        using var ctx = NewContext(out var pb);
+        pb.VideoFps = 25.0;
+        var sink = new FakeVrrSink { Range = new VrrRange(48, 60) };
+        ctx.AttachVrrSink(sink);
+        // 25 fps × 2 = 50 Hz, in window.
+        Assert.That(pb.SetFrameMultiplierCalls, Is.EqualTo(new[] { 50.0 }));
+        Assert.That(ctx.LastVrrDecision.Multiplier, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void VideoFpsChangeReappliesPolicy()
+    {
+        using var ctx = NewContext(out var pb);
+        var sink = new FakeVrrSink { Range = new VrrRange(48, 60) };
+        ctx.AttachVrrSink(sink);
+        pb.SetFrameMultiplierCalls.Clear();
+        pb.ClearFrameMultiplierCalls.Equals(0);
+        // VideoFps lands → policy should re-run, applying the multiplier.
+        pb.VideoFps = 25.0;
+        Assert.That(pb.SetFrameMultiplierCalls, Is.EqualTo(new[] { 50.0 }));
+    }
+
+    [Test]
+    public void OutputVrrRangeChangeReappliesPolicy()
+    {
+        using var ctx = NewContext(out var pb);
+        pb.VideoFps = 25.0;
+        var sink = new FakeVrrSink { Range = new VrrRange(48, 60) };
+        ctx.AttachVrrSink(sink);
+        pb.SetFrameMultiplierCalls.Clear();
+        // Move to a 100-144 panel: N=4 → 100Hz becomes the smallest fitting multiplier. The previous-window policy chose N=2 (50Hz). Asserting 100.0 here proves ApplyVrrPolicy actually re-ran with the new range and re-chose the multiplier.
+        sink.Range = new VrrRange(100, 144);
+        sink.RaiseChanged();
+        Assert.That(pb.SetFrameMultiplierCalls, Is.EqualTo(new[] { 100.0 }));
+    }
+
+    [Test]
+    public void OutOfWindowSourceClearsMultiplier()
+    {
+        using var ctx = NewContext(out var pb);
+        pb.VideoFps = 50.0; // already in 48-60 window
+        var sink = new FakeVrrSink { Range = new VrrRange(48, 60) };
+        ctx.AttachVrrSink(sink);
+        Assert.That(pb.SetFrameMultiplierCalls, Is.Empty);
+        Assert.That(pb.ClearFrameMultiplierCalls, Is.GreaterThan(0));
+    }
+
+    [Test]
+    public void TrustFlipToUntrustedClearsMultiplier()
+    {
+        using var ctx = NewContext(out var pb);
+        pb.VideoFps = 25.0;
+        var sink = new FakeVrrSink { Range = new VrrRange(48, 60) };
+        ctx.AttachVrrSink(sink);
+        Assert.That(pb.SetFrameMultiplierCalls, Is.EqualTo(new[] { 50.0 }));
+        // Trust flips → policy must re-run, clearing.
+        pb.RaiseIsSourceFpsTrustedChanged(false);
+        Assert.That(pb.ClearFrameMultiplierCalls, Is.GreaterThan(0));
+        Assert.That(ctx.LastVrrDecision.Multiplier, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void DetachVrrSinkUnsubscribes()
+    {
+        using var ctx = NewContext(out var pb);
+        pb.VideoFps = 25.0;
+        var sink = new FakeVrrSink { Range = new VrrRange(48, 60) };
+        ctx.AttachVrrSink(sink);
+        ctx.DetachVrrSink();
+        pb.SetFrameMultiplierCalls.Clear();
+        // Range change AFTER detach: must not trigger ApplyVrrPolicy.
+        sink.Range = new VrrRange(40, 144);
+        sink.RaiseChanged();
+        Assert.That(pb.SetFrameMultiplierCalls, Is.Empty);
+    }
+
+    [Test]
+    public void NoSinkAttachedSkipsPolicy()
+    {
+        using var ctx = NewContext(out var pb);
+        // Without a sink, source-FPS landing or trust transitions must not result in any multiplier mpv writes — the GLArea-fallback path should never get a vf=fps filter.
+        pb.VideoFps = 25.0;
+        pb.RaiseIsSourceFpsTrustedChanged(false);
+        Assert.That(pb.SetFrameMultiplierCalls, Is.Empty);
+        Assert.That(pb.ClearFrameMultiplierCalls, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void FpsTransition24To50ClearsMultiplier()
+    {
+        // Regression: load 24fps file (×2 → 48fps multiplier applied), then load 50fps file (already in 48-60 window, no multiplier needed). The transition must call ClearFrameMultiplier on the new file so the previous file's filter is removed.
+        using var ctx = NewContext(out var pb);
+        var sink = new FakeVrrSink { Range = new VrrRange(48, 60) };
+        ctx.AttachVrrSink(sink);
+        // File A: 24fps source → multiplier=2.
+        pb.VideoFps = 24.0;
+        Assert.That(pb.SetFrameMultiplierCalls.Count, Is.EqualTo(1));
+        pb.SetFrameMultiplierCalls.Clear();
+        pb.ClearFrameMultiplierCalls.Equals(0); // reference baseline
+        int clearCallsBeforeFileB = pb.ClearFrameMultiplierCalls;
+        // File B: 50fps source — already in window, multiplier=1.
+        pb.VideoFps = 50.0;
+        Assert.That(pb.SetFrameMultiplierCalls, Is.Empty, "no Set call when source is already in/above the VRR range");
+        Assert.That(pb.ClearFrameMultiplierCalls, Is.GreaterThan(clearCallsBeforeFileB), "Clear must be called when transitioning from a multiplied source to one already in window");
+        Assert.That(ctx.LastVrrDecision.Multiplier, Is.EqualTo(1));
     }
 }

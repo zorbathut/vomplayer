@@ -43,8 +43,12 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     private readonly IUrlPrompt urlPrompt;
     // Currently-attached IHdrSink (the per-context VideoSurface on Wayland; null on the GLArea fallback path or when no surface is attached yet). AttachHdrSink populates this; DetachHdrSink clears it. Read by ApplyHdrPolicy and OnCurrentOutputHdrChanged.
     private IHdrSink? hdrSink;
+    // Currently-attached IVrrSink (the per-context VideoSurface on Wayland; null otherwise). AttachVrrSink populates; DetachVrrSink clears. Drives ApplyVrrPolicy in combination with playback.VideoFps and playback.IsSourceFpsTrusted.
+    private IVrrSink? vrrSink;
     // Latest value from playback.SourceHdrChanged. Playback fires on transitions only, not on every frame, so caching here lets ApplyHdrPolicy combine it with the current output bit on output-side changes too.
     private bool lastSourceHdr;
+    // Most recent VrrDecision from ApplyVrrPolicy. Surfaced for the diagnostic overlay; set unconditionally on every apply so the overlay reflects the active policy decision regardless of whether the underlying mpv command was a no-op.
+    public VrrDecision LastVrrDecision { get; private set; } = new(1, 0, "no policy run yet");
     // URLs that came in through the Open URL flow (or were expanded from a YouTube playlist via the same flow). LoadCurrentItem checks this set to decide whether to route an item through yt-dlp or hand it straight to mpv. Drag-drop / command-line URLs are NOT added here in v1, so they continue to go directly to mpv (which generally fails for YouTube but works for direct streams). Documented v1 gap; if drag-drop YouTube URLs become a feature ask, the right fix is a discriminated PlaylistItem type rather than growing this set. Per-VideoContext: an Open URL on context A populating context B's set would be wrong.
     private readonly HashSet<string> urlsRequiringDownload = new();
     // CTS for the in-flight URL download (if any). LoadCurrentItem cancels and replaces this synchronously before mutating any per-load state, so a stale download A racing a new load B can't clobber B's playback. The cancellation observer in LoadUrlAsync also re-checks this field is still its CTS at completion time — defense in depth against the cancel-callback racing the LoadFile call.
@@ -164,6 +168,15 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
     }
 
+    // The currently-attached VRR sink, or null. Exposed so the diagnostic overlay can read the current output's VRR window without a separate VideoSurface reference.
+    public IVrrSink? VrrSink
+    {
+        get
+        {
+            return vrrSink;
+        }
+    }
+
     // The Playback this context drives. Exposed for the coordinator's transport fan-out (phase 4 calls playback methods on each context's Playback) and for diagnostic-overlay readouts.
     public IPlayback Playback
     {
@@ -210,6 +223,8 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         this.playback.TracksReloaded += OnPlaybackTracksReloaded;
         // Source-HDR transitions are tracked even when no sink is attached yet — lastSourceHdr is the input to ApplyHdrPolicy whenever a sink does attach.
         this.playback.SourceHdrChanged += OnSourceHdrChanged;
+        // VRR trust transitions: re-run ApplyVrrPolicy on every flip. Sticky-untrusted within a file load means at most one (true→false) flip per file; the inverse (re-trust on a fresh LoadFile / new container-fps land) also fires.
+        this.playback.IsSourceFpsTrustedChanged += OnIsSourceFpsTrustedChanged;
     }
 
     public async Task OpenAsync()
@@ -711,6 +726,36 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         hdrSink = null;
     }
 
+    // Wire the per-context VRR sink. Subscribes to CurrentOutputVrrRangeChanged and runs an initial ApplyVrrPolicy so a file whose VideoFps already landed picks up its multiplier now. Symmetric with AttachHdrSink in shape; no pre-stage call because VRR has no "tag the surface" side — the multiplier is purely an mpv-side filter.
+    public void AttachVrrSink(IVrrSink? sink)
+    {
+        if (vrrSink == sink)
+        {
+            return;
+        }
+        if (vrrSink != null)
+        {
+            vrrSink.CurrentOutputVrrRangeChanged -= OnCurrentOutputVrrRangeChanged;
+        }
+        vrrSink = sink;
+        if (sink == null)
+        {
+            return;
+        }
+        sink.CurrentOutputVrrRangeChanged += OnCurrentOutputVrrRangeChanged;
+        ApplyVrrPolicy();
+    }
+
+    public void DetachVrrSink()
+    {
+        if (vrrSink == null)
+        {
+            return;
+        }
+        vrrSink.CurrentOutputVrrRangeChanged -= OnCurrentOutputVrrRangeChanged;
+        vrrSink = null;
+    }
+
     private void OnSourceHdrChanged(bool isHdr)
     {
         lastSourceHdr = isHdr;
@@ -720,6 +765,16 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     private void OnCurrentOutputHdrChanged()
     {
         ApplyHdrPolicy();
+    }
+
+    private void OnCurrentOutputVrrRangeChanged()
+    {
+        ApplyVrrPolicy();
+    }
+
+    private void OnIsSourceFpsTrustedChanged(bool trusted)
+    {
+        ApplyVrrPolicy();
     }
 
     // Single point of decision for the HDR-viewport question. Drives the wp_color_management_v1 tag on the subsurface and mpv's target-* options. Policy: PQ tag iff source is HDR (regardless of display HDR-capability). Rationale: mpv-via-libmpv is forced to use the older gl_video pipeline whose tone-map curve clips highlights hard at the source mastering-display peak (1000 nits → all-white SDR for typical files); KWin 6.x runs HDR-aware compositing with libplacebo, which has nicer curves. By tagging PQ and having mpv emit pass-through PQ, we hand HDR→SDR conversion to the compositor and inherit its tone-map. Display HDR-capability is no longer load-bearing for the policy — it's still tracked for the diagnostic overlay's `display=` row, but doesn't gate the tag. Window-spanning a PQ-tagged subsurface across HDR + SDR outputs is now correct by construction: the compositor pass-throughs on the HDR side and tonemaps on the SDR side per-output. On enable, stage the PQ/BT.2020 image description first so the very next eglSwapBuffers flushes it atomically with the first PQ-encoded mpv frame; only advance mpv to PQ targeting if the shim confirms the description is attachable (else mpv tone-maps to gamma22 — fallback for non-CM compositors). On disable, mirror in reverse order so the next SDR frame lands on an SDR-tagged surface (GAMMA22/BT.709) — see VideoSurface.SetHdr for why we tag SDR explicitly rather than leave the surface in compositor-defined territory.
@@ -771,6 +826,25 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
             Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} display={outStr} → {newState} (was {ActiveHdrState})");
         }
         ActiveHdrState = newState;
+    }
+
+    // Single point of decision for the VRR frame-multiplier question. Combines source FPS, the current output's VRR window, and the trust flag through VrrPolicy.Decide; calls SetFrameMultiplier on the playback for N≥2 and ClearFrameMultiplier otherwise. Caches the decision (`LastVrrDecision`) for the diagnostic overlay. Runs from: AttachVrrSink (initial), VideoFps property change, IsSourceFpsTrustedChanged, CurrentOutputVrrRangeChanged. No-op when no sink is attached (the GLArea fallback path doesn't expose an IVrrSink, so multipliers don't apply there).
+    private void ApplyVrrPolicy()
+    {
+        if (vrrSink == null)
+        {
+            return;
+        }
+        var decision = VrrPolicy.Decide(playback.VideoFps, vrrSink.CurrentOutputVrrRange, playback.IsSourceFpsTrusted);
+        LastVrrDecision = decision;
+        if (decision.Multiplier >= 2)
+        {
+            playback.SetFrameMultiplier(decision.OutputFps);
+        }
+        else
+        {
+            playback.ClearFrameMultiplier();
+        }
     }
 
     private void UpdateIsAtPlayableEof()
@@ -862,6 +936,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
                 break;
             case nameof(IPlayback.VideoFps):
                 VideoFps = playback.VideoFps;
+                ApplyVrrPolicy();
                 break;
             case nameof(IPlayback.MediaTitle):
                 MediaTitle = playback.MediaTitle;
@@ -890,6 +965,8 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         playback.FileLoaded -= OnPlaybackFileLoaded;
         playback.TracksReloaded -= OnPlaybackTracksReloaded;
         playback.SourceHdrChanged -= OnSourceHdrChanged;
+        playback.IsSourceFpsTrustedChanged -= OnIsSourceFpsTrustedChanged;
         DetachHdrSink();
+        DetachVrrSink();
     }
 }

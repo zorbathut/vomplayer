@@ -567,12 +567,13 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         muteButton.SetTooltipText(viewModel.IsMuted ? "Unmute" : "Mute");
     }
 
-    // Wayland path: hand the IHdrSink to the per-context HDR policy so it can pre-stage the SDR image description (synchronously, before any frame renders), subscribe to output-HDR transitions, and run an initial ApplyHdrPolicy. AttachHdrSink encapsulates that sequence — see its docstring for the three pre-stage edge cases it covers.
+    // Wayland path: hand the IHdrSink to the per-context HDR policy so it can pre-stage the SDR image description (synchronously, before any frame renders), subscribe to output-HDR transitions, and run an initial ApplyHdrPolicy. AttachHdrSink encapsulates that sequence — see its docstring for the three pre-stage edge cases it covers. Same surface implements IVrrSink for the per-output VRR window, so attach it on the same boundary; AttachVrrSink runs an initial ApplyVrrPolicy once both sink and source FPS are known.
     private void OnVideoRenderContextReadyWayland()
     {
         if (videoSurface != null)
         {
             viewModel.Primary.AttachHdrSink(videoSurface);
+            viewModel.Primary.AttachVrrSink(videoSurface);
         }
         viewModel.OnRenderContextReady();
     }

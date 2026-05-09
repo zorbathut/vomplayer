@@ -8,7 +8,7 @@ namespace Vomplayer.Wayland;
 
 // Orchestrates the Wayland subsurface lifecycle against a Gtk.Window + VideoArea pair.
 // Constructor is trivial — stores references and hooks window realize/unrealize + area geometry changes. EGL/subsurface work runs in OnRealize, by which time MainWindow has connected RenderContextReady / RenderFailed. Render loop: mpv update callback (mpv thread) → coalesced IdleAdd → main-thread Render = MakeCurrent + mpv_render_context_render + Swap + ReportSwap.
-public sealed partial class VideoSurface : IDisposable, IHdrSink
+public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
 {
     private const string GtkLib = "libgtk-4.so.1";
 
@@ -38,7 +38,12 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
     // Fires when CurrentOutputIsHdr's observable value changes (null ↔ true, null ↔ false, true ↔ false). Deduped internally against a cached last-published value so a same-value re-notify (e.g. registry event for an output that's already known-SDR) does not fire. Sources: wl_surface.enter/leave mutating the active-output set, and wp_color_management_output_v1.image_description_changed propagating through WaylandOutputRegistry.
     public event Action? CurrentOutputHdrChanged;
 
+    // Fires when CurrentOutputVrrRange's observable value changes. Deduped internally against a cached last-published value. Sources: wl_surface.enter/leave (active output set changes) and WaylandOutputRegistry.VrrRangeChanged (the active output's name resolves, EDID is re-read on hot-plug, etc).
+    public event Action? CurrentOutputVrrRangeChanged;
+
     private bool? lastPublishedOutputIsHdr;
+    private VrrRange? lastPublishedOutputVrrRange;
+    private bool hasPublishedOutputVrrRange;
 
     // Stages an explicit image description on the subsurface: PQ/BT.2020 for enable=true, GAMMA22/BT.709 SDR for enable=false. The shim does NOT commit — the next mpv-driven Swap flushes it alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor. Returns 0 on success; -1 if the compositor does not advertise wp_color_manager_v1 or the subsurface is not yet realized. Caller must only enable mpv PQ targeting when this returns 0 with enable=true, else PQ-encoded output would hit an SDR-tagged surface. For enable=false, an SDR tag is preferable to untagged because per wp_color_management_v1 spec untagged surface handling is compositor-defined; on KWin with an HDR output present that compositor-defined handling blows out gamma22-encoded SDR output catastrophically (see hdr_helper.c). On compositors without wp_color_manager_v1 the surface stays untagged and -1 is returned — most compositors handle untagged-as-sRGB sensibly, so this is logged but tolerated.
     public int SetHdr(bool enable)
@@ -97,6 +102,50 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
         }
     }
 
+    // Resolved VRR window for the output the subsurface is currently entered on. null = unknown, distinct from "known-not-VRR-capable" only because we don't have a per-output VRR-capable bit yet — the registry's TryGetVrrRange returns true with a null range when EDID had no Range Limits descriptor (treat as unknown for now), and we collapse "no active output" / "name not yet resolved" / "EDID missing" / "Range Limits missing" all into null. Mirrors CurrentOutputIsHdr's first-wins semantics for surfaces spanning multiple outputs.
+    public VrrRange? CurrentOutputVrrRange
+    {
+        get
+        {
+            if (surface == null)
+            {
+                return null;
+            }
+            uint? active = surface.Bridge.ActiveOutput;
+            if (!active.HasValue)
+            {
+                return null;
+            }
+            if (WaylandOutputRegistry.TryGetVrrRange(active.Value, out var range))
+            {
+                return range;
+            }
+            return null;
+        }
+    }
+
+    // Connector name (e.g. "HDMI-A-1") of the output the subsurface is currently entered on, for the diagnostic overlay only. null when no active output or wl_output v < 4 (compositor doesn't advertise the .name event). Same first-wins ActiveOutput convention as CurrentOutputIsHdr / CurrentOutputVrrRange.
+    public string? CurrentOutputConnectorName
+    {
+        get
+        {
+            if (surface == null)
+            {
+                return null;
+            }
+            uint? active = surface.Bridge.ActiveOutput;
+            if (!active.HasValue)
+            {
+                return null;
+            }
+            if (WaylandOutputRegistry.TryGetName(active.Value, out var name))
+            {
+                return string.IsNullOrEmpty(name) ? null : name;
+            }
+            return null;
+        }
+    }
+
     public VideoSurface(Gtk.Window window, VideoArea area)
     {
         if (window == null)
@@ -116,6 +165,7 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
 
         // Static-event subscription — must be unhooked in Dispose or we'd leak this VideoSurface for the process lifetime. The Bridge-side subscription is hooked/unhooked with the VomplVideoSurface lifetime in TryCreateRenderContext / TearDown.
         WaylandOutputRegistry.IsHdrChanged += OnRegistryIsHdrChanged;
+        WaylandOutputRegistry.VrrRangeChanged += OnRegistryVrrRangeChanged;
 
         // If the GTK window is already realized at construction time — the case for the lazily-created PiP secondary VideoSurface in MainWindow.EnablePip() — OnRealize will never fire, leaving `surface` null forever. Run the realize handler synchronously so the subsurface is created on this thread, before any caller can call into us. Primary VideoSurface (constructed pre-realize from MainWindow's ctor) takes the normal event-driven path.
         if (window.GetRealized())
@@ -359,6 +409,7 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
         window.OnUnrealize -= OnWindowUnrealize;
         area.GeometryChanged -= OnAreaGeometryChanged;
         WaylandOutputRegistry.IsHdrChanged -= OnRegistryIsHdrChanged;
+        WaylandOutputRegistry.VrrRangeChanged -= OnRegistryVrrRangeChanged;
         TearDown();
     }
 
@@ -373,9 +424,20 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
         PublishOutputHdrIfChanged();
     }
 
+    private void OnRegistryVrrRangeChanged(uint registryName)
+    {
+        uint? active = surface?.Bridge.ActiveOutput;
+        if (!active.HasValue || active.Value != registryName)
+        {
+            return;
+        }
+        PublishOutputVrrRangeIfChanged();
+    }
+
     private void OnBridgeActiveOutputsChanged()
     {
         PublishOutputHdrIfChanged();
+        PublishOutputVrrRangeIfChanged();
     }
 
     private void PublishOutputHdrIfChanged()
@@ -390,6 +452,22 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink
         Vomplayer.Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
         {
             CurrentOutputHdrChanged?.Invoke();
+        });
+    }
+
+    private void PublishOutputVrrRangeIfChanged()
+    {
+        VrrRange? current = CurrentOutputVrrRange;
+        if (hasPublishedOutputVrrRange && Nullable.Equals(current, lastPublishedOutputVrrRange))
+        {
+            return;
+        }
+        hasPublishedOutputVrrRange = true;
+        lastPublishedOutputVrrRange = current;
+        // Same deadlock rationale as PublishOutputHdrIfChanged — handlers (VideoContext.ApplyVrrPolicy) issue mpv property writes through the dispatcher, and the render-completion handshake routes back through this main thread.
+        Vomplayer.Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
+        {
+            CurrentOutputVrrRangeChanged?.Invoke();
         });
     }
 }
