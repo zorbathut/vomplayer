@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using Vomplayer.Playback;
 using Vomplayer.UserData;
@@ -22,9 +21,9 @@ public sealed partial class MainWindow
     private Gio.SimpleAction? videoAction;
     private Gio.SimpleAction? audioAction;
     private Gio.SimpleAction? subtitleAction;
-    // File → Recent Files submenu. Rebuilt wholesale on every recents change (CurrentFilePath PropertyChanged on Primary or Secondary). Backed by a single parameterized action — each item carries its path/URI as the action target — so adding 10+ items doesn't pollute the action map.
+    // File → Recent submenu. Surfaces saved-playlist entries (one row per autosaved session, identified by GUID, displayed by stored Title). Rebuilt wholesale via the autosave.Saved event so any save / Touch reorders the menu. Backed by a single parameterized action — each item carries its GUID stringified as the action target — so adding 10+ items doesn't pollute the action map.
     private Gio.Menu? recentMenu;
-    // Cap on how many recents we pull from SQLite to feed the selector. The menu surfaces 10 with directory-coverage over the most-recent 5 distinct directories. 500 is generous enough that a binge-watch session of one season-folder (24 episodes per season ≈ 24 entries) doesn't bury all the user's other directories below the cutoff. The query is `LIMIT 500` against a `last_opened`-indexed table — microseconds even on a multi-thousand-row history.
+    // Cap on how many entries we pull from SQLite to feed the selector. The menu surfaces 10 with directory-coverage over the most-recent 5 distinct directories. 500 is generous enough that a binge-watch session of one season-folder (24 entries) doesn't bury other directories below the cutoff. The query is `LIMIT 500` against a `last_used_at`-indexed table — microseconds even on a multi-thousand-row history.
     private const int RecentMenuPullLimit = 500;
     private const int RecentMenuTotalSlots = 10;
     private const int RecentMenuDirectoryCoverageSlots = 5;
@@ -43,20 +42,25 @@ public sealed partial class MainWindow
         openUrlAction.OnActivate += (_, _) => viewModel.OpenUrlCommand.Execute(null);
         AddAction(openUrlAction);
 
-        // Single parameterized action backing every Recent Files item — each menu item carries its full path/URI as the "s" target. One action vs. one-per-item keeps the action map size bounded across rebuilds (RebuildRecentFilesMenu mutates the menu items but never touches this action).
-        var openRecentAction = Gio.SimpleAction.New("open-recent", GLib.VariantType.New("s"));
+        // Single parameterized action backing every Recent menu item — each menu item carries its playlist GUID stringified as the "s" target. One action vs. one-per-item keeps the action map size bounded across rebuilds.
+        var openRecentAction = Gio.SimpleAction.New("open-recent-playlist", GLib.VariantType.New("s"));
         openRecentAction.OnActivate += (_, args) =>
         {
             if (args.Parameter == null)
             {
-                throw new InvalidOperationException("open-recent activate signal fired with null Parameter");
+                throw new InvalidOperationException("open-recent-playlist activate signal fired with null Parameter");
             }
             string target = args.Parameter.GetString(out var _length);
             if (string.IsNullOrEmpty(target))
             {
-                throw new InvalidOperationException("open-recent activate signal fired with empty target string");
+                throw new InvalidOperationException("open-recent-playlist activate signal fired with empty target string");
             }
-            viewModel.OpenFile(target);
+            if (!Guid.TryParseExact(target, "N", out var guid))
+            {
+                Console.Error.WriteLine($"[vompl] open-recent-playlist: ignoring unparseable GUID '{target}'");
+                return;
+            }
+            OpenSavedPlaylist(guid);
         };
         AddAction(openRecentAction);
 
@@ -150,10 +154,10 @@ public sealed partial class MainWindow
         // GirCore 0.7.0 doesn't expose gtk_menu_append_item as AppendItem, only the position-based InsertItem. Passing -1 as position appends per the gmenu contract.
         fileMenu.InsertItem(-1, Gio.MenuItem.New("Open File…", "win.open"));
         fileMenu.InsertItem(-1, Gio.MenuItem.New("Open URL…", "win.open-url"));
-        // Recent Files submenu placeholder — populated by RebuildRecentFilesMenu and live-mutated by subsequent calls (Gio.Menu mutations propagate to the live PopoverMenuBar without rebinding). AppendSubmenu wires the menu by reference, so later RemoveAll/InsertItem calls flow through.
+        // Recent submenu placeholder — populated by RebuildRecentMenu and live-mutated by subsequent calls (Gio.Menu mutations propagate to the live PopoverMenuBar without rebinding). AppendSubmenu wires the menu by reference, so later RemoveAll/InsertItem calls flow through.
         recentMenu = Gio.Menu.New();
-        fileMenu.AppendSubmenu("Recent Files", recentMenu);
-        RebuildRecentFilesMenu();
+        fileMenu.AppendSubmenu("Recent", recentMenu);
+        RebuildRecentMenu();
         var fileQuitSection = Gio.Menu.New();
         fileQuitSection.InsertItem(-1, Gio.MenuItem.New("Quit", "win.quit"));
         fileMenu.AppendSection(null!, fileQuitSection);
@@ -250,101 +254,38 @@ public sealed partial class MainWindow
         return action;
     }
 
-    // Rebuild the File → Recent Files submenu from the current recents store. Pulls a generous candidate set (RecentMenuPullLimit), runs RecentFilesMenuSelector to enforce the directory-coverage rule, and writes one menu item per result. Empty store ⇒ a single disabled "(no recent files)" placeholder so the submenu opens with a hint rather than looking broken. Called from BuildMenuBar at construction and re-called whenever a file open potentially changed recents (CurrentFilePath PropertyChanged on Primary or Secondary).
-    private void RebuildRecentFilesMenu()
+    // Rebuild the File → Recent submenu from the saved-playlists store. Pulls a generous candidate set (RecentMenuPullLimit), runs PlaylistMenuSelector to enforce the directory-coverage rule, and writes one menu item per result. Empty store ⇒ a single disabled "(no recent playlists)" placeholder so the submenu opens with a hint rather than looking broken. Called from BuildMenuBar at construction; re-called by the autosave.Saved event subscription wired in MainWindow.cs.
+    private void RebuildRecentMenu()
     {
         if (recentMenu == null)
         {
-            throw new InvalidOperationException("RebuildRecentFilesMenu invoked before BuildMenuBar constructed recentMenu");
+            throw new InvalidOperationException("RebuildRecentMenu invoked before BuildMenuBar constructed recentMenu");
         }
         recentMenu.RemoveAll();
 
-        var entries = recentFiles.GetMostRecent(RecentMenuPullLimit);
-        var selected = RecentFilesMenuSelector.Select(entries, RecentMenuTotalSlots, RecentMenuDirectoryCoverageSlots);
+        // savedPlaylists may be null in the brief window between MainWindow ctor and the AttachAutosave / construction-side wiring — render the placeholder rather than crash.
+        if (savedPlaylists == null)
+        {
+            recentMenu.InsertItem(-1, Gio.MenuItem.New("(no recent playlists)", "win.noop-recent-empty"));
+            return;
+        }
+        var entries = savedPlaylists.GetMostRecent(RecentMenuPullLimit);
+        var selected = PlaylistMenuSelector.Select(entries, RecentMenuTotalSlots, RecentMenuDirectoryCoverageSlots);
         if (selected.Count == 0)
         {
             // Disabled placeholder. Pointing the item at a non-existent action is the standard Gio dance for "not enabled" — Gtk renders the item greyed out because no action with that name is registered.
-            recentMenu.InsertItem(-1, Gio.MenuItem.New("(no recent files)", "win.noop-recent-empty"));
+            recentMenu.InsertItem(-1, Gio.MenuItem.New("(no recent playlists)", "win.noop-recent-empty"));
             return;
         }
 
-        // Collision-disambiguation: the directory-coverage rule's whole point is to surface cross-directory files, so basename collisions in this menu are exactly the case the rule generates. Render colliding basenames with their parent-directory in parens; non-colliding basenames stay clean.
-        var basenameCounts = new Dictionary<string, int>(selected.Count);
         foreach (var entry in selected)
         {
-            var key = ExtractBasenameKey(entry.PathOrUri);
-            basenameCounts[key] = basenameCounts.TryGetValue(key, out var c) ? c + 1 : 1;
-        }
-
-        foreach (var entry in selected)
-        {
-            var key = ExtractBasenameKey(entry.PathOrUri);
-            bool collides = basenameCounts.TryGetValue(key, out var count) && count > 1;
-            var item = Gio.MenuItem.New(FormatRecentMenuLabel(entry.PathOrUri, collides), null);
-            item.SetActionAndTargetValue("win.open-recent", GLib.Variant.NewString(entry.PathOrUri));
+            // Empty title falls back to a placeholder rather than rendering a blank menu item. Doesn't normally happen because Save filters all-empty playlists out, but defensive — a row whose title was never bumped past the empty-string default would be invisible in the menu otherwise.
+            string label = string.IsNullOrEmpty(entry.Title) ? "(untitled playlist)" : entry.Title;
+            var item = Gio.MenuItem.New(label, null);
+            item.SetActionAndTargetValue("win.open-recent-playlist", GLib.Variant.NewString(entry.Guid.ToString("N")));
             recentMenu.InsertItem(-1, item);
         }
-    }
-
-    // Returns the basename used as the collision-detection key. Lower-cased on case-insensitive filesystems isn't worth chasing here — a recents entry that re-records the same file with a different case is already deduped by the SQL upsert. URIs collapse to their full form (which is unique by construction in the result set).
-    private static string ExtractBasenameKey(string pathOrUri)
-    {
-        if (!TrackPreferences.IsLocalFilesystemPath(pathOrUri))
-        {
-            return pathOrUri;
-        }
-        try
-        {
-            var name = Path.GetFileName(pathOrUri);
-            return string.IsNullOrEmpty(name) ? pathOrUri : name;
-        }
-        catch (ArgumentException ex)
-        {
-            // Path.GetFileName throws ArgumentException on invalid characters in some platforms. Don't crash the menu rebuild; report and treat the full path as the key (so it'll never collide with a clean basename).
-            Console.Error.WriteLine($"[vompl] recents-menu: GetFileName('{pathOrUri}') threw {ex.GetType().Name}: {ex.Message}");
-            return pathOrUri;
-        }
-    }
-
-    // Build the visible label for a recents entry. Local files get just the basename when unique; on collision we append the parent-directory's basename in parens (e.g., "intro.mp4 (S01)") so the user can tell which file is which. URIs render as-is.
-    private static string FormatRecentMenuLabel(string pathOrUri, bool disambiguate)
-    {
-        if (!TrackPreferences.IsLocalFilesystemPath(pathOrUri))
-        {
-            return pathOrUri;
-        }
-        string name;
-        try
-        {
-            name = Path.GetFileName(pathOrUri);
-        }
-        catch (ArgumentException ex)
-        {
-            Console.Error.WriteLine($"[vompl] recents-menu: GetFileName('{pathOrUri}') threw {ex.GetType().Name}: {ex.Message}");
-            return pathOrUri;
-        }
-        if (string.IsNullOrEmpty(name))
-        {
-            return pathOrUri;
-        }
-        if (!disambiguate)
-        {
-            return name;
-        }
-        string? parentName = null;
-        try
-        {
-            var dir = Path.GetDirectoryName(pathOrUri);
-            if (!string.IsNullOrEmpty(dir))
-            {
-                parentName = Path.GetFileName(dir);
-            }
-        }
-        catch (ArgumentException)
-        {
-            // Fall through with parentName == null — name alone is the best we can do.
-        }
-        return string.IsNullOrEmpty(parentName) ? name : $"{name} ({parentName})";
     }
 
     // Per-kind rebuild entrypoints. Three thin wrappers — each one passes its kind-specific knobs to RebuildTrackMenu and, where applicable, tacks on a separator + "Add … File…" section. Called once during BuildMenuBar (after the menu/action fields are constructed) and again on every PropertyChanged for the matching track-list / current-id pair (wired in MainWindow.cs's OnViewModelPropertyChanged, which is subscribed AFTER BuildMenuBar runs).

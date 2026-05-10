@@ -43,17 +43,18 @@ public static class Program
         // Owned by Main so the SQLite connection is closed cleanly after the GTK main loop exits — including on abnormal exit, since the using block fires on any control-flow path. Shared across activations if the NonUnique app ever re-activates within one process; today that's a single window per process, but co-locating recents across hypothetical multi-window matches user intent.
         using var stateDb = StateDatabase.Open(UserDataPaths.StateDb);
         var recentFiles = new RecentFiles(stateDb.Connection);
+        var savedPlaylists = new SavedPlaylists(stateDb.Connection);
         var trackPreferences = new TrackPreferences(stateDb.Connection);
 
         var app = Gtk.Application.New("io.github.zorbathut.vomplayer", Gio.ApplicationFlags.NonUnique);
         app.OnActivate += (sender, _) =>
         {
-            BuildAndPresent((Gtk.Application)sender, recentFiles, trackPreferences, userConfig, configPath, initialFile);
+            BuildAndPresent((Gtk.Application)sender, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, initialFile);
         };
         return app.RunWithSynchronizationContext(null);
     }
 
-    private static void BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
+    private static void BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
     {
         // gtk_init ran setlocale(LC_ALL, "") already; force LC_NUMERIC=C back before any mpv call. Must happen on the main thread after GTK init, not before Main.
         LibC.ForceCNumericLocale();
@@ -62,7 +63,7 @@ public static class Program
             a => Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, a));
         playback.Initialize();
 
-        var window = new MainWindow(app, playback, recentFiles, trackPreferences, userConfig, configPath, initialFile);
+        var window = new MainWindow(app, playback, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, initialFile);
         window.Present();
     }
 }

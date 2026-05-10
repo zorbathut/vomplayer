@@ -74,6 +74,8 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     private readonly HashSet<MediaKind> appliedKindsForCurrentFile = new();
     // Set on FileLoaded, cleared on the next FileLoaded. Distinguishes "we're in the apply window" from "no file load is pending" so that user-driven track-list changes (sub-add later in the session) don't trigger spurious applies.
     private bool inApplyWindow;
+    // Set by RestorePlaylist while it loads a file the user did NOT deliberately open (startup autoload, Recent menu click). LoadCurrentItem checks this and skips recentFiles.Record so the file's `last_opened` timestamp reflects the user's last actual play, not the system's restore. Position-resume still works (it reads position_seconds, which Record doesn't clear).
+    private bool restoringPlaylist;
 
     [ObservableProperty]
     private TimeSpan position;
@@ -402,6 +404,41 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         LoadCurrentItem();
     }
 
+    // Restore a saved playlist into this context. Replaces the items list, sets CurrentIndex, and kicks off the load — startPaused=true sets pause BEFORE the LoadFile dispatch so mpv loads paused and stops at the resume position. Used by ViewModelMain.LoadFromSaved (Recent menu click + startup autoload). Two Changed events fire (Replace, then SetCurrent if currentIndex != 0); PlaylistAutosave's loading flag swallows both so restoration doesn't re-write the row with placeholder filenames.
+    //
+    // Distinct from LoadPaths(replace:true) because LoadPaths always loads from index 0 and never starts paused; restoration needs to honor the saved index AND not auto-play. Sharing code via parameters would muddle LoadPaths' contract for callers that don't restore.
+    public void RestorePlaylist(IReadOnlyList<string> items, int currentIndex, bool startPaused)
+    {
+        if (items == null)
+        {
+            throw new ArgumentNullException(nameof(items));
+        }
+        if (items.Count == 0)
+        {
+            return;
+        }
+        int clamped = currentIndex >= 0 && currentIndex < items.Count ? currentIndex : 0;
+        if (startPaused)
+        {
+            // Set pause BEFORE LoadFile so mpv's load-time defaults don't auto-play. The dispatcher serializes set-property and loadfile in the order they're issued from the main thread; without this ordering, playback would briefly start before pause took effect. Bypasses VideoContext.SetPaused's Duration > 0 gate (no file is loaded yet) by going through Playback directly.
+            playback.SetPaused(true);
+        }
+        restoringPlaylist = true;
+        try
+        {
+            Playlist.Replace(items);
+            if (clamped != 0)
+            {
+                Playlist.SetCurrent(clamped);
+            }
+            LoadCurrentItem();
+        }
+        finally
+        {
+            restoringPlaylist = false;
+        }
+    }
+
     // Coordinator-side advance entry point (phase 4): advance the playlist by one and load the new current item. Returns true if an advance happened, false if the playlist was already at the end. Today's per-context auto-advance handler also routes through this method when AutoAdvanceEnabled is true.
     public bool AdvanceAndLoadIfPossible()
     {
@@ -430,7 +467,11 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
 
         SaveCurrentPositionIfEligible();
 
-        recentFiles.Record(pathOrUri);
+        // Skip recents.Record when LoadCurrentItem is reached via RestorePlaylist (system-driven restore, not a deliberate open). Bumping last_opened in that case would overwrite the user's last actual-play timestamp with "now"; user-visible click → PlayPlaylistItem → LoadCurrentItem still records normally because restoringPlaylist is false.
+        if (!restoringPlaylist)
+        {
+            recentFiles.Record(pathOrUri);
+        }
         // Resolve and cache the directory key NOW so Select* calls between LoadFile and the next load can reach it. URIs return null and disable persistence for this file.
         currentDirectoryKey = TrackPreferences.TryGetDirectoryKey(pathOrUri);
         CurrentFilePath = pathOrUri;

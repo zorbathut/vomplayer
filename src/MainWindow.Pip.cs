@@ -96,7 +96,6 @@ public partial class MainWindow
         if (e.PropertyName == nameof(VideoContext.CurrentFilePath))
         {
             UpdateStreamSelectorLabels();
-            RebuildRecentFilesMenu();
         }
     }
 
@@ -401,7 +400,6 @@ public partial class MainWindow
         if (e.PropertyName == nameof(VideoContext.CurrentFilePath))
         {
             UpdateStreamSelectorLabels();
-            RebuildRecentFilesMenu();
         }
     }
 

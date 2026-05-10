@@ -21,6 +21,7 @@ public sealed class StateDatabase : IDisposable
         new Migration(1, "initial schema: recent_files table", ApplyV1Schema),
         new Migration(2, "track_preferences table for per-directory video/audio/subtitle remembered choices", ApplyV2Schema),
         new Migration(3, "recent_files.position_seconds column for per-file resume", ApplyV3Schema),
+        new Migration(4, "saved_playlists table for autosaved playlist history (single + multi-stream PiP)", ApplyV4Schema),
     };
 
     internal static int CurrentSchemaVersion
@@ -129,6 +130,24 @@ public sealed class StateDatabase : IDisposable
         using var cmd = tx.Connection!.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = "ALTER TABLE recent_files ADD COLUMN position_seconds REAL;";
+        cmd.ExecuteNonQuery();
+    }
+
+    // Saved-playlists store. JSON-blob shape over normalized child tables: v1 has no requirement to query inside playlist contents (no "all playlists containing X" / no playlist filtering), so a single-table upsert is dramatically simpler than three-table FK cascades. payload_json is a JSON array of `{slot, current_index, items}` objects — schemaless room to grow to N streams without further migrations. stream_count is denormalized so the startup "if most-recent is multi-stream → don't autoload" check is a single indexed lookup instead of a JSON parse.
+    private static void ApplyV4Schema(SqliteTransaction tx)
+    {
+        using var cmd = tx.Connection!.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            CREATE TABLE saved_playlists (
+              guid          TEXT PRIMARY KEY,
+              title         TEXT NOT NULL,
+              last_used_at  INTEGER NOT NULL,
+              stream_count  INTEGER NOT NULL,
+              payload_json  TEXT NOT NULL
+            );
+            CREATE INDEX saved_playlists_last_used ON saved_playlists (last_used_at DESC);
+            """;
         cmd.ExecuteNonQuery();
     }
 

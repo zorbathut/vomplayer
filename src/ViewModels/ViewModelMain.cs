@@ -216,6 +216,18 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         nameof(MediaTitle),
     };
 
+    // Optional dependency: production wires it via AttachAutosave after construction so test-only consumers (which don't care about persistence) can keep using the existing ctor surface unchanged. Null until AttachAutosave runs.
+    private ISavedPlaylists? savedPlaylists;
+    private PlaylistAutosave? autosave;
+
+    public PlaylistAutosave? Autosave
+    {
+        get
+        {
+            return autosave;
+        }
+    }
+
     public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt)
     {
         if (playback == null)
@@ -230,6 +242,74 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         playback.FileLoaded += InvalidateSyncSeekAnchor;
         // Same race rationale as the burst-anchor invalidation: a Primary file load between sync-mode operations resets Position to 0 and breaks the captured offset. The lazy fallback inside ApplyPostEdgeCorrection re-establishes a fresh offset on the next correction edge.
         playback.FileLoaded += ClearTargetOffset;
+    }
+
+    // Wire the autosave service. Production calls this immediately after ctor so the very first user action (open file via CLI arg, drag-drop, file dialog) is captured. Tests that don't care about autosave skip this call and the autosave-related public methods (LoadFromSaved) become unavailable. Idempotent — second call is rejected because there's no clean way to swap repos without losing the in-memory CurrentGuid.
+    public void AttachAutosave(ISavedPlaylists repo)
+    {
+        if (repo == null)
+        {
+            throw new ArgumentNullException(nameof(repo));
+        }
+        if (autosave != null)
+        {
+            throw new InvalidOperationException("Autosave already attached");
+        }
+        savedPlaylists = repo;
+        autosave = new PlaylistAutosave(repo);
+        autosave.BindPrimary(Primary);
+        if (Secondary != null)
+        {
+            // Pre-existing PiP state (uncommon — AttachAutosave is normally called before EnablePip can fire — but plausible if a future caller orders these the other way around).
+            autosave.BindSecondary(Secondary);
+        }
+    }
+
+    // Restore an entry from the saved-playlists store into the in-memory contexts. Pre-conditions: autosave must be attached (throws otherwise); PiP state should already match the saved entry (caller is responsible — MainWindow's open-recent-playlist handler toggles EnablePip/DisablePip before invoking this). startPaused=true sets pause before LoadFile so the user sees a thumbnail at the resume position rather than auto-play. Touches the entry's last_used_at so the menu reorders it to the top.
+    public void LoadFromSaved(Guid guid, bool startPaused)
+    {
+        if (savedPlaylists == null || autosave == null)
+        {
+            throw new InvalidOperationException("AttachAutosave must be called before LoadFromSaved");
+        }
+        var entry = savedPlaylists.GetById(guid);
+        if (entry == null)
+        {
+            return;
+        }
+        autosave.BeginRestore();
+        try
+        {
+            SavedPlaylistStream? primaryStream = null;
+            SavedPlaylistStream? secondaryStream = null;
+            foreach (var s in entry.Streams)
+            {
+                if (s.SlotIndex == 0)
+                {
+                    primaryStream = s;
+                }
+                else if (s.SlotIndex == 1)
+                {
+                    secondaryStream = s;
+                }
+            }
+            if (primaryStream != null)
+            {
+                Primary.RestorePlaylist(primaryStream.Items, primaryStream.CurrentIndex, startPaused);
+            }
+            if (secondaryStream != null && Secondary != null)
+            {
+                Secondary.RestorePlaylist(secondaryStream.Items, secondaryStream.CurrentIndex, startPaused);
+            }
+            autosave.SetCurrentGuid(guid);
+            savedPlaylists.Touch(guid);
+        }
+        finally
+        {
+            autosave.EndRestore();
+        }
+        // Touch doesn't go through Persist (no payload changed), but the menu still needs to rebuild because last_used_at moved.
+        autosave.RaiseSaved();
     }
 
     // Take ownership of `secondary` and switch into PiP mode. Caller (MainWindow) constructs the secondary VideoContext (with its own Playback) and hands it over here. The VM then disables per-context auto-advance on both and starts driving lockstep advance itself. Idempotent: calling EnablePip while already in PiP mode is a no-op (the supplied secondary is NOT swapped in — caller should DisablePip first).
@@ -248,6 +328,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         Primary.AutoAdvanceEnabled = false;
         secondary.AutoAdvanceEnabled = false;
         secondary.PropertyChanged += OnContextPropertyChanged;
+        autosave?.BindSecondary(secondary);
         // Same FileLoaded subscription as Primary — a Secondary file load between SeekTos within the burst window would otherwise produce a Primary-anchored delta against a Secondary that just reset to 0.
         secondary.Playback.FileLoaded += InvalidateSyncSeekAnchor;
         // Mirror Primary's targetOffset clear on Secondary's loads.
@@ -267,6 +348,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         var secondary = Secondary;
         Secondary = null;
+        // Unbind autosave BEFORE disposing the secondary so the unbind's final Persist sees the live secondary's now-empty state. (Persist filters empty streams; with secondary still bound but empty, the row drops back to single-stream — exactly the user-visible state.)
+        autosave?.UnbindSecondary();
         if (secondary != null)
         {
             secondary.PropertyChanged -= OnContextPropertyChanged;
@@ -496,6 +579,15 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             // Initial file always lands in Primary — InitialFile is a process-level "the user passed this on argv" concept, not a per-context one. Routes through OpenFile so the command-line file is recorded in recents the same way drag-and-drop and the file picker are.
             Primary.OpenFile(InitialFile);
+        }
+        else if (savedPlaylists != null)
+        {
+            // No CLI arg: try to restore the most recent playlist. If it's multi-stream, do nothing (per user spec — don't auto-enable PiP at startup; let the user explicitly click the Recent entry to reactivate it). The single-stream path loads paused at the saved resume position.
+            var last = savedPlaylists.GetMostRecent();
+            if (last != null && last.StreamCount == 1)
+            {
+                LoadFromSaved(last.Guid, startPaused: true);
+            }
         }
         initialFileLoaded = true;
     }

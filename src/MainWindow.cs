@@ -40,6 +40,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
     private readonly Playback.Playback playback;
     private readonly IRecentFiles recentFiles;
+    private readonly ISavedPlaylists savedPlaylists;
     private readonly ITrackPreferences trackPreferences;
     private readonly Services.IFilePicker filePicker;
     private readonly Services.IUrlDownloader urlDownloader;
@@ -112,7 +113,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private ulong seekLegacyHandlerId;
     private IntPtr seekLegacyControllerHandle;
 
-    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
+    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
     {
         if (app == null)
         {
@@ -125,6 +126,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         if (recentFiles == null)
         {
             throw new ArgumentNullException(nameof(recentFiles));
+        }
+        if (savedPlaylists == null)
+        {
+            throw new ArgumentNullException(nameof(savedPlaylists));
         }
         if (trackPreferences == null)
         {
@@ -140,6 +145,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
         this.playback = playback;
         this.recentFiles = recentFiles;
+        this.savedPlaylists = savedPlaylists;
         this.trackPreferences = trackPreferences;
         this.userConfig = userConfig;
         this.configPath = configPath;
@@ -161,6 +167,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         this.urlDownloader = new YtDlpDownloader(urlDownloadCache, "yt-dlp");
         this.urlPrompt = new UrlPromptGtk(this);
         viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
+        // AttachAutosave before InitialFile is consumed (OnRenderContextReady) so the very first user-visible action — even one driven by the CLI arg — is captured.
+        viewModel.AttachAutosave(savedPlaylists);
+        viewModel.Autosave!.Saved += RebuildRecentMenu;
         viewModel.InitialFile = initialFile;
 
         Gtk.Widget videoWidget;
@@ -676,6 +685,27 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
         SetCursorFromName(null);
         ArmControlsHideTimer();
+    }
+
+    // Recent-menu click handler. Lifecycle dance lives here (in MainWindow) rather than in ViewModelMain.LoadFromSaved because PiP enable/disable involves constructing/disposing the secondary Playback + widget set, which is GTK code MainWindow already owns. The PiP toggle is driven from the saved entry's StreamCount: multi-stream → enable PiP; single-stream → disable PiP. After the toggle, hand off to viewModel.LoadFromSaved which does the actual playlist restoration paused at resume.
+    internal void OpenSavedPlaylist(Guid guid)
+    {
+        var entry = savedPlaylists.GetById(guid);
+        if (entry == null)
+        {
+            // Either the GUID was stale (concurrent deletion — not currently possible in v1) or the menu got out of sync. Either way nothing to load.
+            return;
+        }
+        bool savedIsPip = entry.StreamCount > 1;
+        if (savedIsPip && !viewModel.IsPipEnabled)
+        {
+            EnablePip();
+        }
+        else if (!savedIsPip && viewModel.IsPipEnabled)
+        {
+            DisablePip();
+        }
+        viewModel.LoadFromSaved(guid, startPaused: true);
     }
 
     private void HandleWindowDrop(List<string> paths)

@@ -16,6 +16,8 @@ public sealed class PlaylistPanel : IDisposable
     private Action<int> playItem;
     private readonly Gtk.ListBox listBox;
     private readonly Gtk.ScrolledWindow scrolledWindow;
+    // Captured once so subscribe and unsubscribe call the same delegate. Inline `_ => Rebuild()` lambdas would create distinct delegate instances and the unsubscribe in Dispose / Rebind would silently no-op, leaking the subscription past the panel's lifetime.
+    private readonly Action<PlaylistChangeKind> changedHandler;
 
     public PlaylistPanel(Playlist playlist, Action<int> playItem)
     {
@@ -29,6 +31,7 @@ public sealed class PlaylistPanel : IDisposable
         }
         this.playlist = playlist;
         this.playItem = playItem;
+        changedHandler = _ => Rebuild();
 
         listBox = Gtk.ListBox.New();
         listBox.SetSelectionMode(Gtk.SelectionMode.Single);
@@ -43,7 +46,7 @@ public sealed class PlaylistPanel : IDisposable
         scrolledWindow.SetSizeRequest(240, -1);
         scrolledWindow.SetPolicy(Gtk.PolicyType.Never, Gtk.PolicyType.Automatic);
 
-        playlist.Changed += Rebuild;
+        playlist.Changed += changedHandler;
         Rebuild();
     }
 
@@ -81,10 +84,10 @@ public sealed class PlaylistPanel : IDisposable
             playItem = newPlayItem;
             return;
         }
-        playlist.Changed -= Rebuild;
+        playlist.Changed -= changedHandler;
         playlist = newPlaylist;
         playItem = newPlayItem;
-        playlist.Changed += Rebuild;
+        playlist.Changed += changedHandler;
         Rebuild();
     }
 
@@ -175,6 +178,6 @@ public sealed class PlaylistPanel : IDisposable
 
     public void Dispose()
     {
-        playlist.Changed -= Rebuild;
+        playlist.Changed -= changedHandler;
     }
 }

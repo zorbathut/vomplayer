@@ -3,6 +3,16 @@ using System.Collections.Generic;
 
 namespace Vomplayer.ViewModels;
 
+// Discriminator on Playlist.Changed. Lets subscribers (especially PlaylistAutosave) tell "the user replaced the whole playlist" apart from "the same playlist's items shifted around" without inferring intent from heuristics.
+public enum PlaylistChangeKind
+{
+    Replace,
+    Append,
+    Move,
+    SetCurrent,
+    Advance,
+}
+
 // Plain-class playlist model. NOT an ObservableObject — Move(from,to) mutates two pieces of observable state (Items + CurrentIndex) and a single PropertyChanged-per-property would fire twice and make consumers redraw twice (with the highlight class briefly on the wrong row between the two notifications). One Changed event per composite mutation matches the "redraw the whole panel" semantics consumers actually need (cf. the ChapterScrubber rebuild on every viewModel.Chapters change).
 //
 // All mutation paths funnel through Notify(): a sequence-equality check + reference assignment, so no-op mutations (Move(i,i), SetCurrent to same value) skip the event. Replace's choice to RESET CurrentIndex to 0 (or -1 if the new playlist is empty) — even when the new playlist contains the previously-playing file at a different index — is deliberate and matches the user-spec ("drop replaces playlist"); see PlaylistTests.ReplaceDeliberatelyResetsCurrentEvenWhenItemPersists.
@@ -13,7 +23,7 @@ public sealed class Playlist
     // -1 sentinel for "empty / not playing". Avoids a separate bool-or-nullable; -1 is unambiguous because real indices are always >= 0.
     public int CurrentIndex { get; private set; } = -1;
 
-    public event Action? Changed;
+    public event Action<PlaylistChangeKind>? Changed;
 
     public void Replace(IReadOnlyList<string> paths)
     {
@@ -31,7 +41,7 @@ public sealed class Playlist
         }
         Items = newItems;
         CurrentIndex = newCurrent;
-        Changed?.Invoke();
+        Changed?.Invoke(PlaylistChangeKind.Replace);
     }
 
     public void Append(IReadOnlyList<string> paths)
@@ -54,7 +64,7 @@ public sealed class Playlist
             CurrentIndex = 0;
         }
         // CurrentIndex unchanged when appending to a non-empty playlist — the currently-playing file stays at the same index, just with more items behind it.
-        Changed?.Invoke();
+        Changed?.Invoke(PlaylistChangeKind.Append);
     }
 
     // Reorder: take the item at `from`, remove it, insert at `to`. Throws on out-of-range — out-of-range is a programmer error in single-threaded GTK callers, not a user-facing condition (per CLAUDE.md, silent error handling is banned).
@@ -96,7 +106,7 @@ public sealed class Playlist
         }
         Items = copy.AsReadOnly();
         CurrentIndex = newCurrent;
-        Changed?.Invoke();
+        Changed?.Invoke(PlaylistChangeKind.Move);
     }
 
     public void SetCurrent(int index)
@@ -110,7 +120,7 @@ public sealed class Playlist
             return;
         }
         CurrentIndex = index;
-        Changed?.Invoke();
+        Changed?.Invoke(PlaylistChangeKind.SetCurrent);
     }
 
     // Bumps CurrentIndex to next item and returns its path; null when already at the end (or empty). Caller is responsible for kicking off playback of the returned path. Bumping atomically with the read avoids a "read next, then advance" race the auto-advance handler would otherwise have to manage.
@@ -121,7 +131,7 @@ public sealed class Playlist
             return null;
         }
         CurrentIndex++;
-        Changed?.Invoke();
+        Changed?.Invoke(PlaylistChangeKind.Advance);
         return Items[CurrentIndex];
     }
 

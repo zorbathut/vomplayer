@@ -38,7 +38,7 @@ public class PlaylistTests
     {
         var p = new Playlist();
         int fires = 0;
-        p.Changed += () => fires++;
+        p.Changed += _ => fires++;
         p.Replace(new[] { "a", "b" });
         Assert.That(fires, Is.EqualTo(1));
     }
@@ -50,7 +50,7 @@ public class PlaylistTests
         var p = new Playlist();
         p.Replace(new[] { "a", "b" });
         int fires = 0;
-        p.Changed += () => fires++;
+        p.Changed += _ => fires++;
         p.Replace(new[] { "a", "b" });
         Assert.That(fires, Is.EqualTo(0));
     }
@@ -92,7 +92,7 @@ public class PlaylistTests
     {
         var p = new Playlist();
         int fires = 0;
-        p.Changed += () => fires++;
+        p.Changed += _ => fires++;
         p.Append(Array.Empty<string>());
         Assert.That(fires, Is.EqualTo(0));
         Assert.That(p.Items, Is.Empty);
@@ -194,7 +194,7 @@ public class PlaylistTests
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c" });
         int fires = 0;
-        p.Changed += () => fires++;
+        p.Changed += _ => fires++;
         p.Move(1, 1);
         Assert.That(fires, Is.EqualTo(0));
     }
@@ -263,10 +263,64 @@ public class PlaylistTests
         var p = new Playlist();
         p.Replace(new[] { "a", "b" });
         int fires = 0;
-        p.Changed += () => fires++;
+        p.Changed += _ => fires++;
         p.SetCurrent(1);
         Assert.That(fires, Is.EqualTo(1));
         p.SetCurrent(1);   // same value, no fire
         Assert.That(fires, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void ChangedKindIsReplaceOnReplace()
+    {
+        var p = new Playlist();
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => lastKind = k;
+        p.Replace(new[] { "a" });
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Replace));
+    }
+
+    [Test]
+    public void ChangedKindIsAppendOnAppend()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a" });
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => lastKind = k;
+        p.Append(new[] { "b" });
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Append));
+    }
+
+    [Test]
+    public void ChangedKindIsMoveOnMove()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => lastKind = k;
+        p.Move(0, 2);
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Move));
+    }
+
+    [Test]
+    public void ChangedKindIsSetCurrentOnSetCurrent()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => lastKind = k;
+        p.SetCurrent(1);
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.SetCurrent));
+    }
+
+    [Test]
+    public void ChangedKindIsAdvanceOnAdvance()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => lastKind = k;
+        p.Advance();
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Advance));
     }
 }
