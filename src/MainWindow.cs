@@ -355,16 +355,13 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     {
         if (updatingFromVm)
         {
-            Vomplayer.Playback.SyncDiag.Log($"seekScale value-changed v={seekScale.GetValue():F4} SUPPRESSED (updatingFromVm)");
             return;
         }
         double v = seekScale.GetValue();
         if (v == lastUserSeek)
         {
-            Vomplayer.Playback.SyncDiag.Log($"seekScale value-changed v={v:F4} SUPPRESSED (==lastUserSeek)");
             return;
         }
-        Vomplayer.Playback.SyncDiag.Log($"seekScale value-changed v={v:F4} → VM.SeekTo");
         lastUserSeek = v;
         viewModel.SeekTo(v);
     }

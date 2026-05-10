@@ -64,9 +64,6 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Mirror of mpv's `media-title` property: the source's metadata title (container/stream tag) when present, falling back to the filename without path/extension. Null when no file is loaded. For yt-dlp-downloaded URLs the cached file is named `%(title)s.%(ext)s`, so the fallback still surfaces the upstream video title rather than a hash. Drives the main-window title display.
     string? MediaTitle { get; }
 
-    // Diagnostic tag set by wiring code (ViewModelMain ctor for primary, EnablePip for secondary) so VOMPL_LOG_SYNC=1 traces can disambiguate which mpv instance emitted each line. Defaults to "?" on construction. Only consumed by SyncDiag log statements; production behavior is unaffected.
-    string DiagTag { get; set; }
-
     event Action? FileLoaded;
     event Action<int>? FileEnded;
     // Fires once per dispatcher-level track-list re-walk, AFTER the three per-kind properties (VideoTracks / AudioTracks / SubtitleTracks) have been updated on the main thread. Distinct from PropertyChanged on the lists individually because consumers (like the directory-preferences applier) need an "all three are settled" signal — relying on PropertyChanged for one specific kind misses files where that kind is empty (no notification fires for an empty→empty update due to the dedup gate). FileLoaded alone isn't enough either: FileLoaded fires before the dispatcher has finished re-walking and pushing the new lists.

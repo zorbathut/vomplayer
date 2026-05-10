@@ -96,7 +96,6 @@ public partial class PlaylistAutosaveTests
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
         public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
-        public string DiagTag { get; set; } = "?";
         public bool IsSourceFpsTrusted { get; set; } = true;
         public string FpsTrustReason { get; set; } = "";
 

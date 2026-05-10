@@ -11,11 +11,9 @@ using Vomplayer.Wayland;
 
 namespace Vomplayer.ViewModels;
 
-// Encapsulates one video's state: its Playback, its Playlist, all per-load tracking, and (eventually — phase 2) its HDR policy.
+// Encapsulates one video's state: its Playback, its Playlist, its per-instance HDR/VRR policy, and all per-load tracking. `ViewModelMain` is a coordinator that owns one or two of these — Primary always, Secondary lazily under PiP — and routes transport across them.
 //
-// `ViewModelMain` is a coordinator that owns one or two of these. Phase 1: VM owns exactly one (Primary) and proxies its public surface through. Phase 4: VM owns up to two and dispatches transport commands across both when linked.
-//
-// AutoAdvanceEnabled gates the per-context EOF-rising-edge auto-advance. Default true preserves single-video behavior. The coordinator (phase 4) flips it to false on both contexts when a sibling exists, taking advance dispatch over itself (lockstep gate).
+// AutoAdvanceEnabled gates the per-context EOF-rising-edge auto-advance. Default true preserves single-video behavior; the coordinator flips it to false on both contexts when a sibling exists, taking advance dispatch over itself (lockstep gate).
 public sealed partial class VideoContext : ObservableObject, IDisposable
 {
     // Set VOMPL_LOG_PREFS=1 to trace per-directory preference save/apply paths to stderr. Useful for debugging "preferences aren't persisting / aren't being applied" reports — pinpoints whether the failure is in save (currentDirectoryKey null, Record never called) or apply (TracksReloaded not firing, Get returning null, Matcher rejecting).
@@ -117,7 +115,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     [ObservableProperty]
     private int? currentSubtitleId;
 
-    // Computed: currentFileLoaded && playback.IsEofReached && DurationSeconds > 0. Mirrors the three-gate auto-advance condition. Coordinator (phase 4) subscribes to PropertyChanged on this to drive lockstep advance when both contexts are at playable EOF.
+    // Computed: currentFileLoaded && playback.IsEofReached && DurationSeconds > 0. Mirrors the three-gate auto-advance condition. The coordinator subscribes to PropertyChanged on this to drive lockstep advance when both contexts are at playable EOF.
     [ObservableProperty]
     private bool isAtPlayableEof;
 
@@ -179,7 +177,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
     }
 
-    // The Playback this context drives. Exposed for the coordinator's transport fan-out (phase 4 calls playback methods on each context's Playback) and for diagnostic-overlay readouts.
+    // The Playback this context drives. Exposed for the coordinator's transport fan-out (calls playback methods on each context's Playback) and for diagnostic-overlay readouts.
     public IPlayback Playback
     {
         get
@@ -439,7 +437,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
     }
 
-    // Coordinator-side advance entry point (phase 4): advance the playlist by one and load the new current item. Returns true if an advance happened, false if the playlist was already at the end. Today's per-context auto-advance handler also routes through this method when AutoAdvanceEnabled is true.
+    // Coordinator-side advance entry point: advance the playlist by one and load the new current item. Returns true if an advance happened, false if the playlist was already at the end. The per-context auto-advance handler also routes through this method when AutoAdvanceEnabled is true.
     public bool AdvanceAndLoadIfPossible()
     {
         var next = Playlist.Advance();

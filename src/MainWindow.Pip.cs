@@ -52,12 +52,12 @@ public partial class MainWindow
     // True while a corner-resize drag is active. Used alongside pipMoveClaimed to keep the grip visible mid-drag even if the pointer briefly slips outside the wrapper's bounds (which would otherwise fire EventControllerMotion::leave and hide the grip).
     private bool pipResizeActive;
 
-    // Stream-selector toolbar fields. Constructed in Phase 4 (BuildStreamSelectorToolbar). Declared here as nullable so OnViewModelPipPropertyChanged + SyncStreamSelectorButtons can defensively no-op pre-build, and so the menu refactor in Phase 6 can null-check before calling SetEnabled. The ToggleButton[] is indexed by VideoSlot (Primary=0, Secondary=1).
+    // Stream-selector toolbar fields. Constructed in BuildStreamSelectorToolbar; nullable so OnViewModelPipPropertyChanged + SyncStreamSelectorButtons can no-op pre-build (the build runs from MainWindow's ctor before any property change can fire). The ToggleButton[] is indexed by VideoSlot (Primary=0, Secondary=1).
     private Gtk.Box? streamSelectorToolbar;
     private Gtk.ToggleButton[]? streamSelectorButtons;
     // Re-entrancy guard for the OnToggled handler: when SyncStreamSelectorButtons pushes button state from VM to UI, the SetActive call would re-fire OnToggled and bounce back to SetSelected. The guard suppresses the inner SetSelected call during VM→UI sync.
     private bool suppressSelectorToggleSignal;
-    // Menu action handles for sensitivity updates from OnViewModelPipPropertyChanged. Filled in by BuildMenuBar (Phase 6).
+    // Menu action handles for sensitivity updates from OnViewModelPipPropertyChanged. Populated by BuildMenuBar.
     private Gio.SimpleAction? addStreamAction;
     private Gio.SimpleAction? deleteStreamAction;
 
@@ -810,7 +810,7 @@ public partial class MainWindow
         }
     }
 
-    // Phase 6 menu refactor will populate this with addStreamAction / deleteStreamAction sensitivity updates. Defined as an empty no-op for now so OnViewModelPipPropertyChanged compiles in advance of the menu rewrite.
+    // Mutually-exclusive enable: Add Stream when PiP is off, Delete Stream when PiP is on. The action handles are populated by BuildMenuBar; null-guarded so an early invocation pre-menu-build is a no-op.
     private void SyncStreamMenuActionSensitivity()
     {
         if (addStreamAction != null)
@@ -823,7 +823,7 @@ public partial class MainWindow
         }
     }
 
-    // Phase 4 will wire up the toolbar buttons and define real bodies; declared here so OnViewModelPipPropertyChanged compiles ahead of the toolbar build.
+    // Toolbar visibility is governed solely by IsPipEnabled — a single-stream session never shows it. Null-guarded for the brief pre-build window.
     private void UpdateStreamSelectorVisibility()
     {
         if (streamSelectorToolbar != null)
@@ -832,9 +832,9 @@ public partial class MainWindow
         }
     }
 
+    // VM → UI sync: set each button's Active state from viewModel.SelectedSlot. The re-entrancy guard prevents the resulting OnToggled fires from bouncing back into the VM.
     private void SyncStreamSelectorButtons()
     {
-        // Phase 4 fills this in. The body sets each button's Active state from viewModel.SelectedSlot with a re-entrancy guard.
         if (streamSelectorButtons == null)
         {
             return;

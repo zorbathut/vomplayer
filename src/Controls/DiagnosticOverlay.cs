@@ -6,7 +6,7 @@ namespace Vomplayer.Controls;
 
 // Toggleable diagnostic panel for hwdec / source-HDR / output-HDR / VRR. The underlying Widget is added as an overlay child of MainWindow.videoOverlay, anchored top-right. Updates are timer-driven (1 Hz) rather than observable-bound: the overlay's commit cadence must stay well below KWin's VRR-engage hysteresis, and binding to per-frame properties like time-pos would defeat that.
 //
-// Reads from a Func<VideoContext> provider so MainWindow can swap which context the overlay reflects when the active video changes (Phase 5+); in Phase 2 the provider always returns Primary. The VideoSurface accessor is similarly callback-shaped: Phase 5+ swaps it to point at the active video's surface.
+// Reads from a Func<VideoContext> provider so MainWindow can swap which context the overlay reflects when the SelectedSlot moves (today's provider returns viewModel.SingleTarget). The VideoSurface accessor is similarly callback-shaped so the surface follows the active context too.
 //
 // Not a Gtk.Box subclass: GirCore's GObject subclassing story is fragile. Composition over inheritance — we own a Gtk.Box and expose it via Widget.
 public sealed class DiagnosticOverlay : IDisposable
@@ -29,7 +29,7 @@ public sealed class DiagnosticOverlay : IDisposable
         }
     }
 
-    // Convenience overload for the common case where the surface is fixed for the overlay's lifetime (Phase 2 / single-context, or Phase 5+ when active wraps the same Wayland surface). Callers that want active-aware surface routing should use the Func overload directly.
+    // Convenience overload for callers with a single fixed VideoSurface for the overlay's lifetime. Callers that want SelectedSlot-aware surface routing (PiP) should use the Func overload directly.
     public DiagnosticOverlay(Func<VideoContext> activeContextProvider, VideoSurface? videoSurface)
         : this(activeContextProvider, () => videoSurface)
     {

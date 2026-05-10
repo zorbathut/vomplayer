@@ -82,7 +82,6 @@ public partial class ViewModelMainTests
         public bool IsSourceHdr { get; set; }
         public string? HwdecCurrent { get; set; }
         public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
-        public string DiagTag { get; set; } = "?";
         public int EnableHdrOutputCalls { get; private set; }
         public int DisableHdrOutputCalls { get; private set; }
         public bool IsSourceFpsTrusted { get; set; } = true;

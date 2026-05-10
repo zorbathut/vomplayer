@@ -230,12 +230,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     public ViewModelMain(IPlayback playback, IFilePicker filePicker, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt)
     {
-        if (playback == null)
-        {
-            throw new ArgumentNullException(nameof(playback));
-        }
-        // VideoContext does its own null checks for the other ctor args; we only catch playback eagerly above so the DiagTag write below doesn't NRE before VideoContext's own check fires.
-        playback.DiagTag = "primary";
         Primary = new VideoContext(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         Primary.PropertyChanged += OnContextPropertyChanged;
         // File-load resets Primary.Position to 0; an in-flight implicit-burst anchor from the previous file would mis-anchor the first SeekTo against the new file. Subscribe directly to the playback (not VideoContext, since the anchor is purely a coordinator concern and doesn't need to flow through the context's mirror plumbing).
@@ -324,7 +318,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             return;
         }
         Secondary = secondary;
-        secondary.Playback.DiagTag = "secondary";
         Primary.AutoAdvanceEnabled = false;
         secondary.AutoAdvanceEnabled = false;
         secondary.PropertyChanged += OnContextPropertyChanged;
@@ -603,31 +596,25 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     public void SeekTo(double normalizedPosition)
     {
-        Vomplayer.Playback.SyncDiag.Log($"VM.SeekTo({normalizedPosition:F4}) selected={(SelectedContext == null ? "<sync>" : (SelectedContext == Primary ? "primary" : "secondary"))} hasSecondary={Secondary != null} primaryPos={Primary.Position.TotalSeconds:F3} primaryDur={Primary.Duration.TotalSeconds:F3} secondaryPos={Secondary?.Position.TotalSeconds.ToString("F3") ?? "-"}");
         if (SelectedContext != null)
         {
-            Vomplayer.Playback.SyncDiag.Log("  → isolated route to selected context");
             SelectedContext.SeekTo(normalizedPosition);
             return;
         }
         double primaryTargetSeconds = normalizedPosition * Primary.Duration.TotalSeconds;
         long now = NowProvider();
         double anchorSeconds;
-        bool usedBurstAnchor;
         if (lastSyncSeekPrimaryTargetSeconds.HasValue && (now - lastSyncSeekTimestampTicks) <= SyncSeekImplicitBurstTicks)
         {
             anchorSeconds = lastSyncSeekPrimaryTargetSeconds.Value;
-            usedBurstAnchor = true;
         }
         else
         {
             anchorSeconds = Primary.Position.TotalSeconds;
-            usedBurstAnchor = false;
         }
         lastSyncSeekPrimaryTargetSeconds = primaryTargetSeconds;
         lastSyncSeekTimestampTicks = now;
         double deltaSeconds = primaryTargetSeconds - anchorSeconds;
-        Vomplayer.Playback.SyncDiag.Log($"  primaryTarget={primaryTargetSeconds:F3} anchor={anchorSeconds:F3} (burst={usedBurstAnchor}) → deltaSeconds={deltaSeconds:F3}");
         Primary.SeekTo(normalizedPosition);
         if (Secondary != null)
         {
@@ -691,13 +678,9 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Already absolute-delta and uniform across both contexts — mpv handles per-context edge clamping. Same fan-out for both isolated and sync modes; isolated reduces to a one-element loop. Invalidates the SeekTo anchor since this mutates Primary's position outside the SeekTo loop.
     public void SeekRelative(double seconds)
     {
-        Vomplayer.Playback.SyncDiag.Log($"VM.SeekRelative({seconds:F3}) selected={(SelectedContext == null ? "<sync>" : (SelectedContext == Primary ? "primary" : "secondary"))} hasSecondary={Secondary != null} primaryPos={Primary.Position.TotalSeconds:F3} secondaryPos={Secondary?.Position.TotalSeconds.ToString("F3") ?? "-"}");
         InvalidateSyncSeekAnchor();
-        int n = 0;
         foreach (var ctx in RoutingTargets())
         {
-            string tag = ctx == Primary ? "primary" : "secondary";
-            Vomplayer.Playback.SyncDiag.Log($"  → fan-out #{++n} to {tag}");
             ctx.SeekRelative(seconds);
         }
         // Sync-mode fan-out: same wall-clock skew rationale as SeekTo — both seeks land at slightly different real times. Schedule corrective seek. Selected mode bypasses (only one context received the seek; nothing to correct).
@@ -720,34 +703,28 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Sync-mode StepFrame: advance Primary by one frame (mpv's atomic frame-step / frame-back-step, which also pauses Primary as a side effect). On Secondary, fire mpv's frame-step too — that's atomic-pause-and-step on its end, which avoids the SetPaused/SeekRelative race where mpv could decode a few frames between the two dispatcher commands while Secondary is mid-playback. Then apply a corrective SeekRelative on Secondary equal to the *difference* between Primary's frame duration and Secondary's, so Secondary's net move matches Primary's frame duration regardless of fps mismatch. When Secondary's own fps is unknown, assume it matches Primary's (correction = 0). When Primary's fps is unknown, fall back to per-context frame-step — drift is bounded to ~one frame per step.
     private void StepFrameInternal(bool forward)
     {
-        Vomplayer.Playback.SyncDiag.Log($"VM.StepFrame({(forward ? "fwd" : "back")}) selected={(SelectedContext == null ? "<sync>" : (SelectedContext == Primary ? "primary" : "secondary"))} hasSecondary={Secondary != null} primaryFps={Primary.VideoFps?.ToString("F3") ?? "-"} secondaryFps={Secondary?.VideoFps?.ToString("F3") ?? "-"}");
         InvalidateSyncSeekAnchor();
         if (SelectedContext != null)
         {
-            Vomplayer.Playback.SyncDiag.Log("  → isolated route to selected context");
             if (forward) { SelectedContext.StepFrameForward(); } else { SelectedContext.StepFrameBack(); }
             return;
         }
         if (Secondary == null)
         {
-            Vomplayer.Playback.SyncDiag.Log("  → primary-only (no secondary)");
             if (forward) { Primary.StepFrameForward(); } else { Primary.StepFrameBack(); }
             return;
         }
-        Vomplayer.Playback.SyncDiag.Log("  → step both contexts");
         if (forward) { Primary.StepFrameForward(); Secondary.StepFrameForward(); }
         else { Primary.StepFrameBack(); Secondary.StepFrameBack(); }
         double? primaryFps = Primary.VideoFps;
         if (primaryFps == null)
         {
-            Vomplayer.Playback.SyncDiag.Log("  → no primaryFps, no correction (fan-out only)");
             return;
         }
         double secondaryFps = Secondary.VideoFps ?? primaryFps.Value;
         double primaryFrameDelta = (forward ? 1.0 : -1.0) / primaryFps.Value;
         double secondaryFrameDelta = (forward ? 1.0 : -1.0) / secondaryFps;
         double correctionSeconds = primaryFrameDelta - secondaryFrameDelta;
-        Vomplayer.Playback.SyncDiag.Log($"  → correction={correctionSeconds:F6}s");
         if (correctionSeconds != 0.0)
         {
             Secondary.SeekRelative(correctionSeconds);
@@ -757,24 +734,20 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Sync-mode StepChapter: derive Primary's resulting target from its mirror Chapters list and apply the same absolute-seconds delta to Secondary. The general `targetIndex = currentIndex + delta` math handles the pre-chapter-0 case (currentIndex == -1) too: `add chapter +1` from there lands at chapter 0 (-1 + 1 = 0), and `add chapter -1` underflows to -2 → fan-out fallback (correctly, since there's nothing before chapter 0). Out-of-range past either end falls back to per-context StepChapter so both mpv-clamp independently — reproducing mpv's exact clamp-seek semantics VM-side isn't worth the fragility. When Primary has no chapters at all, Primary.StepChapter is a no-op upstream; we still issue Secondary.StepChapter so Secondary's own chapters (if any) advance.
     public void StepChapter(int delta)
     {
-        Vomplayer.Playback.SyncDiag.Log($"VM.StepChapter({delta}) selected={(SelectedContext == null ? "<sync>" : (SelectedContext == Primary ? "primary" : "secondary"))} hasSecondary={Secondary != null}");
         InvalidateSyncSeekAnchor();
         if (SelectedContext != null)
         {
-            Vomplayer.Playback.SyncDiag.Log("  → isolated route to selected context");
             SelectedContext.StepChapter(delta);
             return;
         }
         if (Secondary == null)
         {
-            Vomplayer.Playback.SyncDiag.Log("  → primary-only (no secondary)");
             Primary.StepChapter(delta);
             return;
         }
         var chapters = Primary.Chapters;
         if (chapters.Count == 0)
         {
-            Vomplayer.Playback.SyncDiag.Log("  → no chapters on primary; fan-out");
             Primary.StepChapter(delta);
             Secondary.StepChapter(delta);
             // Per-context fan-out lands the two videos at independent chapter timestamps — the previously-captured offset no longer reflects user intent. Clear so the next correction edge lazy-captures from the post-fan-out state instead of trying to defend the stale invariant. We deliberately do NOT raise PostEdgeCorrectionRequested here: a correction would yank Secondary back to the OLD offset, undoing the fan-out the user implicitly accepted.
@@ -786,7 +759,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         int targetIndex = currentIndex + delta;
         if (targetIndex < 0 || targetIndex >= chapters.Count)
         {
-            Vomplayer.Playback.SyncDiag.Log($"  → out-of-range targetIndex={targetIndex} (chapters={chapters.Count}); fan-out");
             Primary.StepChapter(delta);
             Secondary.StepChapter(delta);
             // Same rationale as the no-chapters fan-out above.
@@ -795,7 +767,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         double primaryTargetSeconds = chapters[targetIndex].TimeSeconds;
         double deltaSeconds = primaryTargetSeconds - primaryPos;
-        Vomplayer.Playback.SyncDiag.Log($"  → primary chapter {currentIndex}→{targetIndex} target={primaryTargetSeconds:F3} primaryPos={primaryPos:F3} deltaSeconds={deltaSeconds:F3}");
         Primary.StepChapter(delta);
         Secondary.SeekRelative(deltaSeconds);
         // Same post-edge correction rationale as SeekTo: both seeks finish at independent wall-clock times.

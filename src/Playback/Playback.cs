@@ -158,9 +158,6 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
     }
 
-    // Diagnostic tag for VOMPL_LOG_SYNC=1 traces. Set by wiring code that knows which slot this Playback belongs to ("primary" / "secondary"); empty by default so untagged instances log as "?". Only consumed by SyncDiag.Log call sites in this file.
-    public string DiagTag { get; set; } = "?";
-
     // Trust monitor for the declared container-fps. Reset at LoadFile (declared=0 makes it inert) and again when container-fps lands with a real value. Estimated-vf-fps observations feed into it; transitions to Untrusted fire IsSourceFpsTrustedChanged (deduped against the last published bool).
     private readonly FpsTrustMonitor fpsTrustMonitor = new();
     private readonly Func<double> nowSecondsProvider;
@@ -511,10 +508,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
         // libmpv aborts the host process (`free(): invalid pointer`) if a `seek` command runs before any file is loaded. Gate on DurationSeconds, which is 0 pre-load and positive once mpv has probed a real file. Streams and unseekable inputs report duration=0 too, where mpv itself wouldn't honor the seek anyway.
         if (DurationSeconds <= 0)
         {
-            SyncDiag.Log($"  Playback[{DiagTag}].Seek({seconds:F3}) BLOCKED (Duration<=0)");
             return;
         }
-        SyncDiag.Log($"  Playback[{DiagTag}].Seek({seconds:F3}) → mpv command 'seek {seconds:F3} absolute+exact' (pre-cmd Position={PositionSeconds:F3})");
         var target = seconds.ToString("F3", CultureInfo.InvariantCulture);
         // `+exact`: mpv's `seek` command defaults to `keyframes`, which lands at the nearest keyframe at-or-before the requested target (NOT at the target itself). For PiP sync mode this is fatal — Primary and Secondary have independent keyframe schedules, so the same delta lands at different absolute positions in each, causing the streams to drift apart on every seek (the bug the implicit-burst anchor / per-context relative-seek work was *trying* to fix at a higher layer, but couldn't, because mpv was rounding both videos differently underneath). `exact` forces the precise hr-seek path so both videos land on the requested time. Cost is the demuxer rewinds to the previous keyframe and silently decodes forward to the target — adds latency, but for typical 1–10s keyframe intervals the user never notices.
         dispatcher.Post(h => h.Command("seek", target, "absolute+exact"));
@@ -525,10 +520,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
     {
         if (DurationSeconds <= 0)
         {
-            SyncDiag.Log($"  Playback[{DiagTag}].SeekRelative({seconds:F3}) BLOCKED (Duration<=0)");
             return;
         }
-        SyncDiag.Log($"  Playback[{DiagTag}].SeekRelative({seconds:F3}) → mpv command 'seek {seconds:F3} relative+exact' (pre-cmd Position={PositionSeconds:F3})");
         var target = seconds.ToString("F3", CultureInfo.InvariantCulture);
         // `+exact`: see the rationale on Seek above. The keyframe-snap default is even more visible on relative seeks because the user's mental model is "go back N seconds" — landing 1–10s further back than asked is a UX regression even in single-video mode.
         dispatcher.Post(h => h.Command("seek", target, "relative+exact"));
@@ -539,10 +532,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
     {
         if (DurationSeconds <= 0)
         {
-            SyncDiag.Log($"  Playback[{DiagTag}].StepFrameForward BLOCKED (Duration<=0)");
             return;
         }
-        SyncDiag.Log($"  Playback[{DiagTag}].StepFrameForward → mpv command 'frame-step' (pre-cmd Position={PositionSeconds:F3})");
         dispatcher.Post(h => h.Command("frame-step"));
     }
 
@@ -550,10 +541,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
     {
         if (DurationSeconds <= 0)
         {
-            SyncDiag.Log($"  Playback[{DiagTag}].StepFrameBack BLOCKED (Duration<=0)");
             return;
         }
-        SyncDiag.Log($"  Playback[{DiagTag}].StepFrameBack → mpv command 'frame-back-step' (pre-cmd Position={PositionSeconds:F3})");
         dispatcher.Post(h => h.Command("frame-back-step"));
     }
 
@@ -561,10 +550,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
     {
         if (DurationSeconds <= 0)
         {
-            SyncDiag.Log($"  Playback[{DiagTag}].StepChapter({delta}) BLOCKED (Duration<=0)");
             return;
         }
-        SyncDiag.Log($"  Playback[{DiagTag}].StepChapter({delta}) → mpv command 'add chapter {delta}' (pre-cmd Position={PositionSeconds:F3})");
         var deltaStr = delta.ToString(CultureInfo.InvariantCulture);
         dispatcher.Post(h => h.Command("add", "chapter", deltaStr));
     }
@@ -584,12 +571,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         switch (change.Name)
         {
             case "time-pos":
-                double newPos = change.Value.AsDouble ?? 0;
-                if (newPos != PositionSeconds)
-                {
-                    SyncDiag.Log($"  Playback[{DiagTag}] time-pos echo: {PositionSeconds:F3} → {newPos:F3}");
-                }
-                PositionSeconds = newPos;
+                PositionSeconds = change.Value.AsDouble ?? 0;
                 break;
             case "duration":
                 DurationSeconds = change.Value.AsDouble ?? 0;

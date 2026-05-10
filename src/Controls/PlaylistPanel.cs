@@ -11,7 +11,7 @@ namespace Vomplayer.Controls;
 // SetActivateOnSingleClick(false): the default. Single-click selects, double-click activates → PlayPlaylistItem. Single-click activate would fight drag-reorder (every press would also fire row-activated and reload the file the user was trying to drag).
 public sealed class PlaylistPanel : IDisposable
 {
-    // Mutable so Rebind can swap them when the active VideoContext changes (Phase 5: PiP active swap). The Changed subscription is moved across with the swap so the panel always tracks the bound playlist.
+    // Mutable so Rebind can swap them when the active VideoContext changes (PiP SelectedSlot transitions). The Changed subscription moves with the swap so the panel always tracks the bound playlist.
     private Playlist playlist;
     private Action<int> playItem;
     private readonly Gtk.ListBox listBox;
