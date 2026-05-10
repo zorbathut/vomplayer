@@ -16,41 +16,78 @@ App code is MIT. libmpv is LGPLv2.1+ (dynamic linking keeps us permissive). This
 
 ```
 src/
-  Program.cs             # entry, arg parsing, Gtk.Application wiring, Playback construction
-  MainWindow.cs          # code-only GTK4 window: widgets, input controllers, VM <-> view glue
-  MainWindow.Menu.cs     # menu bar + Gio.SimpleAction registration + accelerators
+  Program.cs             # entry, arg parsing, Gtk.Application wiring, primary Playback construction, StateDatabase open
+  GLibLogDiag.cs         # g_log_set_writer_func — adds C# stack traces to GLib ERROR/CRITICAL
   Epoxy.cs               # eglGetProcAddress + glGetIntegerv for FBO binding
   LibC.cs                # setlocale(LC_NUMERIC,"C") — mpv refuses non-C LC_NUMERIC
+  MainWindow.cs          # code-only GTK4 window: widgets, input controllers, fullscreen / autohide / screensaver, VM <-> view glue
+  MainWindow.Menu.cs     # menubar + Gio.SimpleAction registration + per-kind track menus + accel refresh + File→Recent
+  MainWindow.Pip.cs      # picture-in-picture: secondary widget set, drag/resize, layout, post-edge correction timer, stream-selector toolbar
+  HotkeysDialog.cs       # preferences UI for binding HotkeyAction → Trigger
+
   Controls/
-    VideoView.cs         # Gtk.GLArea path: GLArea-owned FBO, mpv renders into it
-    VideoArea.cs         # Wayland path: DrawingArea that paints nothing, emits GeometryChanged
+    VideoView.cs           # Gtk.GLArea path: GLArea-owned FBO, mpv renders into it
+    VideoArea.cs           # Wayland path: DrawingArea that paints nothing, emits GeometryChanged
+    ChapterScrubber.cs     # seek-scale + chapter-mark overlay with click-to-seek
+    PlaylistPanel.cs       # rebindable list view bound to a VideoContext's Playlist
+    DiagnosticOverlay.cs   # 1 Hz read-out of HDR/VRR/hwdec/sync state, gated by Help → Diagnostic Overlay
+    DiagnosticFormatter.cs # pure: readout fields → string lines (testable)
+
   Mpv/
     LibMpv.cs            # P/Invoke surface for libmpv (client + render_context)
     MpvClient.cs         # thin C# wrapper: events, observed properties, commands
     MpvDispatcher.cs     # worker thread that serializes client-API calls; hands out ref-struct MpvHandle inside Post callbacks
     MpvRenderContext.cs  # mpv_render_context_* wrapper, ADVANCED_CONTROL contract
+
   Playback/
-    IPlayback.cs         # interface the VM depends on
-    Playback.cs          # owns MpvClient, maps mpv events -> ObservableObject properties
+    IPlayback.cs         # interface VideoContext depends on
+    Playback.cs          # owns MpvDispatcher; maps mpv events → ObservableObject properties; hwdec transcript ring; HDR transition tracking; frame-multiplier filter; FpsTrustMonitor wiring
+    FpsTrustMonitor.cs   # pure: declared-vs-estimated divergence accumulator with sticky-untrusted state
+
   Services/
-    IFilePicker.cs
-    FilePickerGtk.cs     # Gtk.FileDialog
+    IFilePicker.cs / FilePickerGtk.cs   # Gtk.FileDialog
+    IUrlPrompt.cs / UrlPromptGtk.cs     # Gtk dialog for URL entry + download progress
+    IUrlDownloader.cs                   # interface: probe (--flat-playlist) + download (with progress + cancel)
+    YtDlpDownloader.cs                  # IUrlDownloader spawning yt-dlp
+    UrlDownloadCache.cs                 # XDG-cache-dir-rooted, mtime-based stale sweep
+
   UserData/
-    UserDataPaths.cs     # XDG-aware locations for config.toml and state.db; VOMPL_CONFIG_DIR / VOMPL_STATE_DIR overrides for tests / portable installs
-    UserConfig.cs        # TOML, Tomlyn-backed; load-or-defaults (no file is written automatically — fresh installs have no config.toml). Currently only [placeholder].example, deliberately throwaway
-    IRecentFiles.cs      # interface the VM depends on
-    RecentFiles.cs       # SQLite-backed; WAL mode, append-only Migrations[] registry walked against PRAGMA user_version. Adding a v(N+1) is one append + one new migration test that pre-stages a vN DB via the internal OpenConnectionAndMigrateTo escape hatch and verifies data survives the upgrade
-  Util/TimeFormatter.cs
+    UserDataPaths.cs       # XDG-aware paths; VOMPL_CONFIG_DIR / VOMPL_STATE_DIR overrides for tests / portable installs
+    UserConfig.cs          # TOML, Tomlyn-backed; load-or-defaults; today only [hotkeys]
+    Hotkeys.cs             # HotkeyAction enum, Trigger discriminated record (Key | MouseClick), HotkeyMap, defaults
+    StateDatabase.cs       # owns the SQLite connection + append-only Migrations[] registry walked vs PRAGMA user_version
+    IRecentFiles.cs / RecentFiles.cs              # SQLite-backed; recents + per-file resume position
+    ISavedPlaylists.cs / SavedPlaylists.cs        # SQLite-backed; autosaved playlist history (single + multi-stream PiP)
+    ITrackPreferences.cs / TrackPreferences.cs    # SQLite-backed; per-directory remembered video/audio/subtitle choice
+    TrackPreference.cs / TrackMatcher.cs / MediaKind.cs   # pure record + matcher used by both save and apply paths
+
+  Util/
+    TimeFormatter.cs        # MM:SS / H:MM:SS
+    IdleSafe.cs             # GLib.Functions.IdleAdd wrapper that keeps the delegate rooted across the queued tick
+    UriListDropTarget.cs    # async text/uri-list drop target; bypasses GTK's FileList portal-mediation (fails in Flatpak sandbox)
+    PipLayoutCalc.cs        # pure: PiP region rect + clamp + aspect-locked resize projection
+    ChapterHitTest.cs       # pure: scrubber pointer-x → chapter index
+    PlaylistMenuSelector.cs # pure: Recent menu's "10 entries with directory coverage" selection rule
+    MediaExtensions.cs      # known video extension set (folder-drop expansion)
+
   ViewModels/
-    ViewModelMain.cs     # CommunityToolkit.Mvvm, RelayCommands, seek scale glue
+    ViewModelMain.cs       # coordinator: owns Primary VideoContext (always), optional Secondary (PiP); routes transport (selected ⇒ isolated; null ⇒ broadcast/sync); sync-mode burst anchor + targetOffset + post-edge correction; lockstep advance gate
+    VideoContext.cs        # one per video stream: per-instance HDR/VRR policy, track-preference apply, resume-position save/apply, URL/yt-dlp routing, auto-advance EOF state machine, owned Playlist
+    Playlist.cs            # plain in-memory list + currentIndex + Changed event (no GTK dep — fully testable)
+    PlaylistAutosave.cs    # subscribes to bound contexts' Playlist.Changed; upserts the current GUID's row in SavedPlaylists; mints a new GUID on a Primary-Replace when the playlist becomes single-stream
+
   Wayland/
-    WaylandDetect.cs     # backend sniff via gdk_wayland_display_get_wl_display
-    VomplWayland.cs        # P/Invoke to libhdr_helper.so (subsurface + callbacks)
-    VideoSurface.cs      # Wayland-path orchestrator: window lifecycle, render loop, HDR/VRR exposure
-    FrameTimingBridge.cs # per-surface presentation-feedback accumulator, VRR ring, stats log
-    VrrClassifier.cs     # pure function: residual-against-T-grid classifier
-    HdrClassifier.cs     # pure function: wp_color_management_output_v1 tf_named -> HDR y/n
-    WaylandOutputRegistry.cs # process-global wl_output mode table (keyed by registry name)
+    WaylandDetect.cs                # backend sniff via gdk_wayland_display_get_wl_display
+    VomplWayland.cs                 # P/Invoke to libhdr_helper.so (subsurface + output callbacks)
+    VideoSurface.cs                 # Wayland-path orchestrator: window lifecycle, render loop, IHdrSink + IVrrSink to the per-context policy
+    IHdrSink.cs / IVrrSink.cs       # abstractions VideoContext consumes; null on the GLArea fallback path
+    FrameTimingBridge.cs            # per-surface presentation-feedback accumulator, VRR ring, stats log
+    VrrClassifier.cs                # pure: residual-against-T-grid classifier
+    HdrClassifier.cs                # pure: wp_color_management_output_v1 tf_named → HDR y/n
+    VrrPolicy.cs                    # pure: (sourceFps, vrrRange, fpsTrusted) → frame-multiplier decision
+    WaylandOutputRegistry.cs        # process-global wl_output mode/HDR/VRR table (keyed by registry name)
+    EdidParser.cs / EdidLookup.cs   # pure: parse Range Limits descriptor for VRR window from compositor-supplied EDID blob
+
   Native/
     hdr_helper.c                                # Wayland ABI shim, see "ABI boundary" below
     color-management-v1-*                       # wayland-scanner output
@@ -70,13 +107,13 @@ Two runtime-selected paths, chosen by `WaylandDetect.IsWaylandBackend` in `MainW
 - The subsurface is always explicitly tagged via `wp_color_management_v1`: PQ/BT.2020 when the source is HDR, GAMMA22/BT.709 when SDR. Per the protocol spec, an untagged surface is "compositor implementation defined"; we observed that on KWin with an HDR output present the resulting handling blows out gamma22-encoded SDR output catastrophically on the SDR panel, so we don't leave the surface in that state. The GTK UI surface stays sRGB and renders correctly. HDR-vs-SDR tagging is driven by the source's transfer function alone, *not* the output's HDR-capability — when an HDR source lands on an SDR output, we still tag PQ and have mpv emit pass-through PQ; KWin's libplacebo-backed compositor tone-maps PQ→SDR for the SDR scan-out. This delegates HDR→SDR conversion to libplacebo (smplayer / `vo=gpu-next` quality) instead of mpv-via-libmpv's older `gl_video` curves, which clip highlights hard at the source mastering-display peak. Signals:
   - `Playback` observes `video-params/gamma` and fires `SourceHdrChanged(bool)` per-video.
   - `VideoSurface.CurrentOutputHdrChanged` fires on output-side change — `wl_surface.enter`/`leave` mutating the active-output set, or `wp_color_management_output_v1.image_description_changed` propagating through `WaylandOutputRegistry`. Per-output HDR-capability is detected by probing the preferred image description's `tf_named` (PQ/HLG ⇒ HDR); classification lives in `HdrClassifier` on the C# side.
-  - `MainWindow.ApplyHdrPolicy` combines the two signals and calls `VideoSurface.SetHdr` (stages `set_image_description` / `unset_image_description` that the next `eglSwapBuffers` flushes atomically with the first new-content buffer) and `Playback.EnableHdrOutput` / `DisableHdrOutput` for mpv's `target-*` targeting.
+  - `VideoContext.ApplyHdrPolicy` combines the two signals and calls `IHdrSink.SetHdr` (stages `set_image_description` / `unset_image_description` that the next `eglSwapBuffers` flushes atomically with the first new-content buffer) and `Playback.EnableHdrOutput` / `DisableHdrOutput` for mpv's `target-*` targeting. Every VideoContext has its own policy — Primary and Secondary HDR decisions are independent.
 - Controls overlaid in fullscreen (via `Gtk.Overlay` reparent) draw on top of the video with correct alpha.
 - Pointer input falls through to the parent (empty input region on the subsurface) so motion-driven auto-hide works.
 - `wp_presentation_feedback` per swap drives the `FrameTimingBridge` ring; VRR/fixed is classified against `wl_output.mode` refresh.
 
 **Gtk.GLArea fallback path (X11 / other backends).**
-`VideoView` is a `Gtk.GLArea`; mpv renders into GTK's owned FBO. HDR is not supported on this path — mpv tonemaps HDR source content down to SDR via its default `auto` targeting. Main-surface PQ tagging was tried and reverted: it produced a blown-out GTK UI (widgets render sRGB values into a surface KWin interprets as PQ) and couldn't be toggled per-file without tearing down the GTK surface.
+`VideoView` is a `Gtk.GLArea`; mpv renders into GTK's owned FBO. HDR is not supported on this path — mpv tonemaps HDR source content down to SDR via its default `auto` targeting. Main-surface PQ tagging was tried and reverted: it produced a blown-out GTK UI (widgets render sRGB values into a surface KWin interprets as PQ) and couldn't be toggled per-file without tearing down the GTK surface. `IHdrSink`/`IVrrSink` are not attached on this path; `VideoContext` no-ops its policy methods when the sinks are null.
 
 ## Playback data flow and threading
 
@@ -89,7 +126,7 @@ Three distinct threads touch mpv, each with its own role:
 mpv event thread:                mpv-dispatcher worker:         GTK main thread:
   wakeup callback   --post--->     DrainEvents
                                      PropertyChanged  ---postToMainThread--->   Playback.ObservableProperties
-                                     FileLoaded/etc   ---postToMainThread--->   ViewModelMain -> widgets
+                                     FileLoaded/etc   ---postToMainThread--->   VideoContext mirrors -> ViewModelMain proxies -> widgets
 ```
 
 ```
@@ -104,19 +141,56 @@ mpv render thread:               GTK main thread:
 
 Why the dispatcher matters: `mpv_set_property_string` for VO properties (`target-prim`/`target-trc`/…) synchronously blocks until mpv_render_context_render acknowledges the change. That render call runs on the main thread via `IdleAdd`, so calling SetProperty from main → main blocks in SetProperty → IdleAdd can't fire → mpv core waits for render that can't happen → deadlock. Running SetProperty on the dispatcher worker breaks the cycle: main stays free to service the render IdleAdd while the worker blocks.
 
-Cross-thread coupling is isolated in exactly three places: `Playback` (constructor takes an `Action<Action> postToMainThread` so tests can pass `a => a()`), `MpvDispatcher` (worker thread + queue), and the render-queue coalescer in `VideoSurface`/`VideoView`.
+Cross-thread coupling per `Playback` is isolated in three places: the `Action<Action> postToMainThread` ctor seam (tests pass `a => a()`), the `MpvDispatcher` worker thread + queue, and the render-queue coalescer in `VideoSurface`/`VideoView`. PiP runs two `Playback` instances side by side (primary, plus a secondary constructed by `MainWindow.EnablePip`); each has its own copy of those three places, and the two share no state or synchronization. Cross-stream coordination lives in `ViewModelMain` and reaches mpv only via per-context `Playback` calls.
 
 `Playback` keeps `MpvClient` behind the `MpvDispatcher` boundary — `MpvClient` is `internal` and exposed only via the ref-struct `MpvHandle` inside `Post` callbacks. `AttachRenderSurface(Action<MpvDispatcher> attach)` hands out the dispatcher for render-context construction; consumers call `CreateRenderContext` on it rather than touching an mpv handle directly.
 
-## MVVM
+## MVVM and the multi-video coordinator
 
-- VM is `ViewModelMain` (CommunityToolkit.Mvvm `ObservableObject` + `[RelayCommand]`).
-- View is `MainWindow`, code-only GTK4. It subscribes to VM `PropertyChanged` and switches on property name to push widget updates. User actions go to VM commands.
-- Seek is the nontrivial interaction: a state machine (idle / holding / settling) in `MainWindow.cs` around the `Gtk.Scale`. See comments there.
+- VM is `ViewModelMain`, a coordinator over one or two `VideoContext`s. Constructed with the primary `Playback` plus the service set (file picker, recents, track prefs, URL prompt, URL downloader). PiP adds a secondary `Playback` lazily via `MainWindow.EnablePip`.
+- Each `VideoContext` (CommunityToolkit.Mvvm `ObservableObject`) wraps one `IPlayback`, mirrors its properties as observables, owns one `Playlist`, and runs that stream's HDR / VRR / track-preference / resume-position / auto-advance state machines. See the comments at the top of `VideoContext.cs` for the per-subsystem rationale; this doc deliberately doesn't restate them.
+- View is `MainWindow` (with `.Menu.cs` and `.Pip.cs` partials), code-only GTK4. It subscribes to VM `PropertyChanged` and switches on property name to push widget updates. User actions go to VM commands (`[RelayCommand]`) or imperative methods.
+- Read-only proxy properties on `ViewModelMain` reflect `SingleTarget` (= SelectedContext if set, else Primary). PropertyChanged is forwarded only when the source context matches SingleTarget; SelectedSlot transitions re-fire every proxy so the view re-reads from the new target.
+- Seek is the nontrivial single-video interaction: a state machine (idle / holding / settling) in `MainWindow.cs` around the `Gtk.Scale`. See comments there.
+
+**PiP routing.** `ViewModelMain.SelectedSlot` governs every transport command:
+- `null` ⇒ broadcast/sync. Transport (Seek*, StepFrame*, StepChapter) fans out to both contexts; PlayPause converges any drifted pair to a single target. Per-video commands (Volume, Mute, Tracks, Open*, Load*) target Primary.
+- non-null ⇒ isolated. Every command goes to the selected context only.
+
+**Sync-mode coordination.** When two contexts run and SelectedSlot is null, `ViewModelMain` defends a `Secondary.Position = Primary.Position + targetOffset` invariant via three mechanisms — a 250 ms burst anchor for rapid `SeekTo` storms, a captured `targetOffsetSeconds` invalidated on either `FileLoaded`, and a debounced post-edge corrective seek (`PostEdgeCorrectionRequested` → 500 ms GLib timer in `MainWindow.Pip.cs` → `ApplyPostEdgeCorrection`). Per-context auto-advance is suppressed; `CheckLockstepAdvance` advances both together. The constants and the rationale for each live in code comments on `ViewModelMain.SeekTo`, `OnPostEdgeCorrectionRequested`, and `CheckLockstepAdvance`.
+
+**PiP lifecycle.** `MainWindow.Pip.cs:EnablePip` builds the secondary `Playback`, `VideoSurface`/`VideoView`, and `VideoContext`, then hands the context to `ViewModelMain.EnablePip`. Disposal is split: MainWindow owns the secondary `Playback`'s teardown; `VideoContext.Dispose` only unsubscribes. Teardown ordering is documented in load-bearing comments at the call sites.
+
+## Hotkeys
+
+`HotkeyMap` (in `UserData/Hotkeys.cs`) is the runtime keymap, derived from `UserConfig.Hotkeys` at startup. `Trigger` is a discriminated record (`Key(keyval, mods)` | `MouseClick(button, clickCount)`); `HotkeyAction` is the bindable-action enum. Single dispatch site is `MainWindow.ExecuteAction`.
+
+Keyboard input goes through a window-level capture-phase `Gtk.EventControllerKey` so focused children never see bound keys (no double-fire on focused buttons). Mouse input on the video widgets goes through `Gtk.GestureClick`. Both routes canonicalize the trigger via `Trigger.MakeKey` (lowercases keyvals via `gdk_keyval_to_lower`, masks modifiers to GTK's default-mod-mask) so CapsLock and `<Shift>F`-style author forms compare correctly against live events.
+
+`HotkeysDialog` edits the runtime map; saving persists to `config.toml` and refreshes the menu accel labels via `MainWindow.RefreshMenuAccels` (Gio.MenuItem isn't live-bound to its parent — accel labels update via remove-and-reinsert at the same slot).
+
+## Persistence
+
+- **`config.toml`** (TOML, Tomlyn-backed). Today only `[hotkeys]`. Loaded eagerly at startup; saved on hotkey edits.
+- **`state.db`** (SQLite, `Microsoft.Data.Sqlite`, WAL). Owned by `StateDatabase`; per-feature persistence classes (`RecentFiles`, `TrackPreferences`, `SavedPlaylists`) take the `SqliteConnection` in their ctor. Append-only `Migrations[]` registry walked against `PRAGMA user_version`. Schema today:
+  - v1: `recent_files(path_or_uri UNIQUE, last_opened, open_count)`
+  - v2: `track_preferences(directory, kind, …)` PK `(directory, kind)`
+  - v3: `recent_files.position_seconds REAL` for per-file resume
+  - v4: `saved_playlists(guid PK, title, last_used_at, stream_count, payload_json)` — autosaved playlist history; payload is a JSON array of `{slot, current_index, items}`, schemaless room to grow
+
+  Adding a v(N+1) is one append + one new migration test that pre-stages a vN DB via the internal `OpenConnectionAndMigrateTo(path, N)` escape hatch and verifies data survives the upgrade. Never edit a published migration's body — that would silently change schema for users whose DB already passed through it.
+
+- **Saved-playlist autosave.** `PlaylistAutosave` subscribes to each bound context's `Playlist.Changed` and to the title-source `PropertyChanged` events. GUID-mint rule (decided purely from the Changed payload + bind state, no caller coordination): a Primary-Replace with no Secondary bound or Secondary's playlist empty mints a new GUID; everything else (incremental mutations, Secondary-Replaces, and Primary-Replaces while Secondary is also non-empty — i.e., one slot of a multi-stream entry being edited) re-uses the current GUID. Surfaces as File → Recent; `PlaylistMenuSelector` selects 10 entries with directory-coverage over the most-recent 5 distinct directories.
 
 ## VRR classification
 
 `wp_presentation_feedback.presented` fires per composited frame; the native shim forwards `(tv_ns, refresh_ns)` to `FrameTimingBridge` via a GCHandle trampoline. The bridge keeps a 60-sample ring of inter-frame deltas. `VrrClassifier` is pure: it compares the residual of each delta against the panel's nominal period `T = 1e9 / mode_mHz`. `T` comes from `wl_output.mode` (authoritative panel mode — KWin's `refresh_ns` field is unreliable on VRR-capable outputs).
+
+The panel's VRR window (min/max refresh) is parsed from EDID by `EdidParser` (Range Limits descriptor). KWin exposes EDID per-output via `kde_output_device_v2`, and `EdidLookup` resolves a registry name → EDID blob → VrrRange so the policy layer can ask "does this mode lie inside the panel's VRR window?".
+
+`VrrPolicy` is a pure function `(sourceFps, vrrRange, fpsTrusted) → multiplier decision`. For low-fps sources (24/25 fps) it produces an integer multiplier N ≥ 2 such that `N * sourceFps` lies inside the VRR window — `VideoContext.ApplyVrrPolicy` installs that as an mpv `vf=fps=…` filter.
+
+`FpsTrustMonitor` (consumed by `Playback`) compares mpv's declared `container-fps` against the rolling `estimated-vf-fps`. Sustained divergence within a file load flips the trust state; sticky-untrusted means `ApplyVrrPolicy` will clear the multiplier on VFR / mistagged-CFR sources rather than running them at the wrong rate.
 
 Identifiers across the ABI are `wl_output` registry names (uint32, stable for the session), not pointers — this keeps consumer lifetime decoupled from proxy lifetime.
 
@@ -126,22 +200,16 @@ Identifiers across the ABI are `wl_output` registry names (uint32, stable for th
 
 ## Tests
 
-NUnit in `test/`. Coverage is biased toward the code that's testable without a GTK/mpv runtime:
-- `VrrClassifierTests` — pure function, straightforward table tests.
-- `FrameTimingBridgeTests` — ring/stats accumulator with injected log sink.
-- `WaylandOutputRegistryTests` — static registry.
-- `MpvClientObserveTests`, `MpvPropertyValueTests`, `MpvRenderStructLayoutTests`, `MpvRenderContextContractTests` — marshalling/layout contracts that can be verified without a running mpv.
-- `PlaybackTests`, `ViewModelMainTests` — via `IPlayback` / `Action<Action>` seam.
-- `TimeFormatterTests` — trivial.
-
-UI (MainWindow / VideoView / VideoSurface at runtime) is not unit-tested; changes there require a manual smoke in a GTK session.
+NUnit in `test/`, biased toward code that's testable without a GTK/mpv runtime: pure functions, stateful units with injected clocks/sinks, marshalling/layout contracts, persistence (each test uses a temp dir and exercises real SQLite migrations), and the VM coordinator via the `IPlayback` + `Action<Action> postToMainThread` synchronous seam. UI (`MainWindow` / `VideoView` / `VideoSurface` at runtime) is not unit-tested; changes there require a manual smoke in a GTK session. `ls test/` for the inventory.
 
 ## Configuration / external libraries
 
 - `libmpv.so` — runtime required (`mpv_*`)
 - `libhdr_helper.so` — built from `src/Native/hdr_helper.c` + generated protocol glue
+- `yt-dlp` — runtime optional, required for the Open URL flow. `IUrlDownloader.IsAvailable()` gates the menu path; missing yt-dlp surfaces a clear "install yt-dlp" message rather than letting the user type a URL and then failing.
 - Tomlyn (NuGet) — TOML deserialization for `UserConfig`. 2.x uses `System.Text.Json.JsonNamingPolicy.SnakeCaseLower` for property naming so `[ui_section] some_key` maps to PascalCase POCO members
-- Microsoft.Data.Sqlite (NuGet) — SQLite for `RecentFiles` (and any future state-db tables). Bundles `SQLitePCLRaw.bundle_e_sqlite3`, so no system SQLite needed
+- Microsoft.Data.Sqlite (NuGet) — SQLite for `state.db`. Bundles `SQLitePCLRaw.bundle_e_sqlite3`, so no system SQLite needed
+- CommunityToolkit.Mvvm (NuGet) — `ObservableObject`, `[ObservableProperty]`, `[RelayCommand]` for VM/context plumbing
 - `libgtk-4.so.1`, `libgobject-2.0.so.0`, `libEGL.so.1`, `libGL.so.1`, `libc.so.6` — P/Invoke targets with explicit SONAMEs (bare `.so` names are dev-package symlinks that don't exist on runtime-only hosts)
 - GirCore 0.7.0 — note its `Gtk.EventControllerLegacy` `event` signal is not marshallable; `MainWindow.cs` connects that one signal via raw `g_signal_connect_data`.
 
