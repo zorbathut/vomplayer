@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 using Vomplayer.Controls;
 using Vomplayer.Playback;
 using Vomplayer.Services;
@@ -19,25 +18,6 @@ namespace Vomplayer;
 //   - GLArea path: video renders into Gtk.GLArea's FBO on the main surface (VideoView). HDR requests attach PQ to the main surface as before (known issue: UI looks blown out in HDR — accept on X11/Windows/macOS fallback).
 public sealed partial class MainWindow : Gtk.ApplicationWindow
 {
-    // Raw-signal P/Invoke. GirCore 0.7.0 cannot marshal Gtk.EventControllerLegacy's `event` signal payload: GdkEvent is its own fundamental GType (id 196), and GirCore's Value.Extract only handles GObject/Boxed/Enum/Flags/Param/Variant — it throws NotSupportedException for anything else. We connect to the signal via raw g_signal_connect_data and read the event type directly, skipping GirCore's extraction entirely.
-    // Explicit SONAMEs: `libgtk-4.so.1` / `libgobject-2.0.so.0` are the runtime-installed libraries. The bare `libgtk-4.so` / `libgobject-2.0.so` names only exist as dev-package symlinks and would fail NativeLibrary resolution on runtime-only hosts.
-    private const string GObjectLib = "libgobject-2.0.so.0";
-    private const string GtkLib = "libgtk-4.so.1";
-    private const string GLibLib = "libglib-2.0.so.0";
-    private const string GioLib = "libgio-2.0.so.0";
-
-    [LibraryImport(GObjectLib, EntryPoint = "g_signal_connect_data", StringMarshalling = StringMarshalling.Utf8)]
-    private static partial ulong SignalConnectData(IntPtr instance, string detailedSignal, IntPtr cHandler, IntPtr data, IntPtr destroyData, int connectFlags);
-
-    [LibraryImport(GObjectLib, EntryPoint = "g_signal_handler_disconnect")]
-    private static partial void SignalHandlerDisconnect(IntPtr instance, ulong handlerId);
-
-    [LibraryImport(GtkLib, EntryPoint = "gdk_event_get_event_type")]
-    private static partial int GdkEventGetEventType(IntPtr evt);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int SeekLegacyEventCallback(IntPtr sender, IntPtr evt, IntPtr userData);
-
     private readonly Playback.Playback playback;
     private readonly IRecentFiles recentFiles;
     private readonly ISavedPlaylists savedPlaylists;
@@ -50,7 +30,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly string configPath;
     private HotkeyMap hotkeys;
     private Gio.SimpleAction? diagnosticAction;
-    private readonly Gtk.Scale seekScale;
+    private readonly SeekScaleController seekScaleController;
     private readonly Controls.ChapterScrubber chapterScrubber;
     private readonly Gtk.Label positionLabel;
     private readonly Gtk.Label durationLabel;
@@ -99,19 +79,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     }
     // Screensaver/idle inhibit cookie returned by Gtk.Application.Inhibit. 0 ⇒ not currently inhibited (Gtk uses 0 as the failure / not-applied sentinel). Held while mpv reports core-idle=false (i.e. actually decoding/displaying); released on every transition back to idle (pause, EOF with keep-open, no file loaded) so we don't keep the system awake when playback parks at end-of-file.
     private uint screensaverInhibitCookie;
-    private bool updatingFromVm;
-    // Mirror of updatingFromVm but for the volume scale: VM PropertyChanged → SetValue must not bounce back through OnVolumeScaleValueChanged and re-call SetVolume, which would race mpv's echo and produce flicker. Same idea, separate flag so seek-scale settle logic can't accidentally swallow a volume update.
+    // VM-pushed volume update guard: VM PropertyChanged → SetValue must not bounce back through OnVolumeScaleValueChanged and re-call SetVolume, which would race mpv's echo and produce flicker.
     private bool updatingVolumeFromVm;
-    // Seek-scale state machine. idle = both false; holding = userHolding; settling = awaitingSeekSettle (post-release, waiting for mpv's in-flight seek to report a time-pos distinct from the pre-release one). `seekValueAtRelease` is the baseline we wait to move away from — gating on "time-pos has actually advanced" avoids a race where mpv fires `seeking=false` before its `time-pos` update, which would otherwise let a stale SeekValue push flicker the scale.
-    private bool userHolding;
-    private bool awaitingSeekSettle;
-    private double seekValueAtRelease;
-    // Dedupe OnValueChanged against the last value we sent to SeekTo, reset to NaN on each press. NaN comparison is always false so the first post-press value-change always seeks; subsequent emissions at the same value (from any source) are skipped. Cheap defense against spurious re-emissions.
-    private double lastUserSeek = double.NaN;
-    // Delegate is retained as an instance field so it stays rooted while the signal connection lives. Handler id + controller pointer let us disconnect synchronously in close-request, before the delegate field is nulled and before GTK tears the widget down — closing the narrow window where a late event could dispatch into a collectable delegate.
-    private SeekLegacyEventCallback? seekLegacyCallback;
-    private ulong seekLegacyHandlerId;
-    private IntPtr seekLegacyControllerHandle;
 
     public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
     {
@@ -201,13 +170,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         playPauseButton.SetTooltipText("Play");
         playPauseButton.SetSensitive(false);
 
-        seekScale = Gtk.Scale.NewWithRange(Gtk.Orientation.Horizontal, 0.0, 1.0, 0.001);
-        seekScale.SetHexpand(true);
-        seekScale.SetDrawValue(false);
-        seekScale.SetSensitive(false);
-        RemoveScaleLongPressGesture(seekScale);
-        // ChapterScrubber owns the seekScale's container slot from here on (it appends seekScale into its own vertical Gtk.Box). The scale itself is kept by reference for the existing seek-state-machine wiring (raw legacy event controller, OnValueChanged, etc.) — chapter markers are an additive concern.
-        chapterScrubber = new Controls.ChapterScrubber(seekScale);
+        seekScaleController = new SeekScaleController(playback);
+        seekScaleController.SeekRequested += v => viewModel.SeekTo(v);
+        // ChapterScrubber wraps the controller's scale in its own vertical Gtk.Box and adds chapter markers on top. The controller still owns the scale's input/state machine; the scrubber is purely additive layout.
+        chapterScrubber = new Controls.ChapterScrubber(seekScaleController.Scale);
         chapterScrubber.ChapterClicked += normalized => viewModel.SeekTo(normalized);
 
         positionLabel = Gtk.Label.New("00:00");
@@ -227,7 +193,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         volumeScale.SetValue(viewModel.Volume);
         volumeScale.SetSizeRequest(100, -1);
         volumeScale.SetTooltipText("Volume");
-        RemoveScaleLongPressGesture(volumeScale);
+        ScaleHelpers.RemoveLongPressGesture(volumeScale);
 
         controlsBox = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
         // Spacing around the bar comes from CSS padding on .vompl-controls-bar / .osd, not from widget margins. Margins sit OUTSIDE the background area — with a transparent window underneath, margins would show desktop through. Padding sits inside the background, so the bar's opaque fill extends to its outer edges. vompl-chrome gives it the theme bg; vompl-controls-bar adds the padding. Split so the fullscreen OSD swap (below) only touches the background/padding pair and leaves vompl-chrome off (OSD has its own semi-transparent fill).
@@ -286,21 +252,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         muteButton.OnClicked += (_, _) => viewModel.ToggleMute();
         volumeScale.OnValueChanged += OnVolumeScaleValueChanged;
 
-        seekScale.OnValueChanged += OnSeekScaleValueChanged;
-
-        // Gtk.Scale's internal gesture CLAIMS the pointer sequence on press, which denies any sibling gesture — their `released` signal never fires, `end`/`cancel` fire at claim-time instead. EventControllerLegacy is NOT a gesture (per gtk_widget_run_controllers), so it's unaffected by the claim protocol and sees raw ButtonPress/ButtonRelease at capture phase. We bypass GirCore's broken GdkEvent marshalling by using raw g_signal_connect_data; the callback returns 0 (gboolean FALSE) so the scale's gestures still receive the event — returning TRUE would short-circuit them and the slider would stop responding to mouse entirely.
-        var legacy = Gtk.EventControllerLegacy.New();
-        legacy.SetPropagationPhase(Gtk.PropagationPhase.Capture);
-        seekScale.AddController(legacy);
-
-        seekLegacyCallback = OnSeekScaleRawEvent;
-        seekLegacyControllerHandle = legacy.Handle.DangerousGetHandle();
-        seekLegacyHandlerId = SignalConnectData(
-            seekLegacyControllerHandle,
-            "event",
-            Marshal.GetFunctionPointerForDelegate(seekLegacyCallback),
-            IntPtr.Zero, IntPtr.Zero, 0);
-
         // Window-level key controller at Capture phase: f/F/Space/Escape work regardless of which child has focus. Capture pre-empts focused children, so a focused Gtk.Button never sees Space and can't double-fire play/pause. The scale uses arrow keys for seek; no text entry exists — nothing here is a key a focused child legitimately needs. Unlike EventControllerLegacy, OnKeyPressed delivers primitives (uint, uint, ModifierType), not a GdkEvent* — no GirCore marshalling hazard here.
         var keyController = Gtk.EventControllerKey.New();
         keyController.SetPropagationPhase(Gtk.PropagationPhase.Capture);
@@ -333,7 +284,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         viewModel.PropertyChanged += OnViewModelPipPropertyChanged;
-        playback.PropertyChanged += OnPlaybackPropertyChangedForSeekSettle;
         playback.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
         OnCloseRequest += OnWindowCloseRequest;
 
@@ -348,65 +298,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             return;
         }
         viewModel.SetVolume(volumeScale.GetValue());
-    }
-
-    // Seek on every user-driven change; `updatingFromVm` breaks the VM→scale→VM loop; `lastUserSeek` dedupes repeated emissions at the same value (see field comment). Scroll-wheel and keyboard Arrow keys take this path too — no press/release, so `userHolding` stays false and the standard VM-push flow resumes after each seek.
-    private void OnSeekScaleValueChanged(Gtk.Range sender, EventArgs e)
-    {
-        if (updatingFromVm)
-        {
-            return;
-        }
-        double v = seekScale.GetValue();
-        if (v == lastUserSeek)
-        {
-            return;
-        }
-        lastUserSeek = v;
-        viewModel.SeekTo(v);
-    }
-
-    // Callback marshalled into GTK via raw g_signal_connect_data. Runs on the main thread (GTK signal delivery). Reads the event type via P/Invoke (not GirCore) and drives the state machine. Always returns 0 (gboolean FALSE) so the scale's internal gestures still process the event — returning nonzero would short-circuit them.
-    private int OnSeekScaleRawEvent(IntPtr sender, IntPtr evt, IntPtr userData)
-    {
-        Gdk.EventType type = (Gdk.EventType)GdkEventGetEventType(evt);
-        switch (type)
-        {
-            case Gdk.EventType.ButtonPress:
-            case Gdk.EventType.TouchBegin:
-                userHolding = true;
-                awaitingSeekSettle = false;
-                lastUserSeek = double.NaN;
-                break;
-            case Gdk.EventType.ButtonRelease:
-            case Gdk.EventType.TouchEnd:
-            case Gdk.EventType.TouchCancel:
-            case Gdk.EventType.GrabBroken:
-                userHolding = false;
-                if (playback.IsSeeking)
-                {
-                    awaitingSeekSettle = true;
-                    seekValueAtRelease = viewModel.SeekValue;
-                }
-                else
-                {
-                    PushVmSeekValueToScale();
-                }
-                break;
-        }
-        return 0;
-    }
-
-    // mpv fires `seeking=false` and the new `time-pos` from the same playback-loop step, but the events may arrive in either order via the property-change queue. If `seeking` arrives first and we push VM.SeekValue right then, we'd push the pre-seek stale position and flicker old→new on the next tick. Instead, keep this handler as a pure safety net: clear `awaitingSeekSettle` and let the SeekValue-change handler do the push when VM.SeekValue moves away from the release-time baseline (see OnViewModelPropertyChanged case SeekValue).
-    private void OnPlaybackPropertyChangedForSeekSettle(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName == nameof(IPlayback.IsSeeking)
-            && awaitingSeekSettle && !playback.IsSeeking && !userHolding
-            && viewModel.SeekValue != seekValueAtRelease)
-        {
-            awaitingSeekSettle = false;
-            PushVmSeekValueToScale();
-        }
     }
 
     // Drive Gtk.Application.Inhibit/Uninhibit off mpv state. Predicate is `!IsCoreIdle || IsSeeking`: core-idle is the primary signal (and the right one over IsPaused, because mpv with keep-open=yes parks at EOF without setting pause=yes — IsPaused-driven inhibit would persist after a file ends). IsSeeking is folded in because mpv may briefly flip core-idle=true while a seek restarts; without it we'd thrash the inhibit (one DBus round-trip per seek) on a drag-scrub. Subscribed to both property names below — either changing re-evaluates.
@@ -457,29 +348,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         }
     }
 
-    private void PushVmSeekValueToScale()
-    {
-        updatingFromVm = true;
-        seekScale.SetValue(viewModel.SeekValue);
-        updatingFromVm = false;
-    }
-
-    // Gtk.Range adds a GtkGestureLongPress in gtk_range_init that activates zoom/fine-tune mode after ~1s of holding the slider. Zoom makes the trough thicker and rescales cursor motion 1:1 — useful for a precision slider, useless for a seek bar. Worse, the activation path recomputes the slider origin and any post-activation motion (even sub-pixel hand jitter) emits a value-changed at ~the held position, which we'd re-SeekTo, causing a visible video jump back to the held position mid-hold. Removing the controller kills the long-press trigger entirely. Shift+click fine-tune on the slider still works (different code path in gtk_range_click_gesture_pressed) — deliberate modifier, leave alone.
-    private static void RemoveScaleLongPressGesture(Gtk.Scale scale)
-    {
-        var controllers = scale.ObserveControllers();
-        uint n = controllers.GetNItems();
-        for (uint i = 0; i < n; i++)
-        {
-            var item = controllers.GetObject(i);
-            if (item is Gtk.GestureLongPress lp)
-            {
-                scale.RemoveController(lp);
-                return;
-            }
-        }
-    }
-
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         switch (e.PropertyName)
@@ -493,7 +361,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 positionLabel.SetWidthChars(formattedDuration.Length);
                 positionLabel.SetMaxWidthChars(formattedDuration.Length);
                 bool hasMedia = viewModel.Duration > TimeSpan.Zero;
-                seekScale.SetSensitive(hasMedia);
+                seekScaleController.SetSensitive(hasMedia);
                 playPauseButton.SetSensitive(hasMedia);
                 // Re-push to the scrubber so its in-trough mark normalization (`time/duration`) updates whenever duration arrives or changes — covers both file-load (chapters fire before duration on some containers) and the rare same-file duration update.
                 chapterScrubber.SetChapters(viewModel.Chapters, viewModel.Duration.TotalSeconds);
@@ -506,20 +374,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
                 playPauseButton.SetTooltipText(viewModel.IsPaused ? "Play" : "Pause");
                 break;
             case nameof(ViewModelMain.SeekValue):
-                if (userHolding)
-                {
-                    break;
-                }
-                // While settling, only resume tracking once mpv's time-pos has actually moved away from the value it had at release. That's the reliable signal that the seek has landed — checking `!IsSeeking` alone would race with the `seeking` property arriving before the matching time-pos.
-                if (awaitingSeekSettle)
-                {
-                    if (viewModel.SeekValue == seekValueAtRelease)
-                    {
-                        break;
-                    }
-                    awaitingSeekSettle = false;
-                }
-                PushVmSeekValueToScale();
+                seekScaleController.SetVmSeekValue(viewModel.SeekValue);
                 break;
             case nameof(ViewModelMain.VideoTracks):
             case nameof(ViewModelMain.CurrentVideoId):
@@ -1054,7 +909,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             }
             screensaverInhibitCookie = 0;
         }
-        playback.PropertyChanged -= OnPlaybackPropertyChangedForSeekSettle;
         playback.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
         viewModel.PropertyChanged -= OnViewModelPipPropertyChanged;
         viewModel.Primary.PropertyChanged -= OnPrimaryContextPropertyChangedForToolbar;
@@ -1064,14 +918,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             DisablePip();
         }
-        // Disconnect the raw signal BEFORE releasing our delegate reference. GTK flushes pending events during window destruction, which can happen after this handler returns; if we dropped the delegate root first, a late dispatch would land in freed memory. Disconnect is synchronous — once it returns, the function pointer is unwired.
-        if (seekLegacyHandlerId != 0 && seekLegacyControllerHandle != IntPtr.Zero)
-        {
-            SignalHandlerDisconnect(seekLegacyControllerHandle, seekLegacyHandlerId);
-            seekLegacyHandlerId = 0;
-            seekLegacyControllerHandle = IntPtr.Zero;
-        }
-        seekLegacyCallback = null;
+        // Disposes the seek scale's raw GdkEvent signal connection synchronously — must happen before playback.Dispose so the controller's playback.PropertyChanged unsubscribe lands on a still-live source, and before GTK tears the widget down so a late dispatch can't land in a freed delegate.
+        seekScaleController.Dispose();
         // Dispose the overlay before the objects it reads (playback, videoSurface): Dispose cancels its 1 Hz timer, ensuring no post-teardown tick fires into a disposed Playback.
         diagnosticOverlay.Dispose();
         // Detach the panel's Playlist.Changed subscription before viewModel.Dispose drops the playlist — keeps a late mainloop tick from invoking into a half-torn-down panel.
