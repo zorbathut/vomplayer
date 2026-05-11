@@ -945,17 +945,16 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
             screensaverInhibitCookie = 0;
         }
         playback.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
-        // Dispose the overlay before the objects it reads (playback, pipController, videoSurface): Dispose cancels its 1 Hz timer, ensuring no post-teardown tick fires into a disposed dependency.
+        // Disposal order is load-bearing in two ways:
+        //   (1) DiagnosticOverlay's 1 Hz timer reads playback + pipController — kill it first.
+        //   (2) videoSurface.Dispose calls mpv_render_context_free against the primary mpv handle; the handle is terminated by primary playback.Dispose which runs inside viewModel.Dispose (Primary VideoContext now owns its IPlayback's lifetime). So videoSurface MUST dispose before viewModel — see MpvDispatcher.Dispose comment about render-surface-before-dispatcher ordering.
+        // PipController internally observes the same order for the secondary stream (its own surface disposes before viewModel.DisablePip).
         diagnosticOverlay.Dispose();
-        // VideoContext (via viewModel.Dispose below) handles its own playback.SourceHdrChanged unsubscribe and DetachHdrSink. MainWindow no longer touches HDR plumbing. PipController.Dispose tears down PiP if enabled — must happen before playback.Dispose so the secondary Playback is disposed under our control while the GTK widget tree is still live, and after diagnosticOverlay.Dispose so a late 1 Hz tick can't call into a disposed controller.
         pipController.Dispose();
-        // Disposes the seek scale's raw GdkEvent signal connection synchronously — must happen before playback.Dispose so the controller's playback.PropertyChanged unsubscribe lands on a still-live source, and before GTK tears the widget down so a late dispatch can't land in a freed delegate.
         seekScaleController.Dispose();
-        // Detach the panel's Playlist.Changed subscription before viewModel.Dispose drops the playlist — keeps a late mainloop tick from invoking into a half-torn-down panel.
         playlistPanel.Dispose();
-        viewModel.Dispose();
         videoSurface?.Dispose();
-        playback.Dispose();
+        viewModel.Dispose();
         return false;
     }
 }

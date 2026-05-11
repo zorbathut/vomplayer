@@ -32,6 +32,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
 
     private static readonly bool LogHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
 
+    // The IPlayback this context drives. Owned: VideoContext.Dispose disposes it. Callers (Program.cs for Primary, PipController for Secondary) construct the Playback and hand it over; once handed in, lifetime is the context's.
     private readonly IPlayback playback;
     private readonly IFilePicker filePicker;
     private readonly IRecentFiles recentFiles;
@@ -894,7 +895,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
 
     public void Dispose()
     {
-        // Final position save before tear-down. Window-close path runs viewModel.Dispose() before playback.Dispose() (see MainWindow.OnWindowCloseRequest), and the SQLite connection lives in Program.cs's `using var stateDb` which outlives both — so the DB call here is safe.
+        // Final position save before tear-down. The SQLite connection lives in Program.cs's `using var stateDb` which outlives every VideoContext, so the DB call here is safe; and playback is still live (disposed at the end of this method).
         SaveCurrentPositionIfEligible();
         // Cancel any in-flight URL download so the spawned yt-dlp process exits before the GTK main loop tears down.
         urlLoad.Dispose();
@@ -905,5 +906,6 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         playback.IsSourceFpsTrustedChanged -= OnIsSourceFpsTrustedChanged;
         DetachHdrSink();
         DetachVrrSink();
+        playback.Dispose();
     }
 }
