@@ -1,8 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using Vomplayer.Controls;
+using Vomplayer.Playback;
+using Vomplayer.Services;
 using Vomplayer.UserData;
 using Vomplayer.Util;
 using Vomplayer.ViewModels;
@@ -10,14 +11,38 @@ using Vomplayer.Wayland;
 
 namespace Vomplayer;
 
-// Picture-in-Picture lifecycle for MainWindow. Constructs the secondary Playback / VideoSurface or VideoView, wires it into the VM coordinator, and tears it all down on disable. The secondary widget is wrapped in a `pipContainer` Gtk.Overlay; the container carries the absolute layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest) and hosts a small bottom-right resize grip alongside the secondary widget. Drag gestures on the secondary move the container; on the grip, aspect-locked resize. Layout math (defaults, clamping, aspect projection) is in PipLayoutCalc — kept pure for unit tests.
-public partial class MainWindow
+// Picture-in-Picture controller. Owns the secondary Playback / VideoSurface / VideoView, the stream-selector toolbar (widget construction only — MainWindow handles its placement in rootBox and fullscreen reparenting), the PiP layout machinery (drag-to-move, aspect-locked corner resize, hover-driven grip visibility), and the post-edge correction timer. Subscribes to the VM's IsPipEnabled / SelectedSlot changes to keep the UI in sync; subscribes to each VideoContext's PropertyChanged for toolbar labels and PiP aspect.
+//
+// The secondary widget is wrapped in a `pipContainer` Gtk.Overlay; the container carries the absolute layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest) and hosts a small bottom-right resize grip. Drag gestures on the secondary move the container; on the grip, aspect-locked resize. Layout math (defaults, clamping, aspect projection) is in PipLayoutCalc — kept pure for unit tests.
+//
+// Coupling to MainWindow flows through IPipHost. The interface is intentionally wide — PiP reaches into the video overlay, the primary widget set, the playlist panel, the hotkey dispatch path, and the controlsBox restack — but routing through the interface keeps PipController out of MainWindow's other concerns (seek scale, screensaver inhibit, autohide timing, file picker invocation, fullscreen-layout decisions for chrome other than the PiP container).
+public sealed class PipController : IDisposable
 {
     private const int PipMargin = 16;
     private const int PipMinWidth = 160;
     private const int PipMinHeight = 90;
     private const int PipResizeGripSize = 18;
     private const string SelectedVideoCssClass = "vompl-selected-video";
+    // App-level commit threshold for drag-to-move. Larger than GTK's gtk-dnd-drag-threshold (default 8 px) because GTK's threshold is empirically crossed by hand tremor / mouse jitter during what the user considers a normal click — under that threshold, GestureDrag fires drag-begin, our handler claims the sequence, and the sibling GestureClick's `released` signal is denied → PlayPause never runs. Bumping this app-side gates the SetState(Claimed) call until motion is unambiguous enough to commit. Picked at 16 px (~1/8" on typical DPI) — comfortably above tremor, comfortably below intentional drag motion.
+    private const double PipMoveClaimThresholdPx = 16.0;
+    // 500 ms — empirical 95th-percentile coverage of `+exact` hr-seek completion + IsSeeking property echo round-trip on ordinary content. Raise to 1000 if practice shows the IsSeeking gate inside ApplyPostEdgeCorrection routinely skips slow-codec corrections.
+    private const uint PostEdgeCorrectionDelayMs = 500;
+    private const string StreamSelectorPrimaryFallback = "Video 1";
+    private const string StreamSelectorSecondaryFallback = "Video 2";
+
+    private readonly IPipHost host;
+    private readonly ViewModelMain viewModel;
+    private readonly IRecentFiles recentFiles;
+    private readonly ITrackPreferences trackPreferences;
+    private readonly IFilePicker filePicker;
+    private readonly IUrlDownloader urlDownloader;
+    private readonly IUrlPrompt urlPrompt;
+
+    // Secondary (PiP) widget set. All null when PiP is off; populated by Enable / torn down by Disable.
+    private VideoArea? secondaryArea;
+    private VideoView? secondaryView;
+    private VideoSurface? secondarySurface;
+    private Playback.Playback? secondaryPlayback;
 
     // Wrapper hosting (secondary widget + resize grip). Carries the layout (margins/size). Null when PiP is off.
     private Gtk.Overlay? pipContainer;
@@ -26,7 +51,7 @@ public partial class MainWindow
     // Hover controller on the wrapper; queried on drag-end to decide whether the pointer is still inside the wrapper (keep grip visible) or outside (hide it). Without this, the leave path that fired during the drag was suppressed by the active flag and would not re-fire after release.
     private Gtk.EventControllerMotion? pipHoverController;
 
-    // User-driven layout overrides, stored as fractions of the primary video region's allocation (width-fraction for width/marginStart, height-fraction for marginTop). Each remains null until the user drags (margins) or resizes (width). Storing fractions — not pixels — means a subsequent window resize keeps the PiP at the same proportional size and position the user picked. Cleared on DisablePip so a re-enable starts at the default corner placement.
+    // User-driven layout overrides, stored as fractions of the primary video region's allocation (width-fraction for width/marginStart, height-fraction for marginTop). Each remains null until the user drags (margins) or resizes (width). Storing fractions — not pixels — means a subsequent window resize keeps the PiP at the same proportional size and position the user picked. Cleared on Disable so a re-enable starts at the default corner placement.
     private double? pipUserWidthFraction;
     private double? pipUserMarginStartFraction;
     private double? pipUserMarginTopFraction;
@@ -41,33 +66,78 @@ public partial class MainWindow
     // Coalescer for the post-ApplyPipLayout geometry refresh. ApplyPipLayout fires per drag-update event (potentially many times per frame); we only need one refresh per frame.
     private bool pipGeometryRefreshScheduled;
 
-    // Single coalescing GLib timeout for the post-edge corrective seek (PiP Sync — Post-Edge Corrective Seek). Set on each PostEdgeCorrectionRequested fire from the VM; if a previous timeout is still pending, it's removed first so a flurry of edges (e.g. scrubber drag firing many SeekTos) collapses to one correction after the last edge.
+    // Single coalescing GLib timeout for the post-edge corrective seek. Set on each PostEdgeCorrectionRequested fire from the VM; if a previous timeout is still pending, it's removed first so a flurry of edges (e.g. scrubber drag firing many SeekTos) collapses to one correction after the last edge.
     private uint pendingCorrectionTimeoutId;
-    // 500 ms — empirical 95th-percentile coverage of `+exact` hr-seek completion + IsSeeking property echo round-trip on ordinary content. Raise to 1000 if practice shows the IsSeeking gate inside ApplyPostEdgeCorrection routinely skips slow-codec corrections.
-    private const uint PostEdgeCorrectionDelayMs = 500;
 
-    // App-level commit threshold for drag-to-move. Larger than GTK's gtk-dnd-drag-threshold (default 8 px) because GTK's threshold is empirically crossed by hand tremor / mouse jitter during what the user considers a normal click — under that threshold, GestureDrag fires drag-begin, our handler claims the sequence, and the sibling GestureClick's `released` signal is denied → PlayPause never runs. Bumping this app-side gates the SetState(Claimed) call until motion is unambiguous enough to commit. Picked at 16 px (~1/8" on typical DPI) — comfortably above tremor, comfortably below intentional drag motion.
-    private const double PipMoveClaimThresholdPx = 16.0;
     private bool pipMoveClaimed;
     // True while a corner-resize drag is active. Used alongside pipMoveClaimed to keep the grip visible mid-drag even if the pointer briefly slips outside the wrapper's bounds (which would otherwise fire EventControllerMotion::leave and hide the grip).
     private bool pipResizeActive;
 
-    // Stream-selector toolbar fields. Constructed in BuildStreamSelectorToolbar; nullable so OnViewModelPipPropertyChanged + SyncStreamSelectorButtons can no-op pre-build (the build runs from MainWindow's ctor before any property change can fire). The ToggleButton[] is indexed by VideoSlot (Primary=0, Secondary=1).
-    private Gtk.Box? streamSelectorToolbar;
-    private Gtk.ToggleButton[]? streamSelectorButtons;
-    // Re-entrancy guard for the OnToggled handler: when SyncStreamSelectorButtons pushes button state from VM to UI, the SetActive call would re-fire OnToggled and bounce back to SetSelected. The guard suppresses the inner SetSelected call during VM→UI sync.
+    // Stream-selector toolbar. The toolbar is a horizontal Gtk.Box holding one ToggleButton per stream slot; the buttons implement zero-or-one selection (clicking one activates it and deactivates the others; clicking the active one deactivates it, returning to broadcast/sync). GTK4's built-in radio grouping is one-of-N, so the click-active-deselect behavior is hand-rolled here. Indexed by VideoSlot (Primary=0, Secondary=1).
+    private readonly Gtk.Box streamSelectorToolbar;
+    private readonly Gtk.ToggleButton[] streamSelectorButtons;
+    // Re-entrancy guard for the OnToggled handler: when SyncStreamSelectorButtons pushes button state from VM to UI, the SetActive call would re-fire OnToggled and bounce back to SetSelected.
     private bool suppressSelectorToggleSignal;
-    // Menu action handles for sensitivity updates from OnViewModelPipPropertyChanged. Populated by BuildMenuBar.
+
+    // Menu action handles. Populated by CreateStreamMenuActions; null until BuildMenuBar wires them.
     private Gio.SimpleAction? addStreamAction;
     private Gio.SimpleAction? deleteStreamAction;
 
-    // Construct the stream-selector toolbar once at window startup. Hidden by default (visibility flips on IsPipEnabled). The toolbar is a horizontal Gtk.Box holding one ToggleButton per stream slot; the buttons implement zero-or-one selection (clicking one activates it and deactivates the others; clicking the active one deactivates it, returning to broadcast/sync). GTK4's built-in radio grouping is one-of-N, so the click-active-deselect behavior is hand-rolled here.
-    private void BuildStreamSelectorToolbar()
+    // Latches true on the primary's first rendered frame (the host pushes via NotifyPrimaryFirstFrameRendered); never reset. Read by OnSecondaryFirstFrameRendered to decide whether to restack the secondary above the parent.
+    private bool primaryFirstFrameRendered;
+
+    // Exposed for MainWindow's layout (insert into rootBox between the menu bar and the video row) and for fullscreen-aware visibility/reparenting.
+    public Gtk.Widget Toolbar
     {
-        var toolbar = Gtk.Box.New(Gtk.Orientation.Horizontal, 4);
-        toolbar.AddCssClass("vompl-chrome");
-        toolbar.AddCssClass("vompl-stream-toolbar");
-        toolbar.SetVisible(false);
+        get
+        {
+            return streamSelectorToolbar;
+        }
+    }
+
+    public PipController(IPipHost host, ViewModelMain viewModel, IRecentFiles recentFiles, ITrackPreferences trackPreferences, IFilePicker filePicker, IUrlDownloader urlDownloader, IUrlPrompt urlPrompt)
+    {
+        if (host == null)
+        {
+            throw new ArgumentNullException(nameof(host));
+        }
+        if (viewModel == null)
+        {
+            throw new ArgumentNullException(nameof(viewModel));
+        }
+        if (recentFiles == null)
+        {
+            throw new ArgumentNullException(nameof(recentFiles));
+        }
+        if (trackPreferences == null)
+        {
+            throw new ArgumentNullException(nameof(trackPreferences));
+        }
+        if (filePicker == null)
+        {
+            throw new ArgumentNullException(nameof(filePicker));
+        }
+        if (urlDownloader == null)
+        {
+            throw new ArgumentNullException(nameof(urlDownloader));
+        }
+        if (urlPrompt == null)
+        {
+            throw new ArgumentNullException(nameof(urlPrompt));
+        }
+        this.host = host;
+        this.viewModel = viewModel;
+        this.recentFiles = recentFiles;
+        this.trackPreferences = trackPreferences;
+        this.filePicker = filePicker;
+        this.urlDownloader = urlDownloader;
+        this.urlPrompt = urlPrompt;
+
+        // Build the stream-selector toolbar. Hidden by default; visibility flips on IsPipEnabled.
+        streamSelectorToolbar = Gtk.Box.New(Gtk.Orientation.Horizontal, 4);
+        streamSelectorToolbar.AddCssClass("vompl-chrome");
+        streamSelectorToolbar.AddCssClass("vompl-stream-toolbar");
+        streamSelectorToolbar.SetVisible(false);
 
         // Initial labels are the static fallbacks; UpdateStreamSelectorLabels (called below) replaces them with the loaded file's basename when a file is loaded.
         var primaryButton = Gtk.ToggleButton.NewWithLabel(StreamSelectorPrimaryFallback);
@@ -76,105 +146,34 @@ public partial class MainWindow
         primaryButton.OnToggled += (sender, _) => OnStreamSelectorButtonToggled(ViewModelMain.VideoSlot.Primary, sender);
         secondaryButton.OnToggled += (sender, _) => OnStreamSelectorButtonToggled(ViewModelMain.VideoSlot.Secondary, sender);
 
-        toolbar.Append(primaryButton);
-        toolbar.Append(secondaryButton);
+        streamSelectorToolbar.Append(primaryButton);
+        streamSelectorToolbar.Append(secondaryButton);
 
-        streamSelectorToolbar = toolbar;
-        // Indexed by VideoSlot enum order: Primary=0, Secondary=1. SyncStreamSelectorButtons relies on this ordering.
         streamSelectorButtons = new[] { primaryButton, secondaryButton };
 
-        // Subscribe to Primary's CurrentFilePath now (Primary always exists). Secondary's subscription is hooked/unhooked by EnablePip / DisablePip. UpdateStreamSelectorLabels resolves the current state once at construction so a Primary that already had a file loaded before the toolbar built shows the right label (the StartupApply seam loads InitialFile before the window builds in some flows).
+        // Subscribe to Primary's CurrentFilePath now (Primary always exists). Secondary's subscription is hooked/unhooked by Enable / Disable. Resolve the current state once at construction so a Primary that already had a file loaded before the controller built shows the right label.
         viewModel.Primary.PropertyChanged += OnPrimaryContextPropertyChangedForToolbar;
         UpdateStreamSelectorLabels();
+
+        // Subscribe to VM PropertyChanged for IsPipEnabled / SelectedSlot.
+        viewModel.PropertyChanged += OnViewModelPropertyChanged;
     }
 
-    private const string StreamSelectorPrimaryFallback = "Video 1";
-    private const string StreamSelectorSecondaryFallback = "Video 2";
-
-    private void OnPrimaryContextPropertyChangedForToolbar(object? sender, PropertyChangedEventArgs e)
+    // Build the Add Stream / Delete Stream menu actions; the host's BuildMenuBar registers them on the action map and inserts them into the menu. We retain refs internally for sensitivity sync.
+    public (Gio.SimpleAction Add, Gio.SimpleAction Delete) CreateStreamMenuActions()
     {
-        if (e.PropertyName == nameof(VideoContext.CurrentFilePath))
-        {
-            UpdateStreamSelectorLabels();
-        }
+        addStreamAction = Gio.SimpleAction.New("add-stream", null);
+        addStreamAction.OnActivate += (_, _) => Enable();
+        addStreamAction.SetEnabled(!viewModel.IsPipEnabled);
+
+        deleteStreamAction = Gio.SimpleAction.New("delete-stream", null);
+        deleteStreamAction.OnActivate += (_, _) => Disable();
+        deleteStreamAction.SetEnabled(viewModel.IsPipEnabled);
+
+        return (addStreamAction, deleteStreamAction);
     }
 
-    // Replace each toolbar button's label with the loaded file's basename, or fall back to the static "Video N" label when no file is loaded. Path.GetFileName degrades gracefully on URI-shaped strings (returns the last URL segment; YouTube URLs land on the watch?v=… segment, which is informative enough until URL-aware labeling becomes a follow-up). Idempotent — SetLabel is safe to call repeatedly with the same string.
-    private void UpdateStreamSelectorLabels()
-    {
-        if (streamSelectorButtons == null)
-        {
-            return;
-        }
-        var primaryBtn = streamSelectorButtons[(int)ViewModelMain.VideoSlot.Primary];
-        if (primaryBtn != null)
-        {
-            primaryBtn.SetLabel(LabelForContext(viewModel.Primary, StreamSelectorPrimaryFallback));
-        }
-        var secondaryBtn = streamSelectorButtons[(int)ViewModelMain.VideoSlot.Secondary];
-        if (secondaryBtn != null)
-        {
-            string label = viewModel.Secondary != null
-                ? LabelForContext(viewModel.Secondary, StreamSelectorSecondaryFallback)
-                : StreamSelectorSecondaryFallback;
-            secondaryBtn.SetLabel(label);
-        }
-    }
-
-    private static string LabelForContext(VideoContext ctx, string fallback)
-    {
-        var path = ctx.CurrentFilePath;
-        if (string.IsNullOrEmpty(path))
-        {
-            return fallback;
-        }
-        var name = Path.GetFileName(path);
-        if (string.IsNullOrEmpty(name))
-        {
-            return fallback;
-        }
-        return name;
-    }
-
-    // OnToggled handler for a stream-selector button. Implements the zero-or-one behavior: clicking one activates it (and deactivates all others); clicking the active one deactivates it (selection → null). The suppressSelectorToggleSignal guard suppresses the inner deactivation calls so the cleared button's OnToggled doesn't bounce back into SetSelected.
-    private void OnStreamSelectorButtonToggled(ViewModelMain.VideoSlot slot, Gtk.ToggleButton sender)
-    {
-        if (suppressSelectorToggleSignal)
-        {
-            return;
-        }
-        if (sender.GetActive())
-        {
-            // User activated this button — deactivate all others, then push selection to VM.
-            suppressSelectorToggleSignal = true;
-            try
-            {
-                if (streamSelectorButtons != null)
-                {
-                    for (int i = 0; i < streamSelectorButtons.Length; i++)
-                    {
-                        var other = streamSelectorButtons[i];
-                        if (other != null && !ReferenceEquals(other, sender) && other.GetActive())
-                        {
-                            other.SetActive(false);
-                        }
-                    }
-                }
-            }
-            finally
-            {
-                suppressSelectorToggleSignal = false;
-            }
-            viewModel.SetSelected(slot);
-        }
-        else
-        {
-            // User clicked the active button → deselect.
-            viewModel.SetSelected(null);
-        }
-    }
-
-    public void EnablePip()
+    public void Enable()
     {
         if (viewModel.IsPipEnabled || secondaryPlayback != null)
         {
@@ -190,12 +189,12 @@ public partial class MainWindow
         var secondaryCtx = new VideoContext(pb, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         viewModel.EnablePip(secondaryCtx);
 
-        if (videoArea != null)
+        if (host.PrimaryArea != null)
         {
             // Wayland subsurface path.
             BuildSecondaryVideoArea(secondaryCtx);
         }
-        else if (videoView != null)
+        else if (host.PrimaryView != null)
         {
             // GLArea fallback path.
             BuildSecondaryVideoView();
@@ -206,7 +205,7 @@ public partial class MainWindow
         // Subscribe the post-edge correction scheduler. The VM raises this on every sync-mode transport edge that introduces wall-clock skew; we coalesce via the pending-timeout id so rapid edges produce one correction at the end.
         viewModel.PostEdgeCorrectionRequested += OnPostEdgeCorrectionRequested;
 
-        // PiP UI bookkeeping: re-bind the playlist panel to whichever context is active (Primary on first enable; SetActive may have been called pre-enable in tests, but in production EnablePip lands with active=Primary). Recompute the active CSS class and re-stack the OSD controlsBox if we're already fullscreen so it stays above the new PiP overlay child.
+        // PiP UI bookkeeping: re-bind the playlist panel to whichever context is active (Primary on first enable). Recompute the active CSS class and re-stack the OSD controlsBox if we're already fullscreen so it stays above the new PiP overlay child.
         RebindPlaylistPanelToTarget();
         UpdateSelectedVideoCss();
         ReinsertControlsOverlay();
@@ -220,13 +219,13 @@ public partial class MainWindow
         }
     }
 
-    public void DisablePip()
+    public void Disable()
     {
         if (!viewModel.IsPipEnabled)
         {
             return;
         }
-        // Unhook the per-source aspect handler before viewModel.DisablePip() disposes Secondary — once disposed, viewModel.Secondary becomes null and we lose the reference we'd need to unsubscribe from. Idempotent if it was never hooked (e.g. EnablePip failed mid-way).
+        // Unhook the per-source aspect handler before viewModel.DisablePip() disposes Secondary — once disposed, viewModel.Secondary becomes null and we lose the reference we'd need to unsubscribe from. Idempotent if it was never hooked (e.g. Enable failed mid-way).
         if (viewModel.Secondary != null)
         {
             viewModel.Secondary.PropertyChanged -= OnSecondaryContextPropertyChanged;
@@ -242,14 +241,14 @@ public partial class MainWindow
         // VM teardown comes first: it disposes the VideoContext (which detaches the HDR sink + unsubscribes Source/Output handlers); doing this before the surface is destroyed lets the SDR pre-stage call inside DetachHdrSink land on a still-live surface.
         viewModel.DisablePip();
 
-        if (videoArea != null)
+        if (host.PrimaryArea != null)
         {
-            videoArea.GeometryChanged -= OnPrimaryAreaGeometryChangedForPip;
+            host.PrimaryArea.GeometryChanged -= OnPrimaryAreaGeometryChangedForPip;
         }
         if (pipContainer != null)
         {
             // Removing the wrapper from videoOverlay walks the whole subtree (secondary widget + grip), so no per-child RemoveOverlay calls.
-            videoOverlay.RemoveOverlay(pipContainer);
+            host.VideoOverlay.RemoveOverlay(pipContainer);
             pipContainer = null;
             pipResizeGripWidget = null;
             pipHoverController = null;
@@ -258,7 +257,7 @@ public partial class MainWindow
         if (secondarySurface != null)
         {
             secondarySurface.RenderContextReady -= OnSecondaryRenderContextReadyWayland;
-            secondarySurface.RenderFailed -= OnVideoRenderFailed;
+            secondarySurface.RenderFailed -= OnSecondaryRenderFailed;
             secondarySurface.FirstFrameRendered -= OnSecondaryFirstFrameRendered;
             secondarySurface.Dispose();
             secondarySurface = null;
@@ -266,7 +265,7 @@ public partial class MainWindow
         if (secondaryView != null)
         {
             secondaryView.RenderContextReady -= OnSecondaryRenderContextReadyGLArea;
-            secondaryView.RenderFailed -= OnVideoRenderFailed;
+            secondaryView.RenderFailed -= OnSecondaryRenderFailed;
             secondaryView = null;
         }
         if (secondaryPlayback != null)
@@ -274,7 +273,7 @@ public partial class MainWindow
             secondaryPlayback.Dispose();
             secondaryPlayback = null;
         }
-        // Reset user-set layout so a future EnablePip starts at the default corner placement again. Persisting across enable/disable was considered and rejected — re-enabling a previously-dragged PiP at a stale absolute position is more disorienting than re-anchoring to the corner.
+        // Reset user-set layout so a future Enable starts at the default corner placement again. Persisting across enable/disable was considered and rejected — re-enabling a previously-dragged PiP at a stale absolute position is more disorienting than re-anchoring to the corner.
         pipUserWidthFraction = null;
         pipUserMarginStartFraction = null;
         pipUserMarginTopFraction = null;
@@ -283,32 +282,56 @@ public partial class MainWindow
         ReinsertControlsOverlay();
     }
 
+    // Called by the host when the primary VideoSurface fires FirstFrameRendered. Latches the flag (for OnSecondaryFirstFrameRendered's race-against-primary check) and, if the secondary surface was previously re-stacked above the parent (because secondary rendered before primary), restores it to its normal "above primary, below parent" stacking now that primary's first frame is visible. Idempotent in the common case where it was never restacked above the parent.
+    public void NotifyPrimaryFirstFrameRendered()
+    {
+        primaryFirstFrameRendered = true;
+        if (secondarySurface != null && host.PrimarySurface != null)
+        {
+            secondarySurface.PlaceAbove(host.PrimarySurface);
+        }
+    }
+
+    public VideoSurface? GetTargetVideoSurfaceForDiagnostic()
+    {
+        if (viewModel.SelectedSlot == ViewModelMain.VideoSlot.Secondary && secondarySurface != null)
+        {
+            return secondarySurface;
+        }
+        return host.PrimarySurface;
+    }
+
+    private void OnSecondaryRenderFailed(int code)
+    {
+        Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
+    }
+
     private void BuildSecondaryVideoArea(VideoContext secondaryCtx)
     {
         var area2 = new VideoArea();
         // The secondary widget itself stays at default fill alignment inside its wrapper; the wrapper carries the layout.
         secondaryArea = area2;
         AttachPipContainer(area2);
-        // Re-size the PiP whenever the secondary's loaded source's aspect changes (file load with known dwidth/dheight, or unload back to null). The PropertyChanged source is the secondary VideoContext we just built — it lives at viewModel.Secondary now that EnablePip ran.
+        // Re-size the PiP whenever the secondary's loaded source's aspect changes (file load with known dwidth/dheight, or unload back to null). The PropertyChanged source is the secondary VideoContext we just built — it lives at viewModel.Secondary now that Enable ran.
         secondaryCtx.PropertyChanged += OnSecondaryContextPropertyChanged;
 
-        var surface2 = new VideoSurface(this, area2);
+        var surface2 = new VideoSurface(host.Window, area2);
         surface2.RenderContextReady += OnSecondaryRenderContextReadyWayland;
-        surface2.RenderFailed += OnVideoRenderFailed;
+        surface2.RenderFailed += OnSecondaryRenderFailed;
         // Asymmetric with primary's hook (which just hides noVideoBg). See OnSecondaryFirstFrameRendered for the rationale.
         surface2.FirstFrameRendered += OnSecondaryFirstFrameRendered;
         secondarySurface = surface2;
         secondaryPlayback!.AttachRenderSurface(d => surface2.SetMpvDispatcher(d));
         // Stack PiP above primary so the smaller surface composites on top of the larger video buffer. wl_subsurface.place_above is double-buffered, so the native shim commits the parent immediately to make the new ordering atomic — see vompl_video_surface_place_above's docstring.
-        if (videoSurface != null)
+        if (host.PrimarySurface != null)
         {
-            surface2.PlaceAbove(videoSurface);
+            surface2.PlaceAbove(host.PrimarySurface);
         }
 
         AttachPipBodyInputs(area2);
         AttachSecondaryDropTarget(area2);
         // Track primary geometry so PiP rescales when the window resizes.
-        videoArea!.GeometryChanged += OnPrimaryAreaGeometryChangedForPip;
+        host.PrimaryArea!.GeometryChanged += OnPrimaryAreaGeometryChangedForPip;
     }
 
     private void BuildSecondaryVideoView()
@@ -318,12 +341,12 @@ public partial class MainWindow
         AttachPipContainer(view2);
 
         view2.RenderContextReady += OnSecondaryRenderContextReadyGLArea;
-        view2.RenderFailed += OnVideoRenderFailed;
+        view2.RenderFailed += OnSecondaryRenderFailed;
         secondaryPlayback!.AttachRenderSurface(d => view2.AttachDispatcher(d));
 
         AttachPipBodyInputs(view2);
         AttachSecondaryDropTarget(view2);
-        // GLArea path: same per-source PiP-aspect bookkeeping as the Wayland path. viewModel.Secondary was set by EnablePip before this method runs.
+        // GLArea path: same per-source PiP-aspect bookkeeping as the Wayland path. viewModel.Secondary was set by Enable before this method runs.
         if (viewModel.Secondary != null)
         {
             viewModel.Secondary.PropertyChanged += OnSecondaryContextPropertyChanged;
@@ -372,7 +395,7 @@ public partial class MainWindow
         pipResizeGripWidget = grip;
         pipHoverController = hoverController;
 
-        videoOverlay.AddOverlay(container);
+        host.VideoOverlay.AddOverlay(container);
         ApplyPipLayout();
     }
 
@@ -424,7 +447,7 @@ public partial class MainWindow
         {
             return;
         }
-        // Primary hasn't rendered yet but the secondary just produced its first frame. Hiding noVideoBg here (the symmetric thing OnPrimaryFirstFrameRendered does) would expose the transparent parent main surface in the primary's region — desktop shows through. Instead, restack the secondary subsurface above the parent so the PiP composites over the still-visible noVideoBg. OnPrimaryFirstFrameRendered restores the secondary to its normal "above primary, below parent" stacking when primary eventually renders.
+        // Primary hasn't rendered yet but the secondary just produced its first frame. Hiding noVideoBg here (the symmetric thing the host does on its primary first frame) would expose the transparent parent main surface in the primary's region — desktop shows through. Instead, restack the secondary subsurface above the parent so the PiP composites over the still-visible noVideoBg. NotifyPrimaryFirstFrameRendered eventually restores the secondary to its normal "above primary, below parent" stacking when primary actually renders.
         secondarySurface?.PlaceAboveParent();
     }
 
@@ -434,7 +457,7 @@ public partial class MainWindow
         ApplyPipLayout();
     }
 
-    // Resolve the effective PiP layout from PipLayoutCalc and push it to pipContainer. After clamping, write any clamped value back into the user-override fields so subsequent drags/resizes resume from a valid position even after a window-resize-induced clamp. Skips when pipContainer is null (PiP off / mid-teardown).
+    // Resolve the effective PiP layout from PipLayoutCalc and push it to pipContainer. Skips when pipContainer is null (PiP off / mid-teardown).
     private void ApplyPipLayout()
     {
         if (pipContainer == null)
@@ -459,8 +482,8 @@ public partial class MainWindow
     // Resolve the primary's video display rect in videoOverlay-space (== widget-space; the videoArea/videoView fills the overlay so the two share an origin). Combines the primary widget's allocation with the primary VideoContext's display aspect to compute the inner rect mpv actually paints into — which the user perceives as "the video" and the PiP is positioned relative to.
     private PipLayoutCalc.VideoRect ComputePrimaryVideoRect()
     {
-        int primaryW = videoArea?.GetAllocatedWidth() ?? videoView?.GetAllocatedWidth() ?? 0;
-        int primaryH = videoArea?.GetAllocatedHeight() ?? videoView?.GetAllocatedHeight() ?? 0;
+        int primaryW = host.PrimaryArea?.GetAllocatedWidth() ?? host.PrimaryView?.GetAllocatedWidth() ?? 0;
+        int primaryH = host.PrimaryArea?.GetAllocatedHeight() ?? host.PrimaryView?.GetAllocatedHeight() ?? 0;
         double? primaryAspect = viewModel.Primary.VideoAspect;
         return PipLayoutCalc.ComputeVideoRect(primaryW, primaryH, primaryAspect);
     }
@@ -477,7 +500,7 @@ public partial class MainWindow
             return;
         }
         pipGeometryRefreshScheduled = true;
-        Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
+        IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
         {
             pipGeometryRefreshScheduled = false;
             secondaryArea?.RefreshGeometry();
@@ -603,8 +626,6 @@ public partial class MainWindow
         SyncPipResizeGripVisibility();
     }
 
-
-
     private void OnPipHoverControllerNotify(GObject.Object sender, GObject.Object.NotifySignalArgs args)
     {
         // Only the contains-pointer change drives the grip; ignore is-pointer (which fires whenever pointer transitions between the wrapper and its own descendants) and any other property notifications.
@@ -635,7 +656,7 @@ public partial class MainWindow
         {
             return;
         }
-        if (widget.TranslateCoordinates(videoOverlay, localX, localY, out double overlayX, out double overlayY))
+        if (widget.TranslateCoordinates(host.VideoOverlay, localX, localY, out double overlayX, out double overlayY))
         {
             pipGestureOverlayStartX = overlayX;
             pipGestureOverlayStartY = overlayY;
@@ -653,10 +674,10 @@ public partial class MainWindow
             overlayY = 0;
             return false;
         }
-        return widget.TranslateCoordinates(videoOverlay, localX + offsetX, localY + offsetY, out overlayX, out overlayY);
+        return widget.TranslateCoordinates(host.VideoOverlay, localX + offsetX, localY + offsetY, out overlayX, out overlayY);
     }
 
-    // Click + drag wiring for the PiP body. Click fires on RELEASE so it doesn't pre-empt the drag-to-move gesture: when motion exceeds PipMoveClaimThresholdPx the drag-update handler calls SetState(Claimed), which transitions this GestureClick's view of the same sequence to Denied — and a Denied sequence's `released` signal does not fire. Sub-threshold motion never claims → release fires normally and runs the bound action (default: MouseClick1 → PlayPause, MouseDoubleClick1 → ToggleFullscreen). The primary's video widget keeps its existing fire-on-press behavior in MainWindow.cs's AttachClickToFocus (no drag attached there).
+    // Click + drag wiring for the PiP body. Click fires on RELEASE so it doesn't pre-empt the drag-to-move gesture: when motion exceeds PipMoveClaimThresholdPx the drag-update handler calls SetState(Claimed), which transitions this GestureClick's view of the same sequence to Denied — and a Denied sequence's `released` signal does not fire. Sub-threshold motion never claims → release fires normally and runs the bound action (default: MouseClick1 → PlayPause, MouseDoubleClick1 → ToggleFullscreen).
     private void AttachPipBodyInputs(Gtk.Widget widget)
     {
         var clickGesture = Gtk.GestureClick.New();
@@ -673,45 +694,20 @@ public partial class MainWindow
             return;
         }
         var trigger = new Trigger.MouseClick(button, args.NPress);
-        var action = hotkeys.Lookup(trigger);
+        var action = host.Hotkeys.Lookup(trigger);
         if (action != null)
         {
-            ExecuteAction(action.Value);
-        }
-    }
-
-    // Single-press routing for the PRIMARY video widget — kept separate from the PiP body's drag-aware variant. Fires on press to preserve historical behavior; the primary has no drag-to-move so there's no conflict.
-    private void AttachClickToFocus(Gtk.Widget widget, ViewModelMain.VideoSlot slot)
-    {
-        var clickGesture = Gtk.GestureClick.New();
-        clickGesture.Button = 0;
-        clickGesture.OnPressed += (sender, args) => HandleVideoClick(slot, sender, args);
-        widget.AddController(clickGesture);
-    }
-
-    private void HandleVideoClick(ViewModelMain.VideoSlot slot, Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
-    {
-        uint button = sender.GetCurrentButton();
-        if (button == 0)
-        {
-            return;
-        }
-        // Click is pure HotkeyMap dispatch — single-click → PlayPause, double-click → ToggleFullscreen. The earlier focus-on-click side-effect is gone (the toolbar's the explicit selector now). PlayPause's coordinator implementation handles selected-vs-broadcast routing on its own.
-        var trigger = new Trigger.MouseClick(button, args.NPress);
-        var action = hotkeys.Lookup(trigger);
-        if (action != null)
-        {
-            ExecuteAction(action.Value);
+            host.ExecuteAction(action.Value);
         }
     }
 
     private void AttachSecondaryDropTarget(Gtk.Widget widget)
     {
-        var dropTarget = Util.UriListDropTarget.Create(paths => HandleSecondaryDrop(paths));
+        var dropTarget = UriListDropTarget.Create(paths => HandleSecondaryDrop(paths));
         widget.AddController(dropTarget);
     }
 
-    private void HandleSecondaryDrop(List<string> paths)
+    private void HandleSecondaryDrop(System.Collections.Generic.List<string> paths)
     {
         if (viewModel.Secondary == null || paths.Count == 0)
         {
@@ -721,25 +717,11 @@ public partial class MainWindow
         viewModel.Secondary.LoadPaths(paths, replace: true);
     }
 
-    private void HandlePrimaryDrop(List<string> paths)
-    {
-        if (paths.Count == 0)
-        {
-            return;
-        }
-        // Drop on the primary video area always targets Primary, regardless of active. (When PiP is off this is identical to the window-level drop's target.)
-        viewModel.Primary.LoadPaths(paths, replace: true);
-        if (viewModel.Primary.Playlist.Items.Count >= 2)
-        {
-            ShowPlaylistPanel();
-        }
-    }
-
     // Apply the selected CSS class to whichever video widget represents the currently-selected slot, or remove the highlight from all when no selection. The class adds a 2 px inset white outline so the user can see at a glance that the next input goes to that stream alone (vs. broadcast/sync when no widget is highlighted).
     private void UpdateSelectedVideoCss()
     {
-        videoArea?.RemoveCssClass(SelectedVideoCssClass);
-        videoView?.RemoveCssClass(SelectedVideoCssClass);
+        host.PrimaryArea?.RemoveCssClass(SelectedVideoCssClass);
+        host.PrimaryView?.RemoveCssClass(SelectedVideoCssClass);
         secondaryArea?.RemoveCssClass(SelectedVideoCssClass);
         secondaryView?.RemoveCssClass(SelectedVideoCssClass);
         if (!viewModel.IsPipEnabled)
@@ -753,7 +735,7 @@ public partial class MainWindow
         }
         else if (viewModel.SelectedSlot == ViewModelMain.VideoSlot.Primary)
         {
-            selectedWidget = videoArea ?? (Gtk.Widget?)videoView;
+            selectedWidget = host.PrimaryArea ?? (Gtk.Widget?)host.PrimaryView;
         }
         else
         {
@@ -767,31 +749,93 @@ public partial class MainWindow
     private void RebindPlaylistPanelToTarget()
     {
         var ctx = viewModel.SingleTarget;
-        playlistPanel.Rebind(ctx.Playlist, ctx.PlayPlaylistItem);
-    }
-
-    private VideoSurface? GetTargetVideoSurfaceForDiagnostic()
-    {
-        if (viewModel.SelectedSlot == ViewModelMain.VideoSlot.Secondary && secondarySurface != null)
-        {
-            return secondarySurface;
-        }
-        return videoSurface;
+        host.PlaylistPanel.Rebind(ctx.Playlist, ctx.PlayPlaylistItem);
     }
 
     // Re-add controlsBox to the overlay if it's already there (fullscreen). Since Gtk.Overlay renders overlay children in addition order — later AddOverlay = higher — we move controlsBox to the top of the stack so any newly-added PiP overlay child sits below the OSD. Idempotent: when controlsBox is in rootBox (windowed mode) this is a no-op.
     private void ReinsertControlsOverlay()
     {
-        if (controlsBox.Parent != videoOverlay)
+        if (host.ControlsBox.Parent != host.VideoOverlay)
         {
             return;
         }
-        videoOverlay.RemoveOverlay(controlsBox);
-        videoOverlay.AddOverlay(controlsBox);
+        host.VideoOverlay.RemoveOverlay(host.ControlsBox);
+        host.VideoOverlay.AddOverlay(host.ControlsBox);
+    }
+
+    private void OnPrimaryContextPropertyChangedForToolbar(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(VideoContext.CurrentFilePath))
+        {
+            UpdateStreamSelectorLabels();
+        }
+    }
+
+    // Replace each toolbar button's label with the loaded file's basename, or fall back to the static "Video N" label when no file is loaded. Path.GetFileName degrades gracefully on URI-shaped strings (returns the last URL segment; YouTube URLs land on the watch?v=… segment, which is informative enough until URL-aware labeling becomes a follow-up). Idempotent — SetLabel is safe to call repeatedly with the same string.
+    private void UpdateStreamSelectorLabels()
+    {
+        var primaryBtn = streamSelectorButtons[(int)ViewModelMain.VideoSlot.Primary];
+        primaryBtn.SetLabel(LabelForContext(viewModel.Primary, StreamSelectorPrimaryFallback));
+
+        var secondaryBtn = streamSelectorButtons[(int)ViewModelMain.VideoSlot.Secondary];
+        string label = viewModel.Secondary != null
+            ? LabelForContext(viewModel.Secondary, StreamSelectorSecondaryFallback)
+            : StreamSelectorSecondaryFallback;
+        secondaryBtn.SetLabel(label);
+    }
+
+    private static string LabelForContext(VideoContext ctx, string fallback)
+    {
+        var path = ctx.CurrentFilePath;
+        if (string.IsNullOrEmpty(path))
+        {
+            return fallback;
+        }
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrEmpty(name))
+        {
+            return fallback;
+        }
+        return name;
+    }
+
+    // OnToggled handler for a stream-selector button. Implements the zero-or-one behavior: clicking one activates it (and deactivates all others); clicking the active one deactivates it (selection → null). The suppressSelectorToggleSignal guard suppresses the inner deactivation calls so the cleared button's OnToggled doesn't bounce back into SetSelected.
+    private void OnStreamSelectorButtonToggled(ViewModelMain.VideoSlot slot, Gtk.ToggleButton sender)
+    {
+        if (suppressSelectorToggleSignal)
+        {
+            return;
+        }
+        if (sender.GetActive())
+        {
+            // User activated this button — deactivate all others, then push selection to VM.
+            suppressSelectorToggleSignal = true;
+            try
+            {
+                for (int i = 0; i < streamSelectorButtons.Length; i++)
+                {
+                    var other = streamSelectorButtons[i];
+                    if (!ReferenceEquals(other, sender) && other.GetActive())
+                    {
+                        other.SetActive(false);
+                    }
+                }
+            }
+            finally
+            {
+                suppressSelectorToggleSignal = false;
+            }
+            viewModel.SetSelected(slot);
+        }
+        else
+        {
+            // User clicked the active button → deselect.
+            viewModel.SetSelected(null);
+        }
     }
 
     // Hooked to viewModel.PropertyChanged. The coordinator fires PropertyChanged for SelectedSlot / IsPipEnabled itself; we react by updating the CSS highlight + re-binding the playlist panel + syncing menu action sensitivities + syncing the toolbar selection. The diagnostic overlay re-resolves its providers every 1 Hz tick, so its data follows the target automatically without explicit poking here.
-    private void OnViewModelPipPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(ViewModelMain.SelectedSlot))
         {
@@ -803,14 +847,14 @@ public partial class MainWindow
         if (e.PropertyName == nameof(ViewModelMain.IsPipEnabled))
         {
             UpdateSelectedVideoCss();
-            UpdateStreamSelectorVisibility();
-            // Refresh labels on stream add/remove. EnablePip just brought Secondary into existence (its label may already need to read from a freshly-loaded file if EnablePip was triggered after a load); DisablePip just nulled it (the Secondary button reverts to "Video 2" fallback).
+            UpdateToolbarVisibility();
+            // Refresh labels on stream add/remove. Enable just brought Secondary into existence (its label may already need to read from a freshly-loaded file if Enable was triggered after a load); Disable just nulled it (the Secondary button reverts to "Video 2" fallback).
             UpdateStreamSelectorLabels();
             SyncStreamMenuActionSensitivity();
         }
     }
 
-    // Mutually-exclusive enable: Add Stream when PiP is off, Delete Stream when PiP is on. The action handles are populated by BuildMenuBar; null-guarded so an early invocation pre-menu-build is a no-op.
+    // Mutually-exclusive enable: Add Stream when PiP is off, Delete Stream when PiP is on. The action handles are populated by CreateStreamMenuActions; null-guarded so an early invocation pre-menu-build is a no-op.
     private void SyncStreamMenuActionSensitivity()
     {
         if (addStreamAction != null)
@@ -823,32 +867,21 @@ public partial class MainWindow
         }
     }
 
-    // Toolbar visibility is governed solely by IsPipEnabled — a single-stream session never shows it. Null-guarded for the brief pre-build window.
-    private void UpdateStreamSelectorVisibility()
+    // Toolbar visibility is governed solely by IsPipEnabled — a single-stream session never shows it.
+    public void UpdateToolbarVisibility()
     {
-        if (streamSelectorToolbar != null)
-        {
-            streamSelectorToolbar.SetVisible(viewModel.IsPipEnabled);
-        }
+        streamSelectorToolbar.SetVisible(viewModel.IsPipEnabled);
     }
 
     // VM → UI sync: set each button's Active state from viewModel.SelectedSlot. The re-entrancy guard prevents the resulting OnToggled fires from bouncing back into the VM.
     private void SyncStreamSelectorButtons()
     {
-        if (streamSelectorButtons == null)
-        {
-            return;
-        }
         suppressSelectorToggleSignal = true;
         try
         {
             for (int i = 0; i < streamSelectorButtons.Length; i++)
             {
                 var btn = streamSelectorButtons[i];
-                if (btn == null)
-                {
-                    continue;
-                }
                 bool shouldBeActive = viewModel.SelectedSlot.HasValue && (int)viewModel.SelectedSlot.Value == i;
                 if (btn.GetActive() != shouldBeActive)
                 {
@@ -861,4 +894,28 @@ public partial class MainWindow
             suppressSelectorToggleSignal = false;
         }
     }
+
+    public void Dispose()
+    {
+        if (viewModel.IsPipEnabled)
+        {
+            Disable();
+        }
+        viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        viewModel.Primary.PropertyChanged -= OnPrimaryContextPropertyChangedForToolbar;
+    }
+}
+
+// Surface the host's GTK state to PipController. MainWindow implements this and PipController only sees the bits it needs. Intentionally wide — PiP touches the video overlay, the primary widget set, the playlist panel, the hotkey dispatch path, and the controlsBox restack — but narrower than direct field access into the host.
+public interface IPipHost
+{
+    Gtk.Window Window { get; }
+    Gtk.Overlay VideoOverlay { get; }
+    Gtk.Box ControlsBox { get; }
+    VideoArea? PrimaryArea { get; }
+    VideoView? PrimaryView { get; }
+    VideoSurface? PrimarySurface { get; }
+    PlaylistPanel PlaylistPanel { get; }
+    HotkeyMap Hotkeys { get; }
+    void ExecuteAction(HotkeyAction action);
 }

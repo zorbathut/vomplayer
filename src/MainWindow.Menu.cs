@@ -27,7 +27,6 @@ public sealed partial class MainWindow
     private const int RecentMenuPullLimit = 500;
     private const int RecentMenuTotalSlots = 10;
     private const int RecentMenuDirectoryCoverageSlots = 5;
-    // PiP-related menu actions. Sensitivities are synced from OnViewModelPipPropertyChanged on IsPipEnabled changes — Add Stream is enabled iff PiP is off, Delete Stream iff PiP is on. (Field decls are duplicated in MainWindow.Pip.cs's partial; only one declaration site lives in this file.)
     // Sentinel state value for "no track selected" in any track-kind action. Using "none" rather than the empty string keeps the action state human-readable in any future debug print and matches mpv's "no" symbolic value semantically.
     private const string TrackStateNone = "none";
 
@@ -139,15 +138,9 @@ public sealed partial class MainWindow
         };
         AddAction(playlistVisibleAction);
 
-        // View → Add Stream / Delete Stream. Two stateless actions; sensitivities flip based on viewModel.IsPipEnabled (Add when PiP off, Delete when PiP on). The OnViewModelPipPropertyChanged handler keeps these in sync. Activate handlers drive MainWindow.EnablePip / DisablePip directly — those routines manage the lifecycle (construct/dispose Secondary VideoContext + widgets) and flip viewModel.IsPipEnabled themselves.
-        addStreamAction = Gio.SimpleAction.New("add-stream", null);
-        addStreamAction.OnActivate += (_, _) => EnablePip();
-        addStreamAction.SetEnabled(!viewModel.IsPipEnabled);
+        // View → Add Stream / Delete Stream. Activate handlers + sensitivity sync live inside PipController; here we just register the actions on the window's action map so the menu items can target them.
+        var (addStreamAction, deleteStreamAction) = pipController.CreateStreamMenuActions();
         AddAction(addStreamAction);
-
-        deleteStreamAction = Gio.SimpleAction.New("delete-stream", null);
-        deleteStreamAction.OnActivate += (_, _) => DisablePip();
-        deleteStreamAction.SetEnabled(viewModel.IsPipEnabled);
         AddAction(deleteStreamAction);
 
         var fileMenu = Gio.Menu.New();

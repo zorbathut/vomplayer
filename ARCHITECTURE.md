@@ -22,7 +22,7 @@ src/
   LibC.cs                # setlocale(LC_NUMERIC,"C") — mpv refuses non-C LC_NUMERIC
   MainWindow.cs          # code-only GTK4 window: widgets, input controllers, fullscreen / autohide / screensaver, VM <-> view glue
   MainWindow.Menu.cs     # menubar + Gio.SimpleAction registration + per-kind track menus + accel refresh + File→Recent
-  MainWindow.Pip.cs      # picture-in-picture: secondary widget set, drag/resize, layout, post-edge correction timer, stream-selector toolbar
+  PipController.cs       # picture-in-picture controller: secondary widget set, drag/resize, layout, post-edge correction timer, stream-selector toolbar. MainWindow implements IPipHost to expose the GTK widget tree the controller needs.
   HotkeysDialog.cs       # preferences UI for binding HotkeyAction → Trigger
 
   Controls/
@@ -141,13 +141,13 @@ mpv render thread:               GTK main thread:
 
 Why the dispatcher matters: `mpv_set_property_string` for VO properties (`target-prim`/`target-trc`/…) synchronously blocks until mpv_render_context_render acknowledges the change. That render call runs on the main thread via `IdleAdd`, so calling SetProperty from main → main blocks in SetProperty → IdleAdd can't fire → mpv core waits for render that can't happen → deadlock. Running SetProperty on the dispatcher worker breaks the cycle: main stays free to service the render IdleAdd while the worker blocks.
 
-Cross-thread coupling per `Playback` is isolated in three places: the `Action<Action> postToMainThread` ctor seam (tests pass `a => a()`), the `MpvDispatcher` worker thread + queue, and the render-queue coalescer in `VideoSurface`/`VideoView`. PiP runs two `Playback` instances side by side (primary, plus a secondary constructed by `MainWindow.EnablePip`); each has its own copy of those three places, and the two share no state or synchronization. Cross-stream coordination lives in `ViewModelMain` and reaches mpv only via per-context `Playback` calls.
+Cross-thread coupling per `Playback` is isolated in three places: the `Action<Action> postToMainThread` ctor seam (tests pass `a => a()`), the `MpvDispatcher` worker thread + queue, and the render-queue coalescer in `VideoSurface`/`VideoView`. PiP runs two `Playback` instances side by side (primary, plus a secondary constructed by `PipController.Enable`); each has its own copy of those three places, and the two share no state or synchronization. Cross-stream coordination lives in `ViewModelMain` and reaches mpv only via per-context `Playback` calls.
 
 `Playback` keeps `MpvClient` behind the `MpvDispatcher` boundary — `MpvClient` is `internal` and exposed only via the ref-struct `MpvHandle` inside `Post` callbacks. `AttachRenderSurface(Action<MpvDispatcher> attach)` hands out the dispatcher for render-context construction; consumers call `CreateRenderContext` on it rather than touching an mpv handle directly.
 
 ## MVVM and the multi-video coordinator
 
-- VM is `ViewModelMain`, a coordinator over one or two `VideoContext`s. Constructed with the primary `Playback` plus the service set (file picker, recents, track prefs, URL prompt, URL downloader). PiP adds a secondary `Playback` lazily via `MainWindow.EnablePip`.
+- VM is `ViewModelMain`, a coordinator over one or two `VideoContext`s. Constructed with the primary `Playback` plus the service set (file picker, recents, track prefs, URL prompt, URL downloader). PiP adds a secondary `Playback` lazily via `PipController.Enable`.
 - Each `VideoContext` (CommunityToolkit.Mvvm `ObservableObject`) wraps one `IPlayback`, mirrors its properties as observables, owns one `Playlist`, and runs that stream's HDR / VRR / track-preference / resume-position / auto-advance state machines. See the comments at the top of `VideoContext.cs` for the per-subsystem rationale; this doc deliberately doesn't restate them.
 - View is `MainWindow` (with `.Menu.cs` and `.Pip.cs` partials), code-only GTK4. It subscribes to VM `PropertyChanged` and switches on property name to push widget updates. User actions go to VM commands (`[RelayCommand]`) or imperative methods.
 - Read-only proxy properties on `ViewModelMain` reflect `SingleTarget` (= SelectedContext if set, else Primary). PropertyChanged is forwarded only when the source context matches SingleTarget; SelectedSlot transitions re-fire every proxy so the view re-reads from the new target.
@@ -157,9 +157,9 @@ Cross-thread coupling per `Playback` is isolated in three places: the `Action<Ac
 - `null` ⇒ broadcast/sync. Transport (Seek*, StepFrame*, StepChapter) fans out to both contexts; PlayPause converges any drifted pair to a single target. Per-video commands (Volume, Mute, Tracks, Open*, Load*) target Primary.
 - non-null ⇒ isolated. Every command goes to the selected context only.
 
-**Sync-mode coordination.** When two contexts run and SelectedSlot is null, `ViewModelMain` defends a `Secondary.Position = Primary.Position + targetOffset` invariant via three mechanisms — a 250 ms burst anchor for rapid `SeekTo` storms, a captured `targetOffsetSeconds` invalidated on either `FileLoaded`, and a debounced post-edge corrective seek (`PostEdgeCorrectionRequested` → 500 ms GLib timer in `MainWindow.Pip.cs` → `ApplyPostEdgeCorrection`). Per-context auto-advance is suppressed; `CheckLockstepAdvance` advances both together. The constants and the rationale for each live in code comments on `ViewModelMain.SeekTo`, `OnPostEdgeCorrectionRequested`, and `CheckLockstepAdvance`.
+**Sync-mode coordination.** When two contexts run and SelectedSlot is null, `ViewModelMain` defends a `Secondary.Position = Primary.Position + targetOffset` invariant via three mechanisms — a 250 ms burst anchor for rapid `SeekTo` storms, a captured `targetOffsetSeconds` invalidated on either `FileLoaded`, and a debounced post-edge corrective seek (`PostEdgeCorrectionRequested` → 500 ms GLib timer in `PipController` → `ApplyPostEdgeCorrection`). Per-context auto-advance is suppressed; `CheckLockstepAdvance` advances both together. The constants and the rationale for each live in code comments on `ViewModelMain.SeekTo`, `PipController.OnPostEdgeCorrectionRequested`, and `CheckLockstepAdvance`.
 
-**PiP lifecycle.** `MainWindow.Pip.cs:EnablePip` builds the secondary `Playback`, `VideoSurface`/`VideoView`, and `VideoContext`, then hands the context to `ViewModelMain.EnablePip`. Disposal is split: MainWindow owns the secondary `Playback`'s teardown; `VideoContext.Dispose` only unsubscribes. Teardown ordering is documented in load-bearing comments at the call sites.
+**PiP lifecycle.** `PipController.Enable` builds the secondary `Playback`, `VideoSurface`/`VideoView`, and `VideoContext`, then hands the context to `ViewModelMain.EnablePip`. Disposal is split: PipController owns the secondary `Playback`'s teardown; `VideoContext.Dispose` only unsubscribes. Teardown ordering is documented in load-bearing comments at the call sites.
 
 ## Hotkeys
 

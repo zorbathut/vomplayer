@@ -16,7 +16,7 @@ namespace Vomplayer;
 // Two render paths, selected at runtime:
 //   - Wayland path: video goes to a wl_subsurface (VideoArea + VideoSurface). Main surface stays sRGB; only the subsurface is HDR-tagged. UI doesn't get re-interpreted as PQ.
 //   - GLArea path: video renders into Gtk.GLArea's FBO on the main surface (VideoView). HDR requests attach PQ to the main surface as before (known issue: UI looks blown out in HDR — accept on X11/Windows/macOS fallback).
-public sealed partial class MainWindow : Gtk.ApplicationWindow
+public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
 {
     private readonly Playback.Playback playback;
     private readonly IRecentFiles recentFiles;
@@ -50,11 +50,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private readonly VideoView? videoView;
     private readonly VideoArea? videoArea;
     private readonly VideoSurface? videoSurface;
-    // Secondary (PiP) widget set. All null when PiP is off; populated by EnablePip / torn down by DisablePip. See MainWindow.Pip.cs.
-    private VideoArea? secondaryArea;
-    private VideoView? secondaryView;
-    private VideoSurface? secondarySurface;
-    private Playback.Playback? secondaryPlayback;
+    private readonly PipController pipController;
     private readonly DiagnosticOverlay diagnosticOverlay;
     // Fullscreen state is a mirror of Gtk.Window.Fullscreened — the notify::fullscreened handler is authoritative. This lets compositor/WM-initiated fullscreen exits (Super-key, window menu, tiling WM shortcut) restore the controls even though our own toggles didn't run.
     private bool isFullscreen;
@@ -81,6 +77,17 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
     private uint screensaverInhibitCookie;
     // VM-pushed volume update guard: VM PropertyChanged → SetValue must not bounce back through OnVolumeScaleValueChanged and re-call SetVolume, which would race mpv's echo and produce flicker.
     private bool updatingVolumeFromVm;
+
+    // IPipHost surface — exposes the bits PipController needs.
+    Gtk.Window IPipHost.Window { get { return this; } }
+    Gtk.Overlay IPipHost.VideoOverlay { get { return videoOverlay; } }
+    Gtk.Box IPipHost.ControlsBox { get { return controlsBox; } }
+    VideoArea? IPipHost.PrimaryArea { get { return videoArea; } }
+    VideoView? IPipHost.PrimaryView { get { return videoView; } }
+    VideoSurface? IPipHost.PrimarySurface { get { return videoSurface; } }
+    Controls.PlaylistPanel IPipHost.PlaylistPanel { get { return playlistPanel; } }
+    HotkeyMap IPipHost.Hotkeys { get { return hotkeys; } }
+    void IPipHost.ExecuteAction(HotkeyAction action) { ExecuteAction(action); }
 
     public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
     {
@@ -221,13 +228,16 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         noVideoBg.SetVexpand(true);
         videoOverlay.AddOverlay(noVideoBg);
 
-        // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Constructed before BuildMenuBar to match the file's "assign then build menu" pattern (cf. viewModel at line 106); the menu action closure resolves `this.diagnosticOverlay` lazily at invoke time, so the ordering is stylistic rather than load-bearing. Reads HDR / source-HDR / hwdec from the current target (Selected ?? Primary) — providers re-resolve every refresh so a selection swap propagates within the next 1 Hz tick.
-        diagnosticOverlay = new DiagnosticOverlay(() => viewModel.SingleTarget, () => GetTargetVideoSurfaceForDiagnostic());
-        videoOverlay.AddOverlay(diagnosticOverlay.Widget);
-
         // Playlist panel sits to the right of the video. Hidden by default; toggled by "View → Playlist" or auto-shown when a multi-file drop populates the playlist (so first-time users see the result of their drop without hunting through menus). Wholesale-rebuild on Playlist.Changed.
         playlistPanel = new Controls.PlaylistPanel(viewModel.Playlist, viewModel.PlayPlaylistItem);
         playlistPanel.Widget.SetVisible(false);
+
+        // PipController must exist before BuildMenuBar so the latter can wire the Add Stream / Delete Stream menu actions through it. Constructed before diagnosticOverlay so the latter's lambda can capture a non-null reference. Toolbar visibility is governed by IsPipEnabled, hidden by default.
+        pipController = new PipController(this, viewModel, recentFiles, trackPreferences, filePicker, urlDownloader, urlPrompt);
+
+        // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Reads HDR / source-HDR / hwdec from the current target (Selected ?? Primary) — providers re-resolve every refresh so a selection swap propagates within the next 1 Hz tick.
+        diagnosticOverlay = new DiagnosticOverlay(() => viewModel.SingleTarget, () => pipController.GetTargetVideoSurfaceForDiagnostic());
+        videoOverlay.AddOverlay(diagnosticOverlay.Widget);
 
         // Wrap video + playlist in a horizontal row so they share the middle layout slot. videoOverlay still hexpand/vexpand so the video region grows to fill remaining space when the panel is visible.
         var videoAndPlaylistRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 0);
@@ -238,12 +248,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
 
         menuBar = BuildMenuBar(app);
 
-        // Stream-selector toolbar — built before SetChild so it has its rootBox slot reserved. Hidden by default; visibility flips on IsPipEnabled via UpdateStreamSelectorVisibility. Sits between menubar and video region in windowed mode (a solid layout row that displaces the video area, mirroring controlsBox in windowed mode).
-        BuildStreamSelectorToolbar();
-
         rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         rootBox.Append(menuBar);
-        rootBox.Append(streamSelectorToolbar!);
+        // Toolbar sits between menubar and video region in windowed mode (a solid layout row that displaces the video area, mirroring controlsBox in windowed mode). Reparented to videoOverlay in fullscreen.
+        rootBox.Append(pipController.Toolbar);
         rootBox.Append(videoAndPlaylistRow);
         rootBox.Append(controlsBox);
         SetChild(rootBox);
@@ -283,7 +291,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         OnNotify += OnWindowNotify;
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
-        viewModel.PropertyChanged += OnViewModelPipPropertyChanged;
         playback.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
         OnCloseRequest += OnWindowCloseRequest;
 
@@ -439,17 +446,48 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         viewModel.OnRenderContextReady();
     }
 
-    // Latches true on the primary's first rendered frame; never reset (the primary VideoSurface lives for the window's lifetime). Read by OnSecondaryFirstFrameRendered to decide whether to restack the secondary above the parent — see that method for the full rationale.
-    private bool primaryFirstFrameRendered;
-
     private void OnPrimaryFirstFrameRendered()
     {
-        primaryFirstFrameRendered = true;
         noVideoBg.SetVisible(false);
-        // Restore the secondary's normal "above primary, below parent" stacking. Idempotent in the common case where it was never restacked above the parent (one extra wl_subsurface_place_above + commit; harmless). Hide noVideoBg first so the secondary stays continuously visible during the restack: the alternative order would briefly leave the secondary below an opaque-black noVideoBg between the place_above and the SetVisible.
-        if (secondarySurface != null && videoSurface != null)
+        // PipController latches the bit and, if it had previously re-stacked the secondary above the parent (because secondary rendered before primary), restores it to its normal "above primary, below parent" stacking. Hide noVideoBg first so the secondary stays continuously visible during the restack: the alternative order would briefly leave the secondary below an opaque-black noVideoBg.
+        pipController.NotifyPrimaryFirstFrameRendered();
+    }
+
+    // Click on the primary video widget. Pure HotkeyMap dispatch — single-click → PlayPause, double-click → ToggleFullscreen. Fires on press for immediate response; the primary has no drag-to-move so there's no conflict with sub-threshold motion (PipController's body click fires on release to defer to its drag gesture).
+    private void AttachClickToFocus(Gtk.Widget widget, ViewModelMain.VideoSlot slot)
+    {
+        var clickGesture = Gtk.GestureClick.New();
+        clickGesture.Button = 0;
+        clickGesture.OnPressed += (sender, args) => HandleVideoClick(slot, sender, args);
+        widget.AddController(clickGesture);
+    }
+
+    private void HandleVideoClick(ViewModelMain.VideoSlot slot, Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
+    {
+        uint button = sender.GetCurrentButton();
+        if (button == 0)
         {
-            secondarySurface.PlaceAbove(videoSurface);
+            return;
+        }
+        var trigger = new Trigger.MouseClick(button, args.NPress);
+        var action = hotkeys.Lookup(trigger);
+        if (action != null)
+        {
+            ExecuteAction(action.Value);
+        }
+    }
+
+    private void HandlePrimaryDrop(List<string> paths)
+    {
+        if (paths.Count == 0)
+        {
+            return;
+        }
+        // Drop on the primary video area always targets Primary, regardless of active slot. (When PiP is off this is identical to the window-level drop's target.)
+        viewModel.Primary.LoadPaths(paths, replace: true);
+        if (viewModel.Primary.Playlist.Items.Count >= 2)
+        {
+            ShowPlaylistPanel();
         }
     }
 
@@ -482,9 +520,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             {
                 controlsBox.SetVisible(true);
             }
-            if (streamSelectorToolbar != null && viewModel.IsPipEnabled && !streamSelectorToolbar.GetVisible())
+            if (viewModel.IsPipEnabled && !pipController.Toolbar.GetVisible())
             {
-                streamSelectorToolbar.SetVisible(true);
+                pipController.Toolbar.SetVisible(true);
             }
             SetCursorFromName(null);
             ArmControlsHideTimer();
@@ -531,9 +569,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             controlsBox.SetVisible(true);
         }
         // Restore the top stream-selector toolbar alongside the bottom controls when the user moves the mouse. Visibility is gated by IsPipEnabled — a single-stream session never shows the toolbar.
-        if (streamSelectorToolbar != null && viewModel.IsPipEnabled && !streamSelectorToolbar.GetVisible())
+        if (viewModel.IsPipEnabled && !pipController.Toolbar.GetVisible())
         {
-            streamSelectorToolbar.SetVisible(true);
+            pipController.Toolbar.SetVisible(true);
         }
         SetCursorFromName(null);
         ArmControlsHideTimer();
@@ -551,11 +589,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         bool savedIsPip = entry.StreamCount > 1;
         if (savedIsPip && !viewModel.IsPipEnabled)
         {
-            EnablePip();
+            pipController.Enable();
         }
         else if (!savedIsPip && viewModel.IsPipEnabled)
         {
-            DisablePip();
+            pipController.Disable();
         }
         viewModel.LoadFromSaved(guid, startPaused: true);
     }
@@ -802,46 +840,43 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             controlsBox.SetVisible(true);
             ReparentStreamSelectorForFullscreen(false);
         }
-        // Re-derive the stream-selector visibility from IsPipEnabled at the tail of every fullscreen transition. Mirrors the unconditional controlsBox.SetVisible(true) above: the auto-hide timer may have cleared the toolbar's Visible flag, and ReparentStreamSelectorForFullscreen only handles parent/CSS — without this, toggling fullscreen while the UI is auto-hidden brings the control bar back but leaves the PiP chooser invisible.
-        UpdateStreamSelectorVisibility();
+        // Re-derive the stream-selector visibility from IsPipEnabled at the tail of every fullscreen transition. Mirrors the unconditional controlsBox.SetVisible(true) above: the auto-hide timer may have cleared the toolbar's Visible flag, and the reparent only handles parent/CSS — without this, toggling fullscreen while the UI is auto-hidden brings the control bar back but leaves the PiP chooser invisible.
+        pipController.UpdateToolbarVisibility();
     }
 
-    // Reparent the stream-selector toolbar between rootBox (windowed: a solid layout row that displaces the video) and videoOverlay (fullscreen: floats at the top of the video). Same pattern as controlsBox below, but anchored at top. The toolbar's visibility is governed independently by IsPipEnabled, so this method only handles the parent + alignment + CSS swap.
+    // Reparent the PiP stream-selector toolbar between rootBox (windowed: a solid layout row that displaces the video) and videoOverlay (fullscreen: floats at the top of the video). Same pattern as the controlsBox reparenting above but anchored at top. The toolbar's visibility is governed independently by IsPipEnabled.
     private void ReparentStreamSelectorForFullscreen(bool fullscreen)
     {
-        if (streamSelectorToolbar == null)
-        {
-            return;
-        }
+        var toolbar = pipController.Toolbar;
         if (fullscreen)
         {
-            if (streamSelectorToolbar.Parent == rootBox)
+            if (toolbar.Parent == rootBox)
             {
-                rootBox.Remove(streamSelectorToolbar);
+                rootBox.Remove(toolbar);
             }
-            streamSelectorToolbar.SetValign(Gtk.Align.Start);
-            streamSelectorToolbar.SetHalign(Gtk.Align.Start);
-            streamSelectorToolbar.RemoveCssClass("vompl-chrome");
-            streamSelectorToolbar.AddCssClass("osd");
-            if (streamSelectorToolbar.Parent != videoOverlay)
+            toolbar.SetValign(Gtk.Align.Start);
+            toolbar.SetHalign(Gtk.Align.Start);
+            toolbar.RemoveCssClass("vompl-chrome");
+            toolbar.AddCssClass("osd");
+            if (toolbar.Parent != videoOverlay)
             {
-                videoOverlay.AddOverlay(streamSelectorToolbar);
+                videoOverlay.AddOverlay(toolbar);
             }
         }
         else
         {
-            if (streamSelectorToolbar.Parent == videoOverlay)
+            if (toolbar.Parent == videoOverlay)
             {
-                videoOverlay.RemoveOverlay(streamSelectorToolbar);
+                videoOverlay.RemoveOverlay(toolbar);
             }
-            streamSelectorToolbar.RemoveCssClass("osd");
-            streamSelectorToolbar.AddCssClass("vompl-chrome");
-            streamSelectorToolbar.SetValign(Gtk.Align.Fill);
-            streamSelectorToolbar.SetHalign(Gtk.Align.Fill);
-            if (streamSelectorToolbar.Parent != rootBox)
+            toolbar.RemoveCssClass("osd");
+            toolbar.AddCssClass("vompl-chrome");
+            toolbar.SetValign(Gtk.Align.Fill);
+            toolbar.SetHalign(Gtk.Align.Fill);
+            if (toolbar.Parent != rootBox)
             {
-                // Re-insert at the slot the original BuildStreamSelectorToolbar placed it: between menubar (index 0) and videoAndPlaylistRow (index 1 in the original layout). InsertChildAfter places it after menubar.
-                rootBox.InsertChildAfter(streamSelectorToolbar, menuBar);
+                // Re-insert at the slot it originally occupied in rootBox: between menubar (index 0) and videoAndPlaylistRow. InsertChildAfter places it after menubar.
+                rootBox.InsertChildAfter(toolbar, menuBar);
             }
         }
     }
@@ -879,9 +914,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
         {
             controlsBox.SetVisible(false);
             // Top-of-screen stream-selector hides with the bottom controls. On hide, additionally reset SelectedSlot to null so the user's "I stopped touching it" gesture restores broadcast/sync mode. The reset is fullscreen-specific by design: in windowed mode the toolbar is always visible and the selection persists until the user explicitly clicks again.
-            if (streamSelectorToolbar != null && viewModel.IsPipEnabled)
+            if (viewModel.IsPipEnabled)
             {
-                streamSelectorToolbar.SetVisible(false);
+                pipController.Toolbar.SetVisible(false);
             }
             if (viewModel.SelectedSlot != null)
             {
@@ -910,18 +945,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow
             screensaverInhibitCookie = 0;
         }
         playback.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
-        viewModel.PropertyChanged -= OnViewModelPipPropertyChanged;
-        viewModel.Primary.PropertyChanged -= OnPrimaryContextPropertyChangedForToolbar;
-        // VideoContext (via viewModel.Dispose below) handles its own playback.SourceHdrChanged unsubscribe and DetachHdrSink. MainWindow no longer touches HDR plumbing.
-        // If PiP is on, tear it down so the secondary Playback/Surface are disposed under our control before the window's GTK widgets go.
-        if (viewModel.IsPipEnabled)
-        {
-            DisablePip();
-        }
+        // Dispose the overlay before the objects it reads (playback, pipController, videoSurface): Dispose cancels its 1 Hz timer, ensuring no post-teardown tick fires into a disposed dependency.
+        diagnosticOverlay.Dispose();
+        // VideoContext (via viewModel.Dispose below) handles its own playback.SourceHdrChanged unsubscribe and DetachHdrSink. MainWindow no longer touches HDR plumbing. PipController.Dispose tears down PiP if enabled — must happen before playback.Dispose so the secondary Playback is disposed under our control while the GTK widget tree is still live, and after diagnosticOverlay.Dispose so a late 1 Hz tick can't call into a disposed controller.
+        pipController.Dispose();
         // Disposes the seek scale's raw GdkEvent signal connection synchronously — must happen before playback.Dispose so the controller's playback.PropertyChanged unsubscribe lands on a still-live source, and before GTK tears the widget down so a late dispatch can't land in a freed delegate.
         seekScaleController.Dispose();
-        // Dispose the overlay before the objects it reads (playback, videoSurface): Dispose cancels its 1 Hz timer, ensuring no post-teardown tick fires into a disposed Playback.
-        diagnosticOverlay.Dispose();
         // Detach the panel's Playlist.Changed subscription before viewModel.Dispose drops the playlist — keeps a late mainloop tick from invoking into a half-torn-down panel.
         playlistPanel.Dispose();
         viewModel.Dispose();
