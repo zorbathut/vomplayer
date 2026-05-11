@@ -134,7 +134,7 @@ public class PlaybackTests
     public void LoadFileNullPathThrows()
     {
         using var pb = NewHeadlessInitialized();
-        Assert.Throws<ArgumentNullException>(() => pb.LoadFile(null!));
+        Assert.Throws<ArgumentNullException>(() => pb.LoadFile(null!, startPaused: false));
     }
 
     [TestCase(null, false)]

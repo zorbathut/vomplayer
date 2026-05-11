@@ -74,7 +74,8 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     event Action<bool>? IsSourceFpsTrustedChanged;
 
     void Initialize();
-    void LoadFile(string path);
+    // startPaused: when true, the file loads with pause=yes so mpv stops on the first frame instead of starting playback. Used by RestorePlaylist for startup auto-load and Recent-menu open so the user sees a thumbnail at the resume position. Implementation must keep the pause-state decision atomic with the loadfile dispatch — a separate SetPaused call before or after LoadFile races against mpv's load-time defaults.
+    void LoadFile(string path, bool startPaused);
     void TogglePause();
     // Set the paused state explicitly. Idempotent — calling SetPaused(true) on an already-paused playback is a no-op. The coordinator's no-selection PlayPause path uses this to converge two streams that have drifted into different pause states (TogglePause on each independently could leave them divergent if one was already at the target).
     void SetPaused(bool paused);

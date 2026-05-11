@@ -103,7 +103,7 @@ public partial class MultiVideoCoordinatorTests
         public int ClearFrameMultiplierCalls { get; private set; }
 
         public void Initialize() { }
-        public void LoadFile(string path) { LoadedFiles.Add(path); }
+        public void LoadFile(string path, bool startPaused) { LoadedFiles.Add(path); }
         public void TogglePause() { TogglePauseCalls++; IsPaused = !IsPaused; }
         public void SetPaused(bool paused) { SetPausedCalls.Add(paused); IsPaused = paused; }
         public void Seek(double seconds) { SeekCalls.Add(seconds); }
@@ -276,7 +276,7 @@ public partial class MultiVideoCoordinatorTests
     [Test]
     public void PipOnBothAtEofPreservesPausedContextPauseState()
     {
-        // User paused one half (Primary) while waiting for the longer half (Secondary) to finish. Lockstep advance must NOT unpause the half the user deliberately paused. Playback.LoadFile always issues pause=no on the dispatcher; the coordinator re-applies pause=true via SetPaused after AdvanceAndLoadIfPossible so the paused context lands paused on the next track.
+        // User paused one half (Primary) while waiting for the longer half (Secondary) to finish. Lockstep advance must NOT unpause the half the user deliberately paused. AdvanceAndLoadIfPossible calls Playback.LoadFile with startPaused=false (auto-advance treats the next file as "keep playing"); the coordinator captures the pre-advance pause state and re-applies pause=true via SetPaused after the advance so the deliberately-paused context lands paused on the next track.
         using var h = new Harness();
         h.Vm.LoadPaths(new[] { "/a1.mp4", "/a2.mp4" }, replace: true);
         h.EnablePip();
@@ -296,7 +296,7 @@ public partial class MultiVideoCoordinatorTests
 
         // Primary was paused → exactly one SetPaused(true) recorded, and it lands AFTER both LoadFile calls completed (synchronous main-thread path; VM doesn't issue any SetPaused before the advance, only after). An incorrectly-ordered fix that re-paused before LoadFile would still pass the membership check, so we pin the exact log shape.
         Assert.That(h.PrimaryPlayback.SetPausedCalls, Is.EqualTo(new[] { true }));
-        // Secondary was running → coordinator must not touch it at all. LoadFile's pause=no in real Playback carries through unmodified.
+        // Secondary was running → coordinator must not touch it at all. LoadFile(startPaused=false) issues pause=no on the real Playback dispatcher, which carries through unmodified.
         Assert.That(h.SecondaryPlayback!.SetPausedCalls, Is.Empty);
     }
 

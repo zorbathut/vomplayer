@@ -302,7 +302,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         });
     }
 
-    public void LoadFile(string path)
+    public void LoadFile(string path, bool startPaused)
     {
         if (path == null)
         {
@@ -337,7 +337,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
             var epochSnapshot = dispatcherLogEpoch;
             postToMainThread(() => AdvanceLogEpoch(epochSnapshot));
             h.Command("loadfile", path);
-            h.SetProperty("pause", "no");
+            // Set pause AFTER loadfile so mpv applies it to the file being loaded, not the (about-to-be-released) previous one. startPaused=false (the common case: open new file from picker / playlist row / auto-advance) issues pause=no so a previously-paused state from the old file doesn't carry over; startPaused=true is the restoration opt-in so saved playlists load paused at the resume position.
+            h.SetProperty("pause", startPaused ? "yes" : "no");
         });
     }
 

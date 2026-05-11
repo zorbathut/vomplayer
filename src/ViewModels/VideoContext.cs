@@ -350,7 +350,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
         if (kickOff)
         {
-            LoadCurrentItem();
+            LoadCurrentItem(startPaused: false);
         }
     }
 
@@ -358,12 +358,12 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     public void PlayPlaylistItem(int index)
     {
         Playlist.SetCurrent(index);
-        LoadCurrentItem();
+        LoadCurrentItem(startPaused: false);
     }
 
-    // Restore a saved playlist into this context. Replaces the items list, sets CurrentIndex, and kicks off the load — startPaused=true sets pause BEFORE the LoadFile dispatch so mpv loads paused and stops at the resume position. Used by ViewModelMain.LoadFromSaved (Recent menu click + startup autoload). Two Changed events fire (Replace, then SetCurrent if currentIndex != 0); PlaylistAutosave's loading flag swallows both so restoration doesn't re-write the row with placeholder filenames.
+    // Restore a saved playlist into this context. Replaces the items list, sets CurrentIndex, and kicks off the load — startPaused threads through LoadCurrentItem to Playback.LoadFile so the file loads paused at the resume position (true) or auto-plays (false). Used by ViewModelMain.LoadFromSaved (Recent menu click + startup autoload). Two Changed events fire (Replace, then SetCurrent if currentIndex != 0); PlaylistAutosave's loading flag swallows both so restoration doesn't re-write the row with placeholder filenames.
     //
-    // Distinct from LoadPaths(replace:true) because LoadPaths always loads from index 0 and never starts paused; restoration needs to honor the saved index AND not auto-play. Sharing code via parameters would muddle LoadPaths' contract for callers that don't restore.
+    // Distinct from LoadPaths(replace:true) because LoadPaths always loads from index 0 (no resume position to honor) and the user-initiated open is implicitly "play". Restoration honors the saved CurrentIndex AND the pause-on-restore intent.
     public void RestorePlaylist(IReadOnlyList<string> items, int currentIndex, bool startPaused)
     {
         if (items == null)
@@ -375,11 +375,6 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
             return;
         }
         int clamped = currentIndex >= 0 && currentIndex < items.Count ? currentIndex : 0;
-        if (startPaused)
-        {
-            // Set pause BEFORE LoadFile so mpv's load-time defaults don't auto-play. The dispatcher serializes set-property and loadfile in the order they're issued from the main thread; without this ordering, playback would briefly start before pause took effect. Bypasses VideoContext.SetPaused's Duration > 0 gate (no file is loaded yet) by going through Playback directly.
-            playback.SetPaused(true);
-        }
         restoringPlaylist = true;
         try
         {
@@ -388,7 +383,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
             {
                 Playlist.SetCurrent(clamped);
             }
-            LoadCurrentItem();
+            LoadCurrentItem(startPaused);
         }
         finally
         {
@@ -404,14 +399,14 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return false;
         }
-        LoadCurrentItem();
+        LoadCurrentItem(startPaused: false);
         return true;
     }
 
     // The shared per-file setup: outgoing-position save, recents.Record, currentDirectoryKey resolve, currentFilePath set, lastSavedPositionSeconds reset, pendingResumePosition lookup, then playback.LoadFile. Called from LoadPaths (when starting / replacing a playlist), PlayPlaylistItem, and the auto-advance handler. Idempotent w.r.t. the playlist itself — the playlist mutation already happened.
     //
     // Why save-on-LoadCurrentItem instead of subscribing to FileEnded: mpv's EndFile event delivers its reason field via a separate struct that the existing MpvClient.Dispatch reads incorrectly (it reads evt.Error, not the mpv_event_end_file.reason behind evt.Data) — and even with that fixed, at EOF with keep-open=yes time-pos parks at duration so the near-end filter would always elide the save. Saving here, on the user's deliberate "open new file" action OR on auto-advance, dodges both problems. Auto-advance specifically: at natural EOF position ≈ duration so SaveCurrentPositionIfEligible's near-end gate elides the save anyway — verified by the AutoAdvanceElidesNearEndOutgoingSave test.
-    private void LoadCurrentItem()
+    private void LoadCurrentItem(bool startPaused)
     {
         if (Playlist.CurrentIndex < 0 || Playlist.CurrentIndex >= Playlist.Items.Count)
         {
@@ -443,18 +438,18 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
 
         if (urlLoad.ShouldDownload(pathOrUri))
         {
-            // Coordinator-internal race guards (cancellation, newer-download-took-over) gate the callback. The CurrentFilePath check inside the callback is the host's own "still current" predicate — if the user advanced to another row during the download, our late LoadFile would clobber the new playback.
+            // Coordinator-internal race guards (cancellation, newer-download-took-over) gate the callback. The CurrentFilePath check inside the callback is the host's own "still current" predicate — if the user advanced to another row during the download, our late LoadFile would clobber the new playback. The startPaused captured here flows into the eventual LoadFile so restored URL items honor the pause intent across the async download hop.
             urlLoad.StartDownload(pathOrUri, (url, localPath) =>
             {
                 if (CurrentFilePath != url)
                 {
                     return;
                 }
-                playback.LoadFile(localPath);
+                playback.LoadFile(localPath, startPaused);
             });
             return;
         }
-        playback.LoadFile(pathOrUri);
+        playback.LoadFile(pathOrUri, startPaused);
     }
 
     public void PlayPause()

@@ -94,7 +94,7 @@ public partial class VideoContextTests
         public List<string> LoadedFiles { get; } = new();
 
         public void Initialize() { }
-        public void LoadFile(string path) { LoadedFiles.Add(path); }
+        public void LoadFile(string path, bool startPaused) { LoadedFiles.Add(path); }
         public void TogglePause() { IsPaused = !IsPaused; }
         public void SetPaused(bool paused) { IsPaused = paused; }
         public void Seek(double seconds) { }

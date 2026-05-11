@@ -99,8 +99,13 @@ public partial class PlaylistAutosaveTests
         public bool IsSourceFpsTrusted { get; set; } = true;
         public string FpsTrustReason { get; set; } = "";
 
+        public List<(string path, bool startPaused)> LoadFileCalls { get; } = new();
+
         public void Initialize() { }
-        public void LoadFile(string path) { }
+        public void LoadFile(string path, bool startPaused)
+        {
+            LoadFileCalls.Add((path, startPaused));
+        }
         public void TogglePause() { IsPaused = !IsPaused; }
         public void SetPaused(bool paused) { IsPaused = paused; }
         public void Seek(double seconds) { }
@@ -424,6 +429,20 @@ public partial class PlaylistAutosaveTests
         Assert.That(vm.Primary.Playlist.Items, Is.EqualTo(new[] { "/a.mp4", "/b.mp4", "/c.mp4" }));
         Assert.That(vm.Primary.Playlist.CurrentIndex, Is.EqualTo(2));
         Assert.That(vm.Autosave!.CurrentGuid, Is.EqualTo(guid));
+    }
+
+    [Test]
+    public void LoadFromSavedThreadsStartPausedThroughToLoadFile()
+    {
+        // Regression: app-startup auto-restore was auto-playing. RestorePlaylist previously called playback.SetPaused(true) BEFORE LoadFile, but the dispatcher in real Playback issues pause=no AFTER loadfile, so the pre-call was overridden. The fix routes startPaused as a parameter on LoadFile so the dispatch is atomic. Pin the contract: a startPaused=true restore must produce a single LoadFile call with startPaused=true (so the fake's IsPaused mirror lands true — same way real mpv's pause property lands true after the dispatched pause=yes).
+        var vm = NewViewModelWithAutosave(out var pb, out var repo);
+        var guid = Guid.NewGuid();
+        repo.Save(guid, "saved", new[] { new SavedPlaylistStream(0, 0, new[] { "/a.mp4" }) });
+
+        vm.LoadFromSaved(guid, startPaused: true);
+
+        // The Playback contract for LoadFile(_, startPaused: true) is "dispatch pause=yes atomically with loadfile so mpv loads paused". Verifying the call shape here is the closest the test layer can get without a real mpv handle; the production dispatch ordering in Playback.LoadFile is short enough to verify by reading.
+        Assert.That(pb.LoadFileCalls, Is.EqualTo(new[] { ("/a.mp4", true) }));
     }
 
     [Test]

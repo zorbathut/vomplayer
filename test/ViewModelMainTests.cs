@@ -114,7 +114,7 @@ public partial class ViewModelMainTests
             InitializeCalls++;
         }
 
-        public void LoadFile(string path)
+        public void LoadFile(string path, bool startPaused)
         {
             LoadFileCalls++;
             LastLoadedFile = path;
