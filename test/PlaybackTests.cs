@@ -28,6 +28,16 @@ public class PlaybackTests
         Assert.DoesNotThrow(() => pb.Dispose());
     }
 
+    // Regression: a `track-list/count` property change can arrive on the main thread (via postToMainThread → GLib idle) after Dispose has already torn down the dispatcher. OnMpvPropertyChanged would then route into ReloadTracks → dispatcher.Post and throw ObjectDisposedException, surfacing as `[vomplayer] idle callback threw: ObjectDisposedException` on shutdown.
+    [Test]
+    public void PropertyChangeAfterDisposeIsSwallowed()
+    {
+        var pb = new Playback.Playback(a => a());
+        pb.Dispose();
+        var change = new PropertyChange("track-list/count", new MpvPropertyValue("0"), 0);
+        Assert.DoesNotThrow(() => pb.IngestPropertyChangeForTest(change));
+    }
+
     [Test]
     public void IsPausedDefaultsTrue()
     {

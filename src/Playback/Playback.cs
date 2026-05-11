@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Mpv;
 
@@ -13,6 +14,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
 {
     private readonly MpvDispatcher dispatcher;
     private readonly Action<Action> postToMainThread;
+    // Set in Dispose. Gates OnMpvPropertyChanged because that handler calls dispatcher.Post directly (via ReloadTracks/ReloadChapters); the other main-thread handlers reach dispatcher.Post only through event subscribers, which Dispose nulls out before tearing down the dispatcher.
+    private int disposed;
 
     [ObservableProperty]
     private double positionSeconds;
@@ -569,6 +572,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     private void OnMpvPropertyChanged(PropertyChange change)
     {
+        // Gate against the dispatcher's PropertyChanged still being queued in the GLib idle pump when Dispose runs — ReloadTracks/ReloadChapters would otherwise hit dispatcher.Post on the disposed dispatcher and throw ObjectDisposedException on shutdown.
+        if (Volatile.Read(ref disposed) != 0)
+        {
+            return;
+        }
         switch (change.Name)
         {
             case "time-pos":
@@ -1026,7 +1034,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     public void Dispose()
     {
-        // Null our own event invocation lists so a subscriber we forward to can't fire into a torn-down state. Dispose of the dispatcher — its Dispose drops subscriptions to the underlying MpvClient, drains the queue, joins the worker, and tears down mpv.
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
+            return;
+        }
+        // The `disposed` flag above gates OnMpvPropertyChanged, the one main-thread handler that itself calls dispatcher.Post (via ReloadTracks/ReloadChapters). Every OTHER main-thread handler the dispatcher feeds (FileLoaded, FileEnded, Shutdown, LogMessageReceived) only reaches dispatcher.Post indirectly via downstream subscribers — VideoContext.OnPlaybackFileLoaded → SetVideo → dispatcher.Post, etc. Nulling our event fields here BEFORE dispatcher.Dispose is what makes those paths safe: a forwarded handler that lands on the main thread post-Dispose finds the event field null, the invoke is a no-op, and the subscriber that would have called dispatcher.Post never runs. If a future event field gets added without being nulled here, the race resurfaces in that new path.
         FileLoaded = null;
         FileEnded = null;
         TracksReloaded = null;
