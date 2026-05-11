@@ -63,6 +63,9 @@ public static class Program
             a => Util.IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, a));
         playback.Initialize();
 
+        // Safety-net dispose for exit paths that bypass MainWindow.OnWindowCloseRequest (any future app.Quit() trigger, or a normal-but-non-window-close shutdown). On the typical close-the-window exit, OnWindowCloseRequest's chain has already disposed primary playback via Primary VideoContext.Dispose; this call is a no-op via the MpvDispatcher's idempotent disposed flag. Doesn't cover SIGKILL or process abort — those are OS-level concerns .NET can't intercept.
+        app.OnShutdown += (_, _) => playback.Dispose();
+
         var window = new MainWindow(app, playback, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, initialFile);
         window.Present();
     }
