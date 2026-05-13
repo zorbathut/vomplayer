@@ -259,6 +259,12 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
     }
 
+    // Shut autosave down for the rest of this VM's lifetime. Required *before* the rest of the shutdown teardown begins (specifically before pipController.Dispose, which routes through this VM's DisablePip → autosave.UnbindSecondary and would otherwise overwrite a stream_count=2 saved row with a primary-only row). Idempotent; safe to call multiple times. Called from both MainWindow.OnWindowCloseRequest (the production shutdown path) and Dispose (safety net for VMs disposed outside that ritual — tests, future callers).
+    public void DetachAutosave()
+    {
+        autosave?.Detach();
+    }
+
     // Restore an entry from the saved-playlists store into the in-memory contexts. Pre-conditions: autosave must be attached (throws otherwise); PiP state should already match the saved entry (caller is responsible — MainWindow's open-recent-playlist handler toggles EnablePip/DisablePip before invoking this). startPaused=true sets pause before LoadFile so the user sees a thumbnail at the resume position rather than auto-play. Touches the entry's last_used_at so the menu reorders it to the top.
     public void LoadFromSaved(Guid guid, bool startPaused)
     {
@@ -808,6 +814,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        // Detach the autosave *before* DisablePip so UnbindSecondary's re-persist can't write a stale primary-only row over a stream_count=2 saved entry. Idempotent with the same call in MainWindow.OnWindowCloseRequest, which is the production-relevant call site (vm.Dispose runs after pipController.Dispose, which already triggered DisablePip).
+        DetachAutosave();
         // DisablePip's null check tolerates the off case; explicit call also unsubscribes Secondary.PropertyChanged before it gets disposed.
         if (Secondary != null)
         {

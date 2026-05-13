@@ -405,6 +405,115 @@ public partial class PlaylistAutosaveTests
         autosave.EndRestore();
     }
 
+    [Test]
+    public void DetachStopsUnbindSecondaryFromPersisting()
+    {
+        // Pins the shutdown-clobber regression: a two-stream row must survive the shutdown teardown chain (DisablePip → UnbindSecondary) when the autosave has been Detached first.
+        var repo = new FakeSavedPlaylists();
+        var autosave = new PlaylistAutosave(repo);
+        var primaryPb = new FakePlayback();
+        var secondaryPb = new FakePlayback();
+        using var primary = new VideoContext(primaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        using var secondary = new VideoContext(secondaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        autosave.BindPrimary(primary);
+        autosave.BindSecondary(secondary);
+
+        primary.Playlist.Replace(new[] { "/p.mp4" });
+        secondary.Playlist.Replace(new[] { "/s.mp4" });
+        primaryPb.RaiseMediaTitle("P");
+        secondaryPb.RaiseMediaTitle("S");
+        var guid = autosave.CurrentGuid;
+        Assert.That(repo.GetById(guid)!.StreamCount, Is.EqualTo(2));
+        int saveCountBefore = repo.SaveCalls.Count;
+
+        autosave.Detach();
+        autosave.UnbindSecondary();
+
+        Assert.That(repo.SaveCalls.Count, Is.EqualTo(saveCountBefore), "UnbindSecondary after Detach must not write");
+        Assert.That(repo.GetById(guid)!.StreamCount, Is.EqualTo(2), "two-stream row must still be intact");
+    }
+
+    [Test]
+    public void DetachStopsPersistOnSubsequentMutations()
+    {
+        // After Detach, the autosave is inert: no Replace, SetCurrent, Move, or MediaTitle change can produce a write.
+        var repo = new FakeSavedPlaylists();
+        var autosave = new PlaylistAutosave(repo);
+        var primaryPb = new FakePlayback();
+        using var primary = new VideoContext(primaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        autosave.BindPrimary(primary);
+
+        primary.Playlist.Replace(new[] { "/a.mp4", "/b.mp4" });
+        int saveCountBefore = repo.SaveCalls.Count;
+
+        autosave.Detach();
+
+        primary.Playlist.Replace(new[] { "/x.mp4" });
+        primary.Playlist.SetCurrent(0);
+        primary.Playlist.Append(new[] { "/y.mp4" });
+        primary.Playlist.Move(0, 1);
+        primaryPb.RaiseMediaTitle("Title After Detach");
+
+        Assert.That(repo.SaveCalls.Count, Is.EqualTo(saveCountBefore), "No Persist after Detach");
+    }
+
+    [Test]
+    public void DetachIsIdempotent()
+    {
+        var repo = new FakeSavedPlaylists();
+        var autosave = new PlaylistAutosave(repo);
+        using var primary = NewContext();
+        autosave.BindPrimary(primary);
+        primary.Playlist.Replace(new[] { "/a.mp4" });
+
+        autosave.Detach();
+        Assert.DoesNotThrow(() => autosave.Detach());
+    }
+
+    [Test]
+    public void DetachBeforeAnyBindIsSafe()
+    {
+        // Defensive: a VM that constructed an autosave but never bound primary should still tolerate Detach (e.g., a failed attach path).
+        var repo = new FakeSavedPlaylists();
+        var autosave = new PlaylistAutosave(repo);
+        Assert.DoesNotThrow(() => autosave.Detach());
+    }
+
+    [Test]
+    public void BindAfterDetachThrows()
+    {
+        // The autosave is dead after Detach. Re-binding is a programming error.
+        var repo = new FakeSavedPlaylists();
+        var autosave = new PlaylistAutosave(repo);
+        using var primary = NewContext();
+        using var secondary = NewContext();
+        autosave.Detach();
+        Assert.Throws<InvalidOperationException>(() => autosave.BindPrimary(primary));
+        Assert.Throws<InvalidOperationException>(() => autosave.BindSecondary(secondary));
+    }
+
+    [Test]
+    public void ViewModelDisposeWithPipActivePreservesMultiStreamRow()
+    {
+        // Pins the end-to-end shutdown bug: with PiP active and both slots populated, vm.Dispose must NOT clobber the saved row's secondary slot. Reproduces the production-observed corruption where a stream_count=2 row became stream_count=1 on app close.
+        var vm = NewViewModelWithAutosave(out _, out var repo);
+        var secondaryPb = new FakePlayback();
+        var secondary = new VideoContext(secondaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        vm.EnablePip(secondary);
+
+        vm.Primary.Playlist.Replace(new[] { "/p.mp4" });
+        secondary.Playlist.Replace(new[] { "/s.mp4" });
+        var guid = vm.Autosave!.CurrentGuid;
+        Assert.That(repo.GetById(guid)!.StreamCount, Is.EqualTo(2));
+
+        vm.Dispose();
+
+        Assert.That(repo.GetById(guid)!.StreamCount, Is.EqualTo(2), "shutdown must not overwrite the two-stream row");
+        var streams = repo.GetById(guid)!.Streams;
+        Assert.That(streams.Any(s => s.SlotIndex == 0 && s.Items.SequenceEqual(new[] { "/p.mp4" })), Is.True);
+        Assert.That(streams.Any(s => s.SlotIndex == 1 && s.Items.SequenceEqual(new[] { "/s.mp4" })), Is.True);
+    }
+
     // --- LoadFromSaved integration tests (exercises ViewModelMain → PlaylistAutosave + repo together) ---
 
     private static ViewModelMain NewViewModelWithAutosave(out FakePlayback playback, out FakeSavedPlaylists repo)

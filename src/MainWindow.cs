@@ -933,6 +933,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private bool OnWindowCloseRequest(Gtk.Window sender, EventArgs e)
     {
         isClosing = true;
+        // Detach the autosave first — pipController.Dispose below routes through viewModel.DisablePip → autosave.UnbindSecondary, which would otherwise persist a primary-only row over the live stream_count=2 entry. After Detach, the UnbindSecondary's Persist is gated and the saved row survives shutdown intact.
+        viewModel.DetachAutosave();
         CancelControlsHideTimer();
         // Release any held screensaver inhibit on close. Belt-and-braces: when the app exits and its DBus connection drops, the session daemon auto-releases inhibitors anyway, but doing this explicitly avoids depending on that and keeps clean shutdown behavior if the window is closed without quitting (multi-window future).
         if (screensaverInhibitCookie != 0)

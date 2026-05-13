@@ -21,6 +21,8 @@ public sealed class PlaylistAutosave
     private VideoContext? primary;
     private VideoContext? secondary;
     private bool loading;
+    // One-way kill switch set by Detach for shutdown. Distinct from `loading`: `loading` is a re-entrant gate during Restore that the caller raises/clears; `detached` is permanent and forbids re-binding. Without it the dispose chain (MainWindow.OnWindowCloseRequest → pipController.Dispose → vm.DisablePip → autosave.UnbindSecondary → Persist) overwrites a stream_count=2 row with a primary-only row at app close.
+    private bool detached;
     private Action<PlaylistChangeKind>? primaryChangedHandler;
     private PropertyChangedEventHandler? primaryPropertyChangedHandler;
     private Action<PlaylistChangeKind>? secondaryChangedHandler;
@@ -46,6 +48,10 @@ public sealed class PlaylistAutosave
         {
             throw new ArgumentNullException(nameof(ctx));
         }
+        if (detached)
+        {
+            throw new InvalidOperationException("Cannot bind on a detached autosave");
+        }
         if (primary != null)
         {
             throw new InvalidOperationException("Primary already bound");
@@ -62,6 +68,10 @@ public sealed class PlaylistAutosave
         if (ctx == null)
         {
             throw new ArgumentNullException(nameof(ctx));
+        }
+        if (detached)
+        {
+            throw new InvalidOperationException("Cannot bind on a detached autosave");
         }
         if (secondary != null)
         {
@@ -91,8 +101,46 @@ public sealed class PlaylistAutosave
             secondaryPropertyChangedHandler = null;
         }
         secondary = null;
-        // After Secondary leaves, the in-memory playlist becomes single-stream. Re-persist so the row's stream_count drops to 1 and the startup-autoload rule starts treating it as single-stream. Persist itself is gated on `loading`, so a DisablePip mid-Restore is suppressed — the restoring caller is responsible for writing the final state.
+        // After Secondary leaves, the in-memory playlist becomes single-stream. Re-persist so the row's stream_count drops to 1 and the startup-autoload rule starts treating it as single-stream. Persist itself is gated on `loading` and `detached`, so a DisablePip mid-Restore or mid-shutdown is suppressed — the restoring caller (or shutdown sequence) is responsible for writing the final state.
         Persist();
+    }
+
+    // Permanent kill switch for shutdown. Unsubscribes both primary and secondary handlers without persisting, and gates every persistence entrypoint going forward. Required because the shutdown teardown path (pipController.Dispose → vm.DisablePip → autosave.UnbindSecondary) would otherwise overwrite a two-stream saved row with a primary-only row. Idempotent: a second call is a no-op. Re-binding after Detach throws — the autosave is dead for this VM instance.
+    public void Detach()
+    {
+        if (detached)
+        {
+            return;
+        }
+        detached = true;
+        if (secondary != null)
+        {
+            if (secondaryChangedHandler != null)
+            {
+                secondary.Playlist.Changed -= secondaryChangedHandler;
+                secondaryChangedHandler = null;
+            }
+            if (secondaryPropertyChangedHandler != null)
+            {
+                secondary.PropertyChanged -= secondaryPropertyChangedHandler;
+                secondaryPropertyChangedHandler = null;
+            }
+            secondary = null;
+        }
+        if (primary != null)
+        {
+            if (primaryChangedHandler != null)
+            {
+                primary.Playlist.Changed -= primaryChangedHandler;
+                primaryChangedHandler = null;
+            }
+            if (primaryPropertyChangedHandler != null)
+            {
+                primary.PropertyChanged -= primaryPropertyChangedHandler;
+                primaryPropertyChangedHandler = null;
+            }
+            primary = null;
+        }
     }
 
     public void BeginRestore()
@@ -162,7 +210,7 @@ public sealed class PlaylistAutosave
 
     private void Persist()
     {
-        if (loading)
+        if (loading || detached)
         {
             return;
         }
