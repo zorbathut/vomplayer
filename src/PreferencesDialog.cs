@@ -3,12 +3,12 @@ using Vomplayer.UserData;
 
 namespace Vomplayer;
 
-// Modal preferences dialog for editing the HotkeyMap. Snapshots the live map on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyHotkeys swaps the runtime map and persists to TOML. Cancel discards the snapshot.
+// Modal preferences dialog. Two tabs in a Gtk.Notebook: "General" (one checkbox today — single-instance mode) and "Hotkeys" (the per-action shortcut grid). Snapshots the live state on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyPreferences swaps the runtime map, persists both sections to TOML, and refreshes menu accelerators. Cancel discards the snapshot.
 //
-// Layout: a true spreadsheet via Gtk.Grid wrapped in Gtk.ScrolledWindow. Row 0 is the header (Action, Shortcut 1, Shortcut 2, …). Each subsequent row is one action: action label in column 0, then one cell per binding slot, then trailing empty cells the user can click to add new bindings. Column count is recomputed on each rebuild as `max(MinSlots, max_bindings_across_actions + 1)` so there's always at least one trailing empty cell on every row, but the grid never grows unboundedly: a user with 8 bindings on one action makes the dialog wide, by design — the alternative (truncating with a "more…" indicator) hides what's bound.
+// Hotkeys tab layout: a true spreadsheet via Gtk.Grid wrapped in Gtk.ScrolledWindow. Row 0 is the header (Action, Shortcut 1, Shortcut 2, …). Each subsequent row is one action: action label in column 0, then one cell per binding slot, then trailing empty cells the user can click to add new bindings. Column count is recomputed on each rebuild as `max(MinSlots, max_bindings_across_actions + 1)` so there's always at least one trailing empty cell on every row, but the grid never grows unboundedly: a user with 8 bindings on one action makes the dialog wide, by design — the alternative (truncating with a "more…" indicator) hides what's bound.
 //
 // Capture flow: click any cell, including an empty one. The cell becomes armed and shows "Press a key…". The status bar at the bottom appears with a Mouse-trigger menu and instructions. Press a key to bind; pick from the Mouse menu to bind a mouse click; press Delete (in an armed *occupied* cell) to clear that slot; press Escape to cancel. Esc-as-a-binding remains reachable via hand-editing config.toml — the default ExitFullscreen ships that way. Cross-action conflicts are resolved by HotkeyMap.Bind, which removes the trigger from any other action it was previously assigned to.
-internal sealed class HotkeysDialog : Gtk.Window
+internal sealed class PreferencesDialog : Gtk.Window
 {
     // Minimum number of shortcut columns in the grid even when no action has any binding. Keeps the table from feeling claustrophobic on a fresh "all empty" config.
     private const int MinSlots = 4;
@@ -27,8 +27,9 @@ internal sealed class HotkeysDialog : Gtk.Window
     private readonly Gtk.Box statusBar;
     private readonly Gtk.Label statusLabel;
     private readonly Gtk.MenuButton mouseMenuButton;
+    private readonly Gtk.CheckButton singleInstanceCheck;
 
-    public HotkeysDialog(MainWindow owner) : base()
+    public PreferencesDialog(MainWindow owner) : base()
     {
         if (owner == null)
         {
@@ -37,13 +38,40 @@ internal sealed class HotkeysDialog : Gtk.Window
         this.owner = owner;
         this.editing = owner.GetHotkeysSnapshot();
 
-        Title = "Hotkeys";
+        Title = "Preferences";
         SetTransientFor(owner);
         SetModal(true);
         SetDefaultSize(720, 540);
 
         var outerBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         SetChild(outerBox);
+
+        var notebook = Gtk.Notebook.New();
+        notebook.SetVexpand(true);
+        notebook.SetHexpand(true);
+        outerBox.Append(notebook);
+
+        // General tab — one checkbox today; we'll add siblings as more app-level settings arrive.
+        var generalPage = Gtk.Box.New(Gtk.Orientation.Vertical, 8);
+        generalPage.SetMarginStart(12);
+        generalPage.SetMarginEnd(12);
+        generalPage.SetMarginTop(12);
+        generalPage.SetMarginBottom(12);
+
+        singleInstanceCheck = Gtk.CheckButton.NewWithLabel("Open files in the running window when launching from the command line");
+        singleInstanceCheck.SetActive(owner.GetSingleInstancePreference());
+        generalPage.Append(singleInstanceCheck);
+
+        var singleInstanceNote = Gtk.Label.New("Changes apply on next launch.");
+        singleInstanceNote.AddCssClass("dim-label");
+        singleInstanceNote.SetXalign(0);
+        singleInstanceNote.SetMarginStart(24);
+        generalPage.Append(singleInstanceNote);
+
+        notebook.AppendPage(generalPage, Gtk.Label.New("General"));
+
+        // Hotkeys tab.
+        var hotkeysPage = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
 
         grid = Gtk.Grid.New();
         grid.AddCssClass("vompl-hotkey-grid");
@@ -58,7 +86,7 @@ internal sealed class HotkeysDialog : Gtk.Window
         scroll.SetMarginEnd(12);
         scroll.SetMarginTop(12);
         scroll.SetMarginBottom(0);
-        outerBox.Append(scroll);
+        hotkeysPage.Append(scroll);
 
         // Status bar — visible only while capturing. Status text on the left, Mouse menu and Cancel on the right.
         statusBar = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
@@ -82,14 +110,14 @@ internal sealed class HotkeysDialog : Gtk.Window
         cancelCaptureButton.OnClicked += (_, _) => EndCapture();
         statusBar.Append(cancelCaptureButton);
 
-        outerBox.Append(statusBar);
+        hotkeysPage.Append(statusBar);
 
-        // Bottom button row.
-        var buttonRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
-        buttonRow.SetMarginStart(12);
-        buttonRow.SetMarginEnd(12);
-        buttonRow.SetMarginTop(6);
-        buttonRow.SetMarginBottom(12);
+        // Restore-Defaults lives inside the Hotkeys tab — it only applies to hotkeys, so it would be misleading sitting next to Save/Cancel which apply to both sections.
+        var hotkeyDefaultsRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
+        hotkeyDefaultsRow.SetMarginStart(12);
+        hotkeyDefaultsRow.SetMarginEnd(12);
+        hotkeyDefaultsRow.SetMarginTop(4);
+        hotkeyDefaultsRow.SetMarginBottom(8);
 
         var defaultsButton = Gtk.Button.NewWithLabel("Restore Defaults");
         defaultsButton.OnClicked += (_, _) =>
@@ -97,7 +125,17 @@ internal sealed class HotkeysDialog : Gtk.Window
             editing = HotkeyMap.Default();
             EndCapture();
         };
-        buttonRow.Append(defaultsButton);
+        hotkeyDefaultsRow.Append(defaultsButton);
+        hotkeysPage.Append(hotkeyDefaultsRow);
+
+        notebook.AppendPage(hotkeysPage, Gtk.Label.New("Hotkeys"));
+
+        // Bottom button row — applies to the whole dialog.
+        var buttonRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 6);
+        buttonRow.SetMarginStart(12);
+        buttonRow.SetMarginEnd(12);
+        buttonRow.SetMarginTop(6);
+        buttonRow.SetMarginBottom(12);
 
         var spacer = Gtk.Box.New(Gtk.Orientation.Horizontal, 0);
         spacer.SetHexpand(true);
@@ -111,7 +149,7 @@ internal sealed class HotkeysDialog : Gtk.Window
         saveButton.AddCssClass("suggested-action");
         saveButton.OnClicked += (_, _) =>
         {
-            owner.ApplyHotkeys(editing.Clone());
+            owner.ApplyPreferences(editing.Clone(), singleInstanceCheck.Active);
             Close();
         };
         buttonRow.Append(saveButton);

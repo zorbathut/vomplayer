@@ -653,7 +653,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
                 ToggleDiagnosticOverlay();
                 return true;
             case HotkeyAction.ShowPreferences:
-                ShowHotkeysDialog();
+                ShowPreferencesDialog();
                 return true;
             case HotkeyAction.SeekBack5:
                 viewModel.SeekRelative(-5);
@@ -726,18 +726,19 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         diagnosticAction.ChangeState(GLib.Variant.NewBoolean(!current));
     }
 
-    // Reload the runtime keymap from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by HotkeysDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated, so the new bindings are live; the user can retry by saving again.
-    internal void ApplyHotkeys(HotkeyMap map)
+    // Reload the runtime keymap and application-level toggles from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by PreferencesDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated and new bindings are live; the user can retry. single_instance only takes effect on next launch (the toggle changes process-startup behavior), so we just record it.
+    internal void ApplyPreferences(HotkeyMap map, bool singleInstance)
     {
         hotkeys = map;
         userConfig.Hotkeys = UserConfig.HotkeysSection.FromDictionary(map.ToTomlForm());
+        userConfig.Application.SingleInstance = singleInstance;
         try
         {
             userConfig.Save(configPath);
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[vompl] hotkeys: failed to save config to {configPath}: {ex.Message}");
+            Console.Error.WriteLine($"[vompl] preferences: failed to save config to {configPath}: {ex.Message}");
         }
         RefreshMenuAccels();
     }
@@ -745,6 +746,25 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     internal HotkeyMap GetHotkeysSnapshot()
     {
         return hotkeys.Clone();
+    }
+
+    internal bool GetSingleInstancePreference()
+    {
+        return userConfig.Application.SingleInstance;
+    }
+
+    // Entry point for files arriving from outside the app — today, the GApplication OnOpen signal fired by a remote-instance forward. Targets Primary directly rather than going through viewModel.LoadPaths (which honors SelectedSlot/SingleTarget) because a CLI second-invocation has no concept of PiP slot selection; landing the file in Primary matches what a user typing `./vomplayer foo.mp4` expects regardless of the running instance's PiP state. Same code path as `HandlePrimaryDrop`, so resume positions, recents, and autosave behave identically. Replace semantics, not append.
+    internal void LoadPathsExternal(IReadOnlyList<string> paths)
+    {
+        if (paths == null || paths.Count == 0)
+        {
+            return;
+        }
+        viewModel.Primary.LoadPaths(paths, replace: true);
+        if (viewModel.Primary.Playlist.Items.Count >= 2)
+        {
+            ShowPlaylistPanel();
+        }
     }
 
     // Notify handler for the "fullscreened" property. Resyncs when the compositor/WM changes the window state behind our back (e.g., a tiling-WM shortcut that un-fullscreens). If the state already matches, SetFullscreen already applied the visibility logic synchronously — no work left.

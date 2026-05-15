@@ -574,12 +574,19 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             return;
         }
+        initialFileLoaded = true;
         if (!string.IsNullOrEmpty(InitialFile))
         {
             // Initial file always lands in Primary — InitialFile is a process-level "the user passed this on argv" concept, not a per-context one. Routes through OpenFile so the command-line file is recorded in recents the same way drag-and-drop and the file picker are.
             Primary.OpenFile(InitialFile);
+            return;
         }
-        else if (savedPlaylists != null)
+        // A remote-forwarded GApplication OnOpen can arrive between window construction and the first render-context-ready callback. If that happened, Primary already has the externally-loaded file in its playlist — don't clobber it with the saved-playlist restore. Race window is small but real on slow startup.
+        if (Primary.Playlist.Items.Count > 0)
+        {
+            return;
+        }
+        if (savedPlaylists != null)
         {
             // No CLI arg: try to restore the most recent playlist. If it's multi-stream, do nothing (per user spec — don't auto-enable PiP at startup; let the user explicitly click the Recent entry to reactivate it). The single-stream path loads paused at the saved resume position.
             var last = savedPlaylists.GetMostRecent();
@@ -588,7 +595,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
                 LoadFromSaved(last.Guid, startPaused: true);
             }
         }
-        initialFileLoaded = true;
     }
 
     // Sync-mode "absolute delta" contract: Primary takes the user-targeted move; Secondary mirrors the same absolute-seconds delta so videos of different lengths or starting offsets stay locked at the relative offset the user has established. Isolated mode (SelectedContext != null) routes everything to the selected stream and bypasses all of this.

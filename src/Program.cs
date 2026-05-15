@@ -23,7 +23,7 @@ public static class Program
             e.SetObserved();
         };
 
-        string? initialFile = null;
+        // Local argv check — reject unknown flags up front rather than relying on GApplication's parse. Stops typo'd flags from reaching the primary or silently being treated as a file path.
         foreach (var a in args)
         {
             if (a.StartsWith('-'))
@@ -31,30 +31,84 @@ public static class Program
                 Console.Error.WriteLine($"[vomplayer] unknown flag: {a}");
                 return 2;
             }
-            else
-            {
-                initialFile = a;
-            }
         }
 
         // Config loads before gtk_init — the file is plain text and the deserializer doesn't touch any GTK API. MainWindow turns the string-form bindings into a HotkeyMap on the GTK main thread, after init, when gtk_accelerator_parse is safe to call.
         var configPath = UserDataPaths.ConfigFile;
         var userConfig = UserConfig.LoadOrDefault(configPath);
-        // Owned by Main so the SQLite connection is closed cleanly after the GTK main loop exits — including on abnormal exit, since the using block fires on any control-flow path. Shared across activations if the NonUnique app ever re-activates within one process; today that's a single window per process, but co-locating recents across hypothetical multi-window matches user intent.
+
+        var flags = StartupHelpers.ComputeAppFlags(userConfig.Application.SingleInstance);
+        var app = Gtk.Application.New("io.github.zorbathut.vomplayer", flags);
+
+        // Build the argv we feed into Run(). g_application_run expects argv[0] to be the program name and consumes it; .NET Main's `args` already had argv[0] stripped, so we prepend a placeholder. The forwarded-to-primary path will see this same argv minus argv[0] in OnCommandLine.
+        var runArgs = new string[args.Length + 1];
+        runArgs[0] = "vomplayer";
+        Array.Copy(args, 0, runArgs, 1, args.Length);
+
+        // Register before opening state.db so a remote process can forward + exit without ever touching SQLite. g_application_register is idempotent — Run() will re-register internally with no effect.
+        try
+        {
+            if (!app.Register(null))
+            {
+                Console.Error.WriteLine("[vomplayer] g_application_register returned false; cannot register on the session bus (is DBus available?)");
+                return 3;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[vomplayer] g_application_register threw: {ex.Message} (is DBus available?)");
+            return 3;
+        }
+
+        if (app.IsRemote)
+        {
+            // Remote: forward the command line to the primary and exit. GApplication's local_command_line should forward via D-Bus and return synchronously, but GirCore 0.7.0's Application.Run wrapper doesn't return on a remote — the process hangs indefinitely after the D-Bus call completes. Workaround: spawn a background thread that force-exits the process shortly after Run starts. By then the synchronous D-Bus CommandLine call has been delivered and the primary's OnCommandLine handler has fired (verified empirically). The 500 ms window is the round-trip budget; on a saturated session bus it might need bumping.
+            var quitter = new System.Threading.Thread(() =>
+            {
+                System.Threading.Thread.Sleep(500);
+                Environment.Exit(0);
+            });
+            quitter.IsBackground = true;
+            quitter.Start();
+            return app.Run(runArgs);
+        }
+
+        // Primary path. Owned by Main so the SQLite connection is closed cleanly after the GTK main loop exits — including on abnormal exit, since the using block fires on any control-flow path.
         using var stateDb = StateDatabase.Open(UserDataPaths.StateDb);
         var recentFiles = new RecentFiles(stateDb.Connection);
         var savedPlaylists = new SavedPlaylists(stateDb.Connection);
         var trackPreferences = new TrackPreferences(stateDb.Connection);
 
-        var app = Gtk.Application.New("io.github.zorbathut.vomplayer", Gio.ApplicationFlags.NonUnique);
-        app.OnActivate += (sender, _) =>
+        // Captured by OnCommandLine so the first-launch handler builds the window and subsequent remote-forwards reuse it. Today there's at most one window per process; if multi-window ever lands, both branches still apply.
+        MainWindow? window = null;
+        app.OnCommandLine += (sender, signalArgs) =>
         {
-            BuildAndPresent((Gtk.Application)sender, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, initialFile);
+            var cmd = signalArgs.CommandLine;
+            var forwardedArgv = cmd.GetArguments(out _);
+            var cwd = cmd.GetCwd();
+            var paths = StartupHelpers.ResolveCommandLineFiles(forwardedArgv, cwd, msg => Console.Error.WriteLine($"[vomplayer] {msg}"));
+            if (window == null)
+            {
+                // First-launch path (whether primary started with no args, with a file, or got a forwarded command line). Pass paths[0] as initialFile so OnRenderContextReady consumes it through Primary.OpenFile; extra files are dropped, matching the historical "one positional arg" behavior.
+                window = BuildAndPresent((Gtk.Application)sender, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, paths.Count > 0 ? paths[0] : null);
+            }
+            else if (paths.Count > 0)
+            {
+                window.LoadPathsExternal(paths);
+                window.Present();
+            }
+            else
+            {
+                // No-arg re-activation while the window already exists — just raise.
+                window.Present();
+            }
+            return 0;
         };
-        return app.RunWithSynchronizationContext(null);
+
+        return app.RunWithSynchronizationContext(runArgs);
     }
 
-    private static void BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
+    private static MainWindow BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
     {
         // gtk_init ran setlocale(LC_ALL, "") already; force LC_NUMERIC=C back before any mpv call. Must happen on the main thread after GTK init, not before Main.
         LibC.ForceCNumericLocale();
@@ -68,5 +122,6 @@ public static class Program
 
         var window = new MainWindow(app, playback, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, initialFile);
         window.Present();
+        return window;
     }
 }

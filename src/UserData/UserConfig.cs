@@ -12,6 +12,15 @@ namespace Vomplayer.UserData;
 public sealed class UserConfig
 {
     public HotkeysSection Hotkeys { get; set; } = new();
+    public ApplicationSection Application { get; set; } = new();
+
+    // Process-level behavior toggles. Today this is just the single-instance switch, but the section exists as a stable home for future startup/runtime toggles (default volume, window-size memory, …) so we don't churn the schema every time one shows up.
+    //
+    // `single_instance` defaults to true — a second `./vomplayer foo.mp4` invocation forwards the file to the running primary via GApplication's D-Bus handshake instead of spawning a fresh window. Pre-existing user TOMLs without this section fall back to the POCO default, so the upgrade is transparent.
+    public sealed class ApplicationSection
+    {
+        public bool SingleInstance { get; set; } = true;
+    }
 
     // Trigger strings stay as raw text here so we can read/write the file without depending on GTK being initialized — config loads before gtk_init in Program.Main, and gtk_accelerator_parse / gtk_accelerator_name would then be unsafe to call. The HotkeyMap derived from this section is built later, on the GTK main thread, in MainWindow.
     //

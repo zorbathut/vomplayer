@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 
 namespace Vomplayer.Services;
 
-// IUrlPrompt over plain Gtk.Window modals. Same style as HotkeysDialog / ShowAboutDialog — code-only, no .ui XML. The parent window is captured at construction so the dialogs land transient-for the right top-level.
+// IUrlPrompt over plain Gtk.Window modals. Same style as PreferencesDialog / ShowAboutDialog — code-only, no .ui XML. The parent window is captured at construction so the dialogs land transient-for the right top-level.
 public sealed class UrlPromptGtk : IUrlPrompt
 {
     private readonly Gtk.Window parent;

@@ -93,7 +93,7 @@ public sealed partial class MainWindow
         AddAction(addSubtitleAction);
 
         var preferencesAction = Gio.SimpleAction.New("preferences", null);
-        preferencesAction.OnActivate += (_, _) => ShowHotkeysDialog();
+        preferencesAction.OnActivate += (_, _) => ShowPreferencesDialog();
         AddAction(preferencesAction);
 
         // Stateful boolean action backing the Diagnostic Overlay checkbox. Gtk.PopoverMenuBar renders a check glyph automatically whenever the action's state is true; no menu-item attribute needed. GirCore's SimpleAction does NOT auto-apply the requested state on change-state — the handler must SetState explicitly, or the check glyph stays stuck on the previous value.
@@ -414,9 +414,9 @@ public sealed partial class MainWindow
         dialog.Present();
     }
 
-    private void ShowHotkeysDialog()
+    private void ShowPreferencesDialog()
     {
-        var dialog = new HotkeysDialog(this);
+        var dialog = new PreferencesDialog(this);
         dialog.Present();
     }
 }
