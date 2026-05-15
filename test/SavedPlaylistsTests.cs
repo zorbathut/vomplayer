@@ -112,6 +112,26 @@ public class SavedPlaylistsTests
     }
 
     [Test]
+    public void SaveCanonicalizesLocalPathsAndLeavesUrisAlone()
+    {
+        using var db = StateDatabase.Open(DbPath());
+        var sp = new SavedPlaylists(db.Connection);
+        var guid = Guid.NewGuid();
+        // Mix: a relative path (gets resolved against the CWD), an already-absolute path (passes through GetFullPath unchanged), and a URI (passes through untouched). The relative path's resolution depends on the test process's working directory, so we just assert it became absolute.
+        string relative = "rel/video.mp4";
+        string absolute = "/tmp/abs.mp4";
+        string url = "https://www.youtube.com/watch?v=abcdef";
+        sp.Save(guid, "mix", new[] { Stream(0, 0, relative, absolute, url) });
+        var loaded = sp.GetById(guid);
+        Assert.That(loaded, Is.Not.Null);
+        var items = loaded!.Streams[0].Items;
+        Assert.That(Path.IsPathRooted(items[0]), Is.True, "relative path must be canonicalized to absolute");
+        Assert.That(items[0], Does.EndWith("rel/video.mp4"));
+        Assert.That(items[1], Is.EqualTo(absolute));
+        Assert.That(items[2], Is.EqualTo(url));
+    }
+
+    [Test]
     public void SaveIsUpsertRewritingPayload()
     {
         using var db = StateDatabase.Open(DbPath());

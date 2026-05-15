@@ -116,6 +116,81 @@ public class PlaylistMenuSelectorTests
     }
 
     [Test]
+    public void SameFileWithDistinctGuidsDedupesToOneSlot()
+    {
+        // PlaylistAutosave mints a fresh GUID on every Open-replace, so opening /dirA/a.mp4 ten times yields ten rows with the same path. The selector must collapse them so a single hot file doesn't bury other directories.
+        var input = Order(
+            "/dirA/a.mp4", "/dirA/a.mp4", "/dirA/a.mp4", "/dirA/a.mp4", "/dirA/a.mp4",
+            "/dirA/a.mp4", "/dirA/a.mp4", "/dirA/a.mp4", "/dirA/a.mp4", "/dirA/a.mp4",
+            "/dirB/b.mp4");
+        var result = PlaylistMenuSelector.Select(input, 10, 5);
+        var paths = result.Select(r => r.Streams[0].Items[0]).ToArray();
+        Assert.That(paths, Is.EqualTo(new[] { "/dirA/a.mp4", "/dirB/b.mp4" }));
+    }
+
+    [Test]
+    public void FiveDirectoriesAreSurfacedDespiteRepeatOpensOfSameFile()
+    {
+        // Stress case for the directory-coverage guarantee: /dirA's single file is opened 20 times (20 fresh GUIDs, identical path) and four other directories each have one entry, all interleaved at the front of the history. Without file-level dedup, Phase 2's fill flood every remaining slot with /dirA repeats and only three of the four other directories make the cut.
+        var paths = new List<string>();
+        for (int i = 0; i < 20; i++)
+        {
+            paths.Add("/dirA/a.mp4");
+        }
+        paths.Add("/dirB/b.mp4");
+        paths.Add("/dirC/c.mp4");
+        paths.Add("/dirD/d.mp4");
+        paths.Add("/dirE/e.mp4");
+        var input = Order(paths.ToArray());
+
+        var result = PlaylistMenuSelector.Select(input, 10, 5);
+        var distinctDirs = result
+            .Select(r => System.IO.Path.GetDirectoryName(r.Streams[0].Items[0]))
+            .Distinct()
+            .ToArray();
+        Assert.That(distinctDirs.Length, Is.EqualTo(5));
+    }
+
+    [Test]
+    public void OtherDirectoriesSurfaceBehindTwentyDistinctFilesInOneDirectory()
+    {
+        // The directory-coverage guarantee under a binge-watch shape: twenty *different* files (a01..a20) all in /dirA were watched most recently, then one file each in /dirB through /dirE. Phase 1 must reach past the dirA wall to surface all four other directories; with directoryCoverageSlots=5 the result is "first dirA entry + one each from B/C/D/E + fill from older dirA".
+        var paths = new List<string>();
+        for (int i = 1; i <= 20; i++)
+        {
+            paths.Add($"/dirA/a{i:00}.mp4");
+        }
+        paths.Add("/dirB/b.mp4");
+        paths.Add("/dirC/c.mp4");
+        paths.Add("/dirD/d.mp4");
+        paths.Add("/dirE/e.mp4");
+        var input = Order(paths.ToArray());
+
+        var result = PlaylistMenuSelector.Select(input, 10, 5);
+        var resultPaths = result.Select(r => r.Streams[0].Items[0]).ToArray();
+        Assert.That(resultPaths.Length, Is.EqualTo(10));
+        var distinctDirs = resultPaths.Select(p => System.IO.Path.GetDirectoryName(p)).Distinct().ToArray();
+        Assert.That(distinctDirs.Length, Is.EqualTo(5), "all five directories must be represented");
+        Assert.That(resultPaths.Contains("/dirB/b.mp4"), Is.True);
+        Assert.That(resultPaths.Contains("/dirC/c.mp4"), Is.True);
+        Assert.That(resultPaths.Contains("/dirD/d.mp4"), Is.True);
+        Assert.That(resultPaths.Contains("/dirE/e.mp4"), Is.True);
+        Assert.That(resultPaths.Contains("/dirA/a01.mp4"), Is.True, "most-recent /dirA entry must appear");
+    }
+
+    [Test]
+    public void RepeatedUriCollapsesInFill()
+    {
+        // Same dedup rule applies to URI-only entries — five replays of the same YouTube URL take one slot, not five.
+        const string url = "https://www.youtube.com/watch?v=abcdef";
+        var input = Order(url, url, url, url, url, "/dirA/a.mp4");
+        var result = PlaylistMenuSelector.Select(input, 10, 5);
+        var paths = result.Select(r => r.Streams[0].Items[0]).ToArray();
+        Assert.That(paths.Count(p => p == url), Is.EqualTo(1));
+        Assert.That(paths.Contains("/dirA/a.mp4"), Is.True);
+    }
+
+    [Test]
     public void UrisDoNotConsumeDirectorySlotsButAppearInFill()
     {
         var input = Order(

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
@@ -59,11 +60,17 @@ public sealed class SavedPlaylists : ISavedPlaylists
         var payload = new List<StreamDto>(nonEmpty.Count);
         foreach (var s in nonEmpty)
         {
+            // Canonicalize each item's path before serialization so the same file always serializes to the same string regardless of the cwd at Open time. Without this, /home/x/foo.mp4 (file picker) and foo.mp4-while-cwd-is-/home/x (CLI invocation) save as distinct rows and the Recent-menu selector's file-level dedup can't tell they're the same file. URIs pass through unchanged.
+            var items = new List<string>(s.Items.Count);
+            foreach (var item in s.Items)
+            {
+                items.Add(CanonicalizeItem(item));
+            }
             payload.Add(new StreamDto
             {
                 Slot = s.SlotIndex,
                 CurrentIndex = s.CurrentIndex,
-                Items = new List<string>(s.Items),
+                Items = items,
             });
         }
         string json = JsonSerializer.Serialize(payload, JsonOptions);
@@ -147,6 +154,24 @@ public sealed class SavedPlaylists : ISavedPlaylists
             new DateTimeOffset(ticks, TimeSpan.Zero),
             streamCount,
             streams);
+    }
+
+    // Normalize a single playlist item for storage. Local paths are routed through Path.GetFullPath so cwd-relative invocations land on the same string as absolute ones; URIs (anything with a `scheme://` head) pass through unchanged. On GetFullPath failure (rare — invalid characters), the original string survives and the failure is logged; storing an unnormalized path is a soft regression for dedup, not a correctness bug, and mpv loads by raw string anyway.
+    private static string CanonicalizeItem(string pathOrUri)
+    {
+        if (!TrackPreferences.IsLocalFilesystemPath(pathOrUri))
+        {
+            return pathOrUri;
+        }
+        try
+        {
+            return Path.GetFullPath(pathOrUri);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[vompl] saved-playlists: GetFullPath('{pathOrUri}') failed: {ex.GetType().Name}: {ex.Message}");
+            return pathOrUri;
+        }
     }
 
     private static IReadOnlyList<SavedPlaylistStream> DeserializeStreams(string json)
