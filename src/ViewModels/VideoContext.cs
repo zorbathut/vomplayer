@@ -772,14 +772,14 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         ActiveHdrState = newState;
     }
 
-    // Single point of decision for the VRR frame-multiplier question. Combines source FPS, the current output's VRR window, and the trust flag through VrrPolicy.Decide; calls SetFrameMultiplier on the playback for N≥2 and ClearFrameMultiplier otherwise. Caches the decision (`LastVrrDecision`) for the diagnostic overlay. Runs from: AttachVrrSink (initial), VideoFps property change, IsSourceFpsTrustedChanged, CurrentOutputVrrRangeChanged. No-op when no sink is attached (the GLArea fallback path doesn't expose an IVrrSink, so multipliers don't apply there).
+    // Single point of decision for the VRR frame-multiplier question. Combines source FPS, the current output's VRR window, the current scanout refresh (used as a hard ceiling — see VrrPolicy), and the trust flag through VrrPolicy.Decide; calls SetFrameMultiplier on the playback for N≥2 and ClearFrameMultiplier otherwise. Caches the decision (`LastVrrDecision`) for the diagnostic overlay. Runs from: AttachVrrSink (initial), VideoFps property change, IsSourceFpsTrustedChanged, CurrentOutputVrrRangeChanged. No-op when no sink is attached (the GLArea fallback path doesn't expose an IVrrSink, so multipliers don't apply there). A mode change on the same active output without an accompanying VRR-range or active-output event won't re-trigger; the policy stays stale until the next file load, which we accept (rare enough to not warrant a new event surface).
     private void ApplyVrrPolicy()
     {
         if (vrrSink == null)
         {
             return;
         }
-        var decision = VrrPolicy.Decide(playback.VideoFps, vrrSink.CurrentOutputVrrRange, playback.IsSourceFpsTrusted);
+        var decision = VrrPolicy.Decide(playback.VideoFps, vrrSink.CurrentOutputVrrRange, vrrSink.CurrentOutputRefreshHz, playback.IsSourceFpsTrusted);
         LastVrrDecision = decision;
         if (decision.Multiplier >= 2)
         {

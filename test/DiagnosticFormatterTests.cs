@@ -259,6 +259,18 @@ public class DiagnosticFormatterTests
     }
 
     [Test]
+    public void VrrPolicyLineRendersSlackFloorActive()
+    {
+        // ×2 at 47.952 on a 48 Hz nominal floor — the policy took the slack-floor fallback (NTSC 23.976 × 2 = 47.952 below the strict floor but within manufacturer tolerance). Diagnostic should surface "slack-floor" so the user knows which path was taken.
+        var s = Baseline() with
+        {
+            SourceFps = 23.976,
+            LastDecision = new VrrDecision(2, 47.952, "ok (slack)"),
+        };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[6], Is.EqualTo("vrr:     ×2 → 47.952 [48-60 HDMI-A-1] (active, slack-floor)"));
+    }
+
+    [Test]
     public void VrrPolicyLineRendersWindowUnknown()
     {
         var s = Baseline() with

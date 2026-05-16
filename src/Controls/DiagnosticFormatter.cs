@@ -135,9 +135,16 @@ public static class DiagnosticFormatter
             ? " → " + s.LastDecision.OutputFps.ToString("F3", CultureInfo.InvariantCulture)
             : "";
         string window = FormatVrrWindow(s.OutputVrrRange, s.ConnectorName);
-        string status = s.LastDecision.Multiplier >= 2
-            ? "active"
-            : "no filter — " + s.LastDecision.Reason;
+        string status;
+        if (s.LastDecision.Multiplier >= 2)
+        {
+            // Surface the slack-floor path so users troubleshooting borderline NTSC cases (e.g. ×2 → 47.952 on a 48 Hz panel) can see whether the policy took the strict route or the slack fallback. Fragile string match against VrrPolicy's reason; localized here so churn is contained.
+            status = s.LastDecision.Reason == "ok (slack)" ? "active, slack-floor" : "active";
+        }
+        else
+        {
+            status = "no filter — " + s.LastDecision.Reason;
+        }
         return mult + fps + " " + window + " (" + status + ")";
     }
 

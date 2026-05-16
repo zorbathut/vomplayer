@@ -166,7 +166,9 @@ public partial class VideoContextTests
     private sealed class FakeVrrSink : IVrrSink
     {
         public VrrRange? Range { get; set; }
+        public double? RefreshHz { get; set; }
         public VrrRange? CurrentOutputVrrRange { get { return Range; } }
+        public double? CurrentOutputRefreshHz { get { return RefreshHz; } }
         public event Action? CurrentOutputVrrRangeChanged;
         public void RaiseChanged() { CurrentOutputVrrRangeChanged?.Invoke(); }
     }

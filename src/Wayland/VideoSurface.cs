@@ -124,6 +124,28 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
         }
     }
 
+    // Current scanout refresh (Hz) of the active output. Reads wl_output.mode through the registry on demand — no caching, no change event of its own. The first-wins ActiveOutput convention matches CurrentOutputIsHdr / CurrentOutputVrrRange. null when no active output or the mode event hasn't landed yet (the registry returns false from TryGetMode). Used by VrrPolicy as a hard ceiling.
+    public double? CurrentOutputRefreshHz
+    {
+        get
+        {
+            if (surface == null)
+            {
+                return null;
+            }
+            uint? active = surface.Bridge.ActiveOutput;
+            if (!active.HasValue)
+            {
+                return null;
+            }
+            if (WaylandOutputRegistry.TryGetMode(active.Value, out var mhz) && mhz > 0)
+            {
+                return mhz / 1000.0;
+            }
+            return null;
+        }
+    }
+
     // Connector name (e.g. "HDMI-A-1") of the output the subsurface is currently entered on, for the diagnostic overlay only. null when no active output or wl_output v < 4 (compositor doesn't advertise the .name event). Same first-wins ActiveOutput convention as CurrentOutputIsHdr / CurrentOutputVrrRange.
     public string? CurrentOutputConnectorName
     {

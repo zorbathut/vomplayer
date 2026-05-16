@@ -14,6 +14,9 @@ public interface IVrrSink
     // Resolved VRR window for the output the surface is currently entered on. null = unknown (no active output yet, output's name not yet observed, or EDID had no Range Limits descriptor).
     VrrRange? CurrentOutputVrrRange { get; }
 
+    // Current scanout refresh rate (Hz) of the output the surface is entered on — read lazily from wl_output.mode each time the policy runs. null = unknown (no active output, or mode event not yet landed). VrrPolicy uses this as a hard ceiling: compositors won't VRR-scan above the configured mode's pixel clock, so EDID's "max VRR" can be unreachable in the current mode. No standalone change event — the realistic re-trigger paths (active-output change, VRR-range change) already cover mode transitions; a runtime user-driven mode switch on the same output without anything else changing is rare enough that the policy can stay stale until next file load.
+    double? CurrentOutputRefreshHz { get; }
+
     // Fires on transitions of CurrentOutputVrrRange (deduped against last published value by the implementation). Same contract as CurrentOutputHdrChanged.
     event Action CurrentOutputVrrRangeChanged;
 }
