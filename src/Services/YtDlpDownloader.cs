@@ -138,6 +138,68 @@ public sealed class YtDlpDownloader : IUrlDownloader
         return urls;
     }
 
+    // Ask yt-dlp which extractor matches `url`. Used by the load path to distinguish "yt-dlp's generic extractor (the URL is a direct media link mpv can stream)" from "a specific extractor (YouTube, Twitch, …) where mpv-direct fails and we want to download instead." --flat-playlist keeps the call cheap — yt-dlp pattern-matches the URL without fetching video metadata. Exit-nonzero / process-start-fail throws; the caller treats that as "fall back to mpv-direct" rather than refusing to load.
+    public async Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            throw new ArgumentException("url must be non-empty", nameof(url));
+        }
+        var psi = new ProcessStartInfo
+        {
+            FileName = binary,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        psi.ArgumentList.Add("--no-playlist");
+        psi.ArgumentList.Add("--flat-playlist");
+        psi.ArgumentList.Add("--print");
+        psi.ArgumentList.Add("%(extractor)s");
+        psi.ArgumentList.Add("--no-warnings");
+        psi.ArgumentList.Add("--");
+        psi.ArgumentList.Add(url);
+
+        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("yt-dlp failed to start");
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+        var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+        try
+        {
+            await proc.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                proc.Kill(entireProcessTree: true);
+            }
+            catch (Exception killEx)
+            {
+                Console.Error.WriteLine($"[vompl] yt-dlp classify: Kill failed: {killEx.Message}");
+            }
+            try { await stdoutTask; } catch (OperationCanceledException) { } catch (Exception ex) { Console.Error.WriteLine($"[vompl] yt-dlp classify: stdout drain failed: {ex.Message}"); }
+            try { await stderrTask; } catch (OperationCanceledException) { } catch (Exception ex) { Console.Error.WriteLine($"[vompl] yt-dlp classify: stderr drain failed: {ex.Message}"); }
+            throw;
+        }
+        string stdout = await stdoutTask;
+        string stderr = await stderrTask;
+        if (proc.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"yt-dlp classify failed (exit {proc.ExitCode}): {stderr.Trim()}");
+        }
+        // yt-dlp prints one extractor line per entry; for --no-playlist + a single-video URL there's exactly one. Take the first non-empty line and compare to "generic" case-insensitively. Anything else means yt-dlp has a specific extractor for the URL (YouTube, Twitch, Vimeo, …), so we want to download.
+        var firstLine = stdout
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .FirstOrDefault(line => line.Length > 0);
+        if (firstLine != null && string.Equals(firstLine, "generic", StringComparison.OrdinalIgnoreCase))
+        {
+            return UrlLoadKind.MpvDirect;
+        }
+        return UrlLoadKind.YtDlpDownload;
+    }
+
     // Download the URL, reporting progress through the IProgress callback. Cache hit short-circuits without spawning yt-dlp. On miss, yt-dlp runs to completion and we return the local path. Cancellation kills the process tree synchronously.
     public async Task<string> DownloadAsync(string url, IProgress<UrlDownloadProgress>? progress, CancellationToken ct)
     {

@@ -156,6 +156,7 @@ public partial class PlaylistAutosaveTests
     {
         public bool IsAvailable() { return false; }
         public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct) { return Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()); }
+        public Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct) { return Task.FromResult(UrlLoadKind.MpvDirect); }
         public Task<string> DownloadAsync(string url, IProgress<UrlDownloadProgress>? progress, CancellationToken ct) { return Task.FromResult(url); }
     }
 

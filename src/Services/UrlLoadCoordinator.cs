@@ -5,16 +5,14 @@ using System.Threading.Tasks;
 
 namespace Vomplayer.Services;
 
-// Owns the full yt-dlp interaction surface for a video stream: interactive prompt + probe (OpenUrlInteractiveAsync), the URL-routing set, and the race-guarded download lifecycle. Created and held per-VideoContext.
+// Owns the full yt-dlp interaction surface for a video stream: interactive prompt + playlist-expansion probe (OpenUrlInteractiveAsync), URI-shape gating (ShouldProbe), and the race-guarded probe-then-route load lifecycle (StartUrlLoad). Created and held per-VideoContext.
 //
-// Contract: StartDownload's onCompleted fires only when the load is still the active download (cancellation token clear + the CTS hasn't been replaced by a newer StartDownload). Callers must additionally verify their own still-current predicate inside the callback — e.g., the host's "is the playlist still on this URL?" — because the coordinator doesn't know about playlist state.
+// Contract: StartUrlLoad's onResolved fires only when the load is still the active one (cancellation token clear + the CTS hasn't been replaced by a newer StartUrlLoad). Callers must additionally verify their own still-current predicate inside the callback — e.g., the host's "is the playlist still on this URL?" — because the coordinator doesn't know about playlist state.
 public sealed class UrlLoadCoordinator : IDisposable
 {
     private readonly IUrlDownloader downloader;
     private readonly IUrlPrompt prompt;
-    // URLs flagged for download routing (vs. handed straight to mpv). Populated from a successful OpenUrlInteractiveAsync probe; consulted by the host's load-current path via ShouldDownload.
-    private readonly HashSet<string> urlsRequiringDownload = new();
-    // CTS for the in-flight URL download (if any). StartDownload cancels and replaces this synchronously, so a stale download A racing a new load B can't clobber B's playback. RunAsync re-checks this field is still its CTS at completion time — defense in depth against the cancel-callback racing the onCompleted invocation.
+    // CTS for the in-flight URL load (if any — covers both the classify probe and any subsequent download). StartUrlLoad cancels and replaces this synchronously, so a stale load A racing a new load B can't clobber B's playback. RunAsync re-checks this field is still its CTS after each await — defense in depth against the cancel-callback racing the onResolved invocation.
     private CancellationTokenSource? activeCts;
 
     public UrlLoadCoordinator(IUrlDownloader downloader, IUrlPrompt prompt)
@@ -31,7 +29,7 @@ public sealed class UrlLoadCoordinator : IDisposable
         this.prompt = prompt;
     }
 
-    // Interactive URL-open flow: gate on yt-dlp availability, prompt the user for a URL, run a 30s-timeout probe via yt-dlp's --flat-playlist, and surface any failure via ShowError. Returns the resolved entry list (one entry for a single video, many for a playlist URL) or null if the user cancelled, the probe failed, yt-dlp wasn't installed, or no entries came back. Caller routes the result via SetUrlsRequiringDownload + the playlist.
+    // Interactive URL-open flow: gate on yt-dlp availability, prompt the user for a URL, run a 30s-timeout probe via yt-dlp's --flat-playlist, and surface any failure via ShowError. Returns the resolved entry list (one entry for a single video, many for a playlist URL) or null if the user cancelled, the probe failed, yt-dlp wasn't installed, or no entries came back. Caller drops the result into the playlist; each entry's load goes through ShouldProbe + StartUrlLoad in LoadCurrentItem, which then re-probes that entry's URL to decide between mpv-direct and yt-dlp download.
     public async Task<IReadOnlyList<string>?> OpenUrlInteractiveAsync()
     {
         // Gate before prompting. yt-dlp not available is a hard stop for this flow — there's no sensible fallback (mpv-direct doesn't handle YouTube), so the right UX is a clear "install yt-dlp" message rather than letting the user type a URL and *then* failing.
@@ -74,23 +72,15 @@ public sealed class UrlLoadCoordinator : IDisposable
         return entries;
     }
 
-    // Replace the URL-routing set with exactly the URLs from a fresh Open URL invocation. Bounds the set's size to the current playlist (post-probe) so it doesn't grow over the session, and prevents a previously-OpenUrl'd URL from re-entering the download path if the user later types it as a local file string.
-    public void SetUrlsRequiringDownload(IEnumerable<string> urls)
+    // Only http(s) URLs need yt-dlp's classification step. Local paths, mpv-native protocol URIs (smb://, sftp://, dvd://, bd://, rtsp://, rtmp://, ftp://, file://, magnet:, …) go straight to mpv: yt-dlp has no extractor for them, and mpv either handles them natively or surfaces its own "can't open" error. By classifying on URI shape rather than tracking "did this URL come from Open-URL", every entry-point — Open-URL prompt, drag-drop, command line, Recent-menu / autosave restore — sees the same routing decision.
+    public bool ShouldProbe(string pathOrUri)
     {
-        if (urls == null)
+        if (string.IsNullOrEmpty(pathOrUri))
         {
-            throw new ArgumentNullException(nameof(urls));
+            return false;
         }
-        urlsRequiringDownload.Clear();
-        foreach (var u in urls)
-        {
-            urlsRequiringDownload.Add(u);
-        }
-    }
-
-    public bool ShouldDownload(string pathOrUri)
-    {
-        return urlsRequiringDownload.Contains(pathOrUri);
+        return pathOrUri.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || pathOrUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
     }
 
     // Cancel-and-clear the in-flight CTS, if any. Idempotent — RunAsync's `finally` also disposes its CTS, but a second Dispose is a no-op. Called from the host's load-current path (before swapping in the new file's slot) and from the host's playlist-replace branch in OpenUrl (where we don't go through load-current but still want to stop a stale yt-dlp).
@@ -111,45 +101,74 @@ public sealed class UrlLoadCoordinator : IDisposable
         }
     }
 
-    // Kick off a download for `url`. Fire-and-forget. onCompleted runs (with the original url + the resolved local path) only if the download succeeded AND the coordinator-internal race guards pass — the host should still verify its own "still current" predicate inside the callback before acting on the local path. Cancellation is silent; non-cancel errors are surfaced via the prompt's ShowError.
+    // Kick off the full load for `url`: probe yt-dlp to classify (generic-extractor URLs route to mpv-direct, specific-extractor URLs route to a download), then either complete synchronously with the original URL or complete after a download with the local cache path. Fire-and-forget. onResolved fires with (url, loadablePath) — loadablePath is either the original URL (mpv-direct branch) or a /cache/... path (download branch). Cancellation is silent; non-cancel errors are surfaced via the prompt's ShowError.
     //
-    // Threading: the coordinator's CTS-identity check and the caller's onCompleted lambda must observe each other under the same synchronization context, since the host's residual predicate (e.g. "currentFilePath == url") can change between them. Today RunAsync's continuation lands on the GTK main thread (via the default sync context) and onCompleted runs synchronously from there — no other code can interleave. A future refactor that pushes onCompleted onto a different thread or queues it via Task.Run must revisit this contract.
-    public void StartDownload(string url, Action<string, string> onCompleted)
+    // Threading: the coordinator's CTS-identity check and the caller's onResolved lambda must observe each other under the same synchronization context, since the host's residual predicate (e.g. "currentFilePath == url") can change between them. Today RunAsync's continuation lands on the GTK main thread (via the default sync context) and onResolved runs synchronously from there — no other code can interleave. A future refactor that pushes onResolved onto a different thread or queues it via Task.Run must revisit this contract.
+    public void StartUrlLoad(string url, Action<string, string> onResolved)
     {
         if (url == null)
         {
             throw new ArgumentNullException(nameof(url));
         }
-        if (onCompleted == null)
+        if (onResolved == null)
         {
-            throw new ArgumentNullException(nameof(onCompleted));
+            throw new ArgumentNullException(nameof(onResolved));
         }
-        // Defense-in-depth: the host's load-current path also calls CancelActive at its top to cover the local-file case (no StartDownload follows). On the URL branch, both calls run; CancelActive is idempotent so the second one is a no-op. Removing this internal call would mean a caller that forgets to cancel first would leak the prior yt-dlp process until its natural completion.
+        // Defense-in-depth: the host's load-current path also calls CancelActive at its top to cover the local-file case (no StartUrlLoad follows). On the URL branch, both calls run; CancelActive is idempotent so the second one is a no-op. Removing this internal call would mean a caller that forgets to cancel first would leak the prior yt-dlp process until its natural completion.
         CancelActive();
         var cts = new CancellationTokenSource();
         activeCts = cts;
         // Fire-and-forget — exceptions are caught inside RunAsync and surfaced via the prompt's ShowError. Keeping the public entry-point synchronous matches the host's load-current path, which can't await.
-        _ = RunAsync(url, cts, onCompleted);
+        _ = RunAsync(url, cts, onResolved);
     }
 
-    private async Task RunAsync(string url, CancellationTokenSource cts, Action<string, string> onCompleted)
+    private async Task RunAsync(string url, CancellationTokenSource cts, Action<string, string> onResolved)
     {
         UrlProgressHandle? progressHandle = null;
         try
         {
-            progressHandle = prompt.ShowDownloadProgress("Downloading", cts);
-            string localPath = await downloader.DownloadAsync(url, progressHandle.Progress, cts.Token);
+            // Classification step. A failure here (yt-dlp absent, network glitch, extractor crash) falls back to mpv-direct — mpv's built-in ytdl-hook will surface "yt-dlp couldn't be found" or similar if the URL actually needs an extractor, and a true direct stream plays without any further help. Cancellation must propagate (the user clicked another row mid-probe).
+            UrlLoadKind kind;
+            try
+            {
+                kind = await downloader.ClassifyAsync(url, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[vompl] yt-dlp classify failed for {url}: {ex.Message}; falling back to mpv-direct");
+                kind = UrlLoadKind.MpvDirect;
+            }
 
-            // Race guard. The activeCts identity check catches the case where the user advanced to another URL during the download (a newer StartDownload swapped in its own CTS). Token cancellation handles the user-clicked-Cancel path.
+            // Race guard after the probe await — identical concern as the post-download guard.
             if (cts.Token.IsCancellationRequested || !ReferenceEquals(activeCts, cts))
             {
                 return;
             }
-            onCompleted(url, localPath);
+
+            if (kind == UrlLoadKind.MpvDirect)
+            {
+                onResolved(url, url);
+                return;
+            }
+
+            // YtDlpDownload branch. Open the progress dialog only here — direct-stream URLs that finish classification almost immediately shouldn't briefly flash a "Downloading" window.
+            progressHandle = prompt.ShowDownloadProgress("Downloading", cts);
+            string localPath = await downloader.DownloadAsync(url, progressHandle.Progress, cts.Token);
+
+            // Race guard. The activeCts identity check catches the case where the user advanced to another URL during the download (a newer StartUrlLoad swapped in its own CTS). Token cancellation handles the user-clicked-Cancel path.
+            if (cts.Token.IsCancellationRequested || !ReferenceEquals(activeCts, cts))
+            {
+                return;
+            }
+            onResolved(url, localPath);
         }
         catch (OperationCanceledException)
         {
-            // User clicked Cancel, or a newer StartDownload cancelled us. Either way, no playback to start.
+            // User clicked Cancel, or a newer StartUrlLoad cancelled us. Either way, no playback to start.
         }
         catch (Exception ex)
         {
@@ -162,7 +181,7 @@ public sealed class UrlLoadCoordinator : IDisposable
         finally
         {
             progressHandle?.Closer.Dispose();
-            // Only clear the field if we're still its CTS — a newer StartDownload may have already swapped in its own.
+            // Only clear the field if we're still its CTS — a newer StartUrlLoad may have already swapped in its own.
             if (ReferenceEquals(activeCts, cts))
             {
                 activeCts = null;

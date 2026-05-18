@@ -37,7 +37,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     private readonly IFilePicker filePicker;
     private readonly IRecentFiles recentFiles;
     private readonly ITrackPreferences trackPreferences;
-    // Owns the full yt-dlp interaction surface for this stream — interactive prompt + probe, the URL-routing set, and the download lifecycle. Per-context: an Open URL on Primary populating Secondary's set would be wrong.
+    // Owns the full yt-dlp interaction surface for this stream — interactive prompt + probe, URI-shape routing, and the download lifecycle. Per-context: the in-flight CTS / progress dialog must not leak across Primary/Secondary, so each stream gets its own.
     private readonly UrlLoadCoordinator urlLoad;
     // Currently-attached IHdrSink (the per-context VideoSurface on Wayland; null on the GLArea fallback path or when no surface is attached yet). AttachHdrSink populates this; DetachHdrSink clears it. Read by ApplyHdrPolicy and OnCurrentOutputHdrChanged.
     private IHdrSink? hdrSink;
@@ -233,7 +233,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         OpenFile(path);
     }
 
-    // The drag-drop / command-line URL paths do NOT route through here, so they don't get into the urlsRequiringDownload set and continue to go directly to mpv (which generally fails for YouTube but works for direct streams). Documented v1 gap; if drag-drop YouTube URLs become a feature ask, the right fix is a discriminated PlaylistItem type rather than growing this method's reach.
+    // OpenUrlAsync is the interactive prompt path. Drag-drop, command-line, and Recent-menu / autosave restored URLs reach LoadCurrentItem via LoadPaths/OpenFile/RestorePlaylist and get the same probe-and-route treatment — UrlLoadCoordinator.ShouldProbe gates on URI shape (http/https only) and StartUrlLoad's probe step decides between mpv-direct and yt-dlp download.
     public async Task OpenUrlAsync()
     {
         var entries = await urlLoad.OpenUrlInteractiveAsync();
@@ -241,7 +241,6 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return;
         }
-        urlLoad.SetUrlsRequiringDownload(entries);
         // Single-video URL: behave as today — replace playlist and autoplay (download starts in LoadCurrentItem). Playlist URL: populate the playlist but DO NOT auto-load the first entry. The user clicks a row when ready, and LoadCurrentItem then kicks off the download for just that row. This keeps a paste-of-a-50-video-playlist from immediately downloading anything. Cancel any in-flight download from a previous load so a stale yt-dlp doesn't keep running in the background after the user reframes their intent with a new OpenUrl.
         if (entries.Count == 1)
         {
@@ -436,16 +435,16 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         pendingResumePosition = TrackPreferences.IsLocalFilesystemPath(pathOrUri) ? recentFiles.GetPosition(pathOrUri) : null;
         PrefsLog($"LoadCurrentItem: pathOrUri={pathOrUri} → directoryKey={currentDirectoryKey ?? "<null>"}, resumePos={(pendingResumePosition?.ToString() ?? "<null>")}");
 
-        if (urlLoad.ShouldDownload(pathOrUri))
+        if (urlLoad.ShouldProbe(pathOrUri))
         {
-            // Coordinator-internal race guards (cancellation, newer-download-took-over) gate the callback. The CurrentFilePath check inside the callback is the host's own "still current" predicate — if the user advanced to another row during the download, our late LoadFile would clobber the new playback. The startPaused captured here flows into the eventual LoadFile so restored URL items honor the pause intent across the async download hop.
-            urlLoad.StartDownload(pathOrUri, (url, localPath) =>
+            // Coordinator-internal race guards (cancellation, newer-load-took-over) gate the callback. The CurrentFilePath check inside the callback is the host's own "still current" predicate — if the user advanced to another row during the probe / download, our late LoadFile would clobber the new playback. The startPaused captured here flows into the eventual LoadFile so restored URL items honor the pause intent across the async hop. loadablePath is either the original URL (mpv-direct branch) or a local cache path (downloaded branch).
+            urlLoad.StartUrlLoad(pathOrUri, (url, loadablePath) =>
             {
                 if (CurrentFilePath != url)
                 {
                     return;
                 }
-                playback.LoadFile(localPath, startPaused);
+                playback.LoadFile(loadablePath, startPaused);
             });
             return;
         }

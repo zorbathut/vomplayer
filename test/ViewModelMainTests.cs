@@ -333,9 +333,13 @@ public partial class ViewModelMainTests
     {
         public bool Available { get; set; } = true;
         public IReadOnlyList<string> NextProbeResult { get; set; } = Array.Empty<string>();
+        // Default to YtDlpDownload so legacy tests written before the probe step still exercise the download path. Tests that want to validate the mpv-direct branch set this to MpvDirect explicitly.
+        public Vomplayer.Services.UrlLoadKind ClassifyResult { get; set; } = Vomplayer.Services.UrlLoadKind.YtDlpDownload;
+        public Exception? ClassifyException { get; set; }
         public Func<string, string>? DownloadResolver { get; set; }
         public TaskCompletionSource<string>? PendingDownload { get; set; }
         public List<string> ProbeCalls { get; } = new();
+        public List<string> ClassifyCalls { get; } = new();
         public List<string> DownloadCalls { get; } = new();
         public List<CancellationToken> ObservedTokens { get; } = new();
 
@@ -348,6 +352,16 @@ public partial class ViewModelMainTests
         {
             ProbeCalls.Add(url);
             return Task.FromResult(NextProbeResult);
+        }
+
+        public Task<Vomplayer.Services.UrlLoadKind> ClassifyAsync(string url, CancellationToken ct)
+        {
+            ClassifyCalls.Add(url);
+            if (ClassifyException != null)
+            {
+                throw ClassifyException;
+            }
+            return Task.FromResult(ClassifyResult);
         }
 
         public Task<string> DownloadAsync(string url, IProgress<Vomplayer.Services.UrlDownloadProgress>? progress, CancellationToken ct)
@@ -610,14 +624,19 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public void OpenFileAcceptsRemoteUris()
+    public async Task OpenFileAcceptsRemoteUris()
     {
+        // A direct-stream URL — yt-dlp's classification step returns MpvDirect (matches the generic extractor), so mpv loads the URL itself rather than going through a download. Recents records the original URI either way.
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
+        var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.MpvDirect };
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), dl, new FakeUrlPrompt());
         vm.OpenFile("https://example.com/stream.m3u8");
+        await Task.Yield();
+        await Task.Delay(10);
         Assert.That(pb.LastLoadedFile, Is.EqualTo("https://example.com/stream.m3u8"));
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "https://example.com/stream.m3u8" }));
+        Assert.That(dl.DownloadCalls, Is.Empty, "mpv-direct branch must not invoke DownloadAsync");
     }
 
     [Test]
@@ -1688,16 +1707,19 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public void AutoAdvanceIntoUriItemWorks()
+    public async Task AutoAdvanceIntoUriItemWorks()
     {
-        // The next item is a URI; auto-advance shouldn't bail just because the entry isn't a local-fs path. The IsLocalFilesystemPath gate inside LoadCurrentItem only affects the recents-position lookup, not the load itself.
+        // The next item is a URI; auto-advance shouldn't bail just because the entry isn't a local-fs path. The IsLocalFilesystemPath gate inside LoadCurrentItem only affects the recents-position lookup, not the load itself. With ClassifyResult=MpvDirect (matches a real HLS m3u8 that yt-dlp's generic extractor handles), the loaded path is the URL itself.
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
+        var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.MpvDirect };
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, new FakeUrlPrompt());
         vm.LoadPaths(new[] { "/local.mkv", "https://example.com/stream.m3u8" }, replace: true);
         pb.RaiseFileLoaded();
         pb.DurationSeconds = 60;
 
         pb.IsEofReached = true;
+        await Task.Yield();
+        await Task.Delay(10);
 
         Assert.That(vm.Playlist.CurrentIndex, Is.EqualTo(1));
         Assert.That(pb.LastLoadedFile, Is.EqualTo("https://example.com/stream.m3u8"));
@@ -1863,9 +1885,9 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public async Task LoadCurrentItemNonUrlPathIsNotDownloaded()
+    public async Task LoadCurrentItemLocalPathIsNotDownloaded()
     {
-        // A drag-drop / OpenFile path doesn't add to urlsRequiringDownload, so even if it looks like a URL it bypasses the downloader. Today only http(s) URLs from OpenUrl reach the downloader; this test pins that gating.
+        // Local-filesystem paths bypass the downloader and go straight to mpv. Routing is by URI shape — a "looks like a scheme://..." string heads to yt-dlp, anything else heads to mpv.
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
@@ -1948,20 +1970,87 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public async Task LoadOpenFileForKnownUrlIsNotDownloaded()
+    public async Task LoadOpenFileForUrlRoutesThroughDownloader()
     {
-        // Pin: even though urlsRequiringDownload contains a URL from a prior OpenUrl, calling OpenFile with that URL string would NOT route through the downloader, because OpenFile / drag-drop callers don't add to the set. (Today the set lookup uses exact-string Contains, but the routing decision should be based on "did this come from OpenUrl" not "does this string look like a URL we've seen.")
-        //
-        // Note: this is asymmetric — OpenFile *would* re-trigger download for a URL the user previously opened via OpenUrl, because the set still contains it from that prior invocation. That asymmetry is documented in the urlsRequiringDownload field comment as a v1 quirk; this test pins the alternative path: a fresh URL never seen via OpenUrl is NOT routed through the downloader.
+        // Drag-drop / CLI / programmatic OpenFile of a URL routes through the downloader the same way Open-URL does. Pre-fix, this path silently bypassed the cache because urlsRequiringDownload was only populated by OpenUrl; the bypass left mpv to stream via its built-in ytdl-hook with nothing landing in url-downloads.
         var pb = new FakePlayback();
-        var dl = new FakeUrlDownloader();
+        var dl = new FakeUrlDownloader
+        {
+            DownloadResolver = u => $"/cache/{u}.mp4",
+        };
         var prompt = new FakeUrlPrompt();
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
 
-        vm.OpenFile("https://youtu.be/never-via-openurl");
+        vm.OpenFile("https://youtu.be/from-drag-drop");
+        await Task.Yield();
+        await Task.Delay(10);
 
+        Assert.That(dl.DownloadCalls, Is.EquivalentTo(new[] { "https://youtu.be/from-drag-drop" }));
+        Assert.That(pb.LoadedFiles, Is.EquivalentTo(new[] { "/cache/https://youtu.be/from-drag-drop.mp4" }));
+    }
+
+    [Test]
+    public async Task RestorePlaylistForUrlRoutesThroughDownloader()
+    {
+        // Recent-menu / app-startup restore for a URL with a specific extractor (YouTube) routes through the downloader. Pre-fix this bypassed the cache because urlsRequiringDownload was in-memory only; URI-shape gating + per-load classification closes that gap.
+        var pb = new FakePlayback();
+        var dl = new FakeUrlDownloader
+        {
+            DownloadResolver = u => $"/cache/{u}.mp4",
+        };
+        var prompt = new FakeUrlPrompt();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
+
+        vm.Primary.RestorePlaylist(new[] { "https://youtu.be/from-recent" }, currentIndex: 0, startPaused: false);
+        await Task.Yield();
+        await Task.Delay(10);
+
+        Assert.That(dl.ClassifyCalls, Is.EquivalentTo(new[] { "https://youtu.be/from-recent" }));
+        Assert.That(dl.DownloadCalls, Is.EquivalentTo(new[] { "https://youtu.be/from-recent" }));
+        Assert.That(pb.LoadedFiles, Is.EquivalentTo(new[] { "/cache/https://youtu.be/from-recent.mp4" }));
+    }
+
+    [TestCase("dvd://1")]
+    [TestCase("bd://")]
+    [TestCase("smb://server/share/file.mkv")]
+    [TestCase("sftp://user@host/file.mp4")]
+    [TestCase("rtsp://host/stream")]
+    [TestCase("rtmp://host/live")]
+    [TestCase("file:///home/zorba/movie.mp4")]
+    [TestCase("ftp://host/file.mp4")]
+    [TestCase("magnet:?xt=urn:btih:abc")]
+    public async Task LoadCurrentItemMpvNativeSchemeBypassesClassification(string nonHttpUri)
+    {
+        // mpv-native protocols (dvd, bd, smb, sftp, rtsp, rtmp, file, ftp) and magnet links go straight to mpv. Routing them through yt-dlp's classifier would waste a process spawn and end with "Download failed" — yt-dlp has no extractor for any of these. The URI-shape gate (ShouldProbe = http(s) only) keeps them on the mpv-direct path.
+        var pb = new FakePlayback();
+        var dl = new FakeUrlDownloader();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, new FakeUrlPrompt());
+
+        vm.OpenFile(nonHttpUri);
+        await Task.Yield();
+        await Task.Delay(10);
+
+        Assert.That(pb.LastLoadedFile, Is.EqualTo(nonHttpUri));
+        Assert.That(dl.ClassifyCalls, Is.Empty, "non-http(s) URIs must skip classification");
         Assert.That(dl.DownloadCalls, Is.Empty);
-        Assert.That(pb.LoadedFiles, Is.EquivalentTo(new[] { "https://youtu.be/never-via-openurl" }));
+    }
+
+    [Test]
+    public async Task LoadCurrentItemProbeFailureFallsBackToMpvDirect()
+    {
+        // yt-dlp not on PATH, or any other classify failure — fall back to handing the URL to mpv. mpv's built-in ytdl-hook will surface its own error if the URL really required yt-dlp; a direct-stream URL just plays.
+        var pb = new FakePlayback();
+        var dl = new FakeUrlDownloader { ClassifyException = new InvalidOperationException("yt-dlp not found") };
+        var prompt = new FakeUrlPrompt();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, prompt);
+
+        vm.OpenFile("https://youtu.be/probe-fails");
+        await Task.Yield();
+        await Task.Delay(10);
+
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("https://youtu.be/probe-fails"), "probe-failed URL should still reach mpv (mpv's own ytdl-hook may handle it)");
+        Assert.That(dl.DownloadCalls, Is.Empty);
+        Assert.That(prompt.Errors, Is.Empty, "probe failure is silent — mpv's own error path is the user-facing channel");
     }
 
     private sealed class FailingProbeDownloader : Vomplayer.Services.IUrlDownloader
@@ -1978,6 +2067,11 @@ public partial class ViewModelMainTests
         public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct)
         {
             throw new InvalidOperationException(message);
+        }
+
+        public Task<Vomplayer.Services.UrlLoadKind> ClassifyAsync(string url, CancellationToken ct)
+        {
+            throw new NotImplementedException();
         }
 
         public Task<string> DownloadAsync(string url, IProgress<Vomplayer.Services.UrlDownloadProgress>? progress, CancellationToken ct)

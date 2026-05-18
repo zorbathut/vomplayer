@@ -10,13 +10,18 @@ namespace Vomplayer.Tests;
 [TestFixture]
 public class UrlLoadCoordinatorTests
 {
-    // FakeUrlDownloader for coordinator tests. Each DownloadAsync call gets a fresh TaskCompletionSource that the test can drive (SetResult / TrySetCanceled / SetException) to simulate completion, cancellation, or failure. The fake also registers a TrySetCanceled callback on the supplied CancellationToken so the coordinator's CancelActive() propagates through to the download task naturally.
+    // FakeUrlDownloader for coordinator tests. ClassifyAsync resolves synchronously by default (configurable result) so most tests don't have to drive it; PendingClassify lets tests that need to interleave probe and download race events drive it asynchronously. Each DownloadAsync call gets a fresh TaskCompletionSource that the test can drive (SetResult / TrySetCanceled / SetException) to simulate completion, cancellation, or failure. The fake also registers a TrySetCanceled callback on the supplied CancellationToken so the coordinator's CancelActive() propagates through to the download task naturally.
     private sealed class FakeUrlDownloader : IUrlDownloader
     {
         public bool Available { get; set; } = true;
         public IReadOnlyList<string> NextProbeResult { get; set; } = Array.Empty<string>();
         public Func<string, CancellationToken, Task<IReadOnlyList<string>>>? ProbeOverride { get; set; }
+        // Default: every URL is a yt-dlp-extractor URL (the common case — Open URL prompts feed YouTube etc.). Tests for the mpv-direct branch override to MpvDirect.
+        public UrlLoadKind ClassifyResult { get; set; } = UrlLoadKind.YtDlpDownload;
+        public Exception? ClassifyException { get; set; }
+        public TaskCompletionSource<UrlLoadKind>? PendingClassify { get; set; }
         public List<string> ProbeCalls { get; } = new();
+        public List<string> ClassifyCalls { get; } = new();
         public List<TaskCompletionSource<string>> Downloads { get; } = new();
         public List<string> DownloadUrls { get; } = new();
 
@@ -33,6 +38,22 @@ public class UrlLoadCoordinatorTests
                 return ProbeOverride(url, ct);
             }
             return Task.FromResult(NextProbeResult);
+        }
+
+        public Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct)
+        {
+            ClassifyCalls.Add(url);
+            if (PendingClassify != null)
+            {
+                var tcs = PendingClassify;
+                ct.Register(() => tcs.TrySetCanceled(ct));
+                return tcs.Task;
+            }
+            if (ClassifyException != null)
+            {
+                throw ClassifyException;
+            }
+            return Task.FromResult(ClassifyResult);
         }
 
         public Task<string> DownloadAsync(string url, IProgress<UrlDownloadProgress>? progress, CancellationToken ct)
@@ -98,25 +119,25 @@ public class UrlLoadCoordinatorTests
     }
 
     [Test]
-    public void ShouldDownload_TrueForMembers_FalseForOthers()
+    public void ShouldProbe_TrueForHttpUrls_FalseForOtherSchemesAndLocalPaths()
     {
+        // Only http/https URLs are sent through yt-dlp's classification step. Local paths, mpv-native protocols (smb, sftp, dvd, bd, rtsp, …) and unrelated schemes (magnet:) bypass — yt-dlp has no extractor for them, and forcing them through the probe would just produce noise.
         var coord = new UrlLoadCoordinator(new FakeUrlDownloader(), new FakeUrlPrompt());
-        coord.SetUrlsRequiringDownload(new[] { "https://a", "https://b" });
-        Assert.That(coord.ShouldDownload("https://a"), Is.True);
-        Assert.That(coord.ShouldDownload("https://b"), Is.True);
-        Assert.That(coord.ShouldDownload("https://c"), Is.False);
-        Assert.That(coord.ShouldDownload(""), Is.False);
-    }
-
-    [Test]
-    public void SetUrlsRequiringDownload_Replaces()
-    {
-        var coord = new UrlLoadCoordinator(new FakeUrlDownloader(), new FakeUrlPrompt());
-        coord.SetUrlsRequiringDownload(new[] { "https://a" });
-        coord.SetUrlsRequiringDownload(new[] { "https://b" });
-        // Old URL is no longer flagged — replace, not merge.
-        Assert.That(coord.ShouldDownload("https://a"), Is.False);
-        Assert.That(coord.ShouldDownload("https://b"), Is.True);
+        Assert.That(coord.ShouldProbe("https://youtu.be/X"), Is.True);
+        Assert.That(coord.ShouldProbe("http://example.com/stream.mp4"), Is.True);
+        Assert.That(coord.ShouldProbe("HTTP://EXAMPLE.COM"), Is.True);
+        Assert.That(coord.ShouldProbe("ftp://host/file"), Is.False);
+        Assert.That(coord.ShouldProbe("smb://server/share/file.mkv"), Is.False);
+        Assert.That(coord.ShouldProbe("sftp://user@host/file"), Is.False);
+        Assert.That(coord.ShouldProbe("dvd://1"), Is.False);
+        Assert.That(coord.ShouldProbe("bd://"), Is.False);
+        Assert.That(coord.ShouldProbe("rtsp://host/stream"), Is.False);
+        Assert.That(coord.ShouldProbe("file:///home/zorba/video.mp4"), Is.False);
+        Assert.That(coord.ShouldProbe("magnet:?xt=urn:btih:..."), Is.False);
+        Assert.That(coord.ShouldProbe("/home/zorba/video.mp4"), Is.False);
+        Assert.That(coord.ShouldProbe("C:\\Users\\zorba\\video.mp4"), Is.False);
+        Assert.That(coord.ShouldProbe("relative/path.mp4"), Is.False);
+        Assert.That(coord.ShouldProbe(""), Is.False);
     }
 
     [Test]
@@ -214,91 +235,156 @@ public class UrlLoadCoordinatorTests
     }
 
     [Test]
-    public async Task StartDownload_Success_FiresOnCompleted()
+    public async Task StartUrlLoad_ClassifyExtractor_DownloadsAndFiresOnResolved()
     {
-        var dl = new FakeUrlDownloader();
+        var dl = new FakeUrlDownloader();  // ClassifyResult defaults to YtDlpDownload
         var prompt = new FakeUrlPrompt();
         using var coord = new UrlLoadCoordinator(dl, prompt);
 
         string? completedUrl = null;
-        string? completedLocal = null;
+        string? completedPath = null;
         var done = new TaskCompletionSource();
-        coord.StartDownload("https://x", (url, local) =>
+        coord.StartUrlLoad("https://x", (url, path) =>
         {
             completedUrl = url;
-            completedLocal = local;
+            completedPath = path;
             done.SetResult();
         });
 
-        // Coordinator's RunAsync is now awaiting our TCS. Drive it to completion.
+        // Probe completed synchronously → YtDlpDownload → DownloadAsync was called and is awaiting its TCS.
+        Assert.That(dl.ClassifyCalls, Is.EqualTo(new[] { "https://x" }));
         Assert.That(dl.Downloads, Has.Count.EqualTo(1));
         dl.Downloads[0].SetResult("/cache/x");
         await done.Task;
 
         Assert.That(completedUrl, Is.EqualTo("https://x"));
-        Assert.That(completedLocal, Is.EqualTo("/cache/x"));
+        Assert.That(completedPath, Is.EqualTo("/cache/x"));
         Assert.That(prompt.ProgressShown, Is.EqualTo(1));
         Assert.That(prompt.ProgressDisposed, Is.EqualTo(1));
         Assert.That(prompt.Errors, Is.Empty);
     }
 
     [Test]
-    public async Task StartDownload_CancelActive_SuppressesOnCompleted()
+    public async Task StartUrlLoad_ClassifyGeneric_BypassesDownloadAndFiresWithOriginalUrl()
+    {
+        // yt-dlp's generic extractor matched — that means the URL is a direct media link (an .mp4 / .m3u8 / etc.) that mpv can stream natively. No download needed, no progress dialog.
+        var dl = new FakeUrlDownloader { ClassifyResult = UrlLoadKind.MpvDirect };
+        var prompt = new FakeUrlPrompt();
+        using var coord = new UrlLoadCoordinator(dl, prompt);
+
+        string? completedUrl = null;
+        string? completedPath = null;
+        var done = new TaskCompletionSource();
+        coord.StartUrlLoad("https://example.com/stream.m3u8", (url, path) =>
+        {
+            completedUrl = url;
+            completedPath = path;
+            done.SetResult();
+        });
+
+        await done.Task;
+        Assert.That(completedUrl, Is.EqualTo("https://example.com/stream.m3u8"));
+        Assert.That(completedPath, Is.EqualTo("https://example.com/stream.m3u8"), "mpv-direct branch hands back the URL unchanged");
+        Assert.That(dl.Downloads, Is.Empty, "no download spawned for generic-extractor URLs");
+        Assert.That(prompt.ProgressShown, Is.EqualTo(0), "no progress dialog for mpv-direct");
+        Assert.That(prompt.Errors, Is.Empty);
+    }
+
+    [Test]
+    public async Task StartUrlLoad_ClassifyThrows_FallsBackToMpvDirect()
+    {
+        // yt-dlp not installed / network error / extractor crash → we don't refuse the load. Treat probe failure as "fall back to mpv-direct" and let mpv's own ytdl-hook surface a useful error if it actually needed yt-dlp.
+        var dl = new FakeUrlDownloader { ClassifyException = new InvalidOperationException("yt-dlp not on PATH") };
+        var prompt = new FakeUrlPrompt();
+        using var coord = new UrlLoadCoordinator(dl, prompt);
+
+        string? completedPath = null;
+        var done = new TaskCompletionSource();
+        coord.StartUrlLoad("https://youtu.be/X", (_, path) =>
+        {
+            completedPath = path;
+            done.SetResult();
+        });
+
+        await done.Task;
+        Assert.That(completedPath, Is.EqualTo("https://youtu.be/X"));
+        Assert.That(dl.Downloads, Is.Empty);
+        Assert.That(prompt.Errors, Is.Empty, "probe failure is silent — mpv surfaces its own error if needed");
+    }
+
+    [Test]
+    public async Task StartUrlLoad_CancelActive_SuppressesOnResolved()
+    {
+        // PendingClassify lets us suspend the probe step so CancelActive can fire during it.
+        var dl = new FakeUrlDownloader { PendingClassify = new TaskCompletionSource<UrlLoadKind>() };
+        var prompt = new FakeUrlPrompt();
+        using var coord = new UrlLoadCoordinator(dl, prompt);
+
+        bool fired = false;
+        coord.StartUrlLoad("https://x", (_, _) => fired = true);
+        Assert.That(dl.ClassifyCalls, Has.Count.EqualTo(1));
+
+        coord.CancelActive();
+        await Task.Yield();
+
+        Assert.That(fired, Is.False);
+        // No progress dialog ever opened — cancellation happened before the YtDlpDownload branch.
+        Assert.That(prompt.ProgressShown, Is.EqualTo(0));
+        Assert.That(prompt.Errors, Is.Empty);
+    }
+
+    [Test]
+    public async Task StartUrlLoad_CancelActive_DuringDownload_SuppressesOnResolved()
     {
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
         using var coord = new UrlLoadCoordinator(dl, prompt);
 
         bool fired = false;
-        coord.StartDownload("https://x", (_, _) => fired = true);
+        coord.StartUrlLoad("https://x", (_, _) => fired = true);
+        // Classify resolves immediately, download is awaiting its TCS.
         Assert.That(dl.Downloads, Has.Count.EqualTo(1));
 
         coord.CancelActive();
-        // CancelActive propagates through the registered ct callback → TrySetCanceled on the TCS → RunAsync's await throws OperationCanceledException → caught silently. Yielding lets the cancellation continuation drain.
         await Task.Yield();
 
         Assert.That(fired, Is.False);
-        // The progress dialog is still disposed by RunAsync's finally even on cancellation.
         Assert.That(prompt.ProgressDisposed, Is.EqualTo(1));
         Assert.That(prompt.Errors, Is.Empty, "user cancellation is not an error");
     }
 
     [Test]
-    public async Task StartDownload_SecondCallSupersedesFirst_OldOnCompletedSuppressed()
+    public async Task StartUrlLoad_SecondCallSupersedesFirst_OldOnResolvedSuppressed()
     {
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
         using var coord = new UrlLoadCoordinator(dl, prompt);
 
         bool firstFired = false;
-        coord.StartDownload("https://first", (_, _) => firstFired = true);
+        coord.StartUrlLoad("https://first", (_, _) => firstFired = true);
         Assert.That(dl.Downloads, Has.Count.EqualTo(1));
 
-        // Second StartDownload cancels the first internally before installing its own CTS.
         var secondDone = new TaskCompletionSource();
-        coord.StartDownload("https://second", (_, _) => secondDone.SetResult());
+        coord.StartUrlLoad("https://second", (_, _) => secondDone.SetResult());
         Assert.That(dl.Downloads, Has.Count.EqualTo(2));
 
-        // Drive the second download to completion. The first's TCS was already cancelled by CancelActive — its RunAsync's await threw and exited the race-guard branch.
         dl.Downloads[1].SetResult("/cache/second");
         await secondDone.Task;
 
-        Assert.That(firstFired, Is.False, "first onCompleted must not fire after being superseded");
-        // Both downloads' progress dialogs are disposed (first by cancellation, second by completion).
+        Assert.That(firstFired, Is.False, "first onResolved must not fire after being superseded");
         Assert.That(prompt.ProgressDisposed, Is.EqualTo(2));
     }
 
     [Test]
-    public async Task StartDownload_NonCancelException_ShowsErrorSuppressesOnCompleted()
+    public async Task StartUrlLoad_DownloadException_ShowsErrorSuppressesOnResolved()
     {
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
         using var coord = new UrlLoadCoordinator(dl, prompt);
 
         bool fired = false;
-        coord.StartDownload("https://x", (_, _) => fired = true);
+        coord.StartUrlLoad("https://x", (_, _) => fired = true);
         dl.Downloads[0].SetException(new InvalidOperationException("download failed"));
-        // Yield so the await continuation drains the exception path.
         for (int i = 0; i < 10 && prompt.Errors.Count == 0; i++)
         {
             await Task.Yield();
@@ -312,22 +398,19 @@ public class UrlLoadCoordinatorTests
     }
 
     [Test]
-    public async Task StartDownload_SupersededDownloadCompletingLate_ShowsNoError()
+    public async Task StartUrlLoad_SupersededDownloadCompletingLate_ShowsNoError()
     {
-        // If an old download throws AFTER being superseded by a newer one, the old RunAsync's catch must skip ShowError (the user has moved on).
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
         using var coord = new UrlLoadCoordinator(dl, prompt);
 
-        coord.StartDownload("https://first", (_, _) => { });
+        coord.StartUrlLoad("https://first", (_, _) => { });
         Assert.That(dl.Downloads, Has.Count.EqualTo(1));
 
         var firstTcs = dl.Downloads[0];
-        // Supersede before firstTcs throws.
-        coord.StartDownload("https://second", (_, _) => { });
+        coord.StartUrlLoad("https://second", (_, _) => { });
         Assert.That(dl.Downloads, Has.Count.EqualTo(2));
 
-        // First was already cancelled by Supersede; setting an exception is a no-op on a cancelled TCS, so use TrySetException to avoid throwing.
         firstTcs.TrySetException(new InvalidOperationException("late failure"));
         await Task.Yield();
 
@@ -345,14 +428,14 @@ public class UrlLoadCoordinatorTests
     }
 
     [Test]
-    public async Task Dispose_CancelsActiveDownload()
+    public async Task Dispose_CancelsActiveLoad()
     {
         var dl = new FakeUrlDownloader();
         var prompt = new FakeUrlPrompt();
         var coord = new UrlLoadCoordinator(dl, prompt);
 
         bool fired = false;
-        coord.StartDownload("https://x", (_, _) => fired = true);
+        coord.StartUrlLoad("https://x", (_, _) => fired = true);
         Assert.That(dl.Downloads, Has.Count.EqualTo(1));
 
         coord.Dispose();
