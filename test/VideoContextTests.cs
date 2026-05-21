@@ -94,7 +94,12 @@ public partial class VideoContextTests
         public List<string> LoadedFiles { get; } = new();
 
         public void Initialize() { }
-        public void LoadFile(string path, bool startPaused) { LoadedFiles.Add(path); }
+        public void LoadFile(string path, bool startPaused)
+        {
+            LoadedFiles.Add(path);
+            // Mirror production Playback.LoadFile, which synchronously clears IsEofReached so a stale carry-over from the prior file can't trip the auto-advance rising-edge gate. The synchronous PropertyChanged this fires is what re-enters the eof handler, so faking it here is necessary for the multi-advance scenarios to behave like production.
+            IsEofReached = false;
+        }
         public void TogglePause() { IsPaused = !IsPaused; }
         public void SetPaused(bool paused) { IsPaused = paused; }
         public void Seek(double seconds) { }
@@ -315,6 +320,26 @@ public partial class VideoContextTests
         pb.IsEofReached = true;
         Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(1), "single-context EOF advances by default");
         Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/b.mp4" }));
+    }
+
+    [Test]
+    public void AutoAdvanceFiresOnEveryConsecutiveEof()
+    {
+        // Regression: re-entrant PropertyChanged from Playback.LoadFile's synchronous IsEofReached=false during AdvanceAndLoadIfPossible was leaving wasEofReached stamped true after the outer handler returned (stale local stomp). The next file's EOF then looked like a non-rising edge and the playlist halted. Three files, two consecutive natural EOFs — both must advance.
+        using var ctx = NewContext(out var pb);
+        ctx.LoadPaths(new[] { "/a.mp4", "/b.mp4", "/c.mp4" }, replace: true);
+
+        pb.RaiseFileLoaded();
+        pb.DurationSeconds = 60;
+        pb.IsEofReached = true;
+        Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(1), "first EOF advanced /a → /b");
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/b.mp4" }));
+
+        // Faithful fake LoadFile cleared IsEofReached synchronously; now simulate the new file's lifecycle: FileLoaded, then a fresh false→true EOF transition.
+        pb.RaiseFileLoaded();
+        pb.IsEofReached = true;
+        Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(2), "second EOF advanced /b → /c");
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/b.mp4", "/c.mp4" }));
     }
 
     [Test]

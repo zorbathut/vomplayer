@@ -845,7 +845,8 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
                 {
                     AdvanceAndLoadIfPossible();
                 }
-                wasEofReached = nowEof;
+                // Re-read instead of reusing the local nowEof: AdvanceAndLoadIfPossible → LoadCurrentItem → Playback.LoadFile synchronously fires IsEofReached=false, which re-enters this handler and updates wasEofReached. Writing the stale nowEof here stomps that correction, freezing wasEofReached=true and disarming the rising-edge gate against every subsequent EOF until something (e.g. a user seek emitting false) resets it.
+                wasEofReached = playback.IsEofReached;
                 break;
             case nameof(IPlayback.VideoTracks):
                 VideoTracks = playback.VideoTracks;
