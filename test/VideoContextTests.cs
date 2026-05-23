@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -586,5 +587,198 @@ public partial class VideoContextTests
         Assert.That(pb.SetFrameMultiplierCalls, Is.Empty, "no Set call when source is already in/above the VRR range");
         Assert.That(pb.ClearFrameMultiplierCalls, Is.GreaterThan(clearCallsBeforeFileB), "Clear must be called when transitioning from a multiplied source to one already in window");
         Assert.That(ctx.LastVrrDecision.Multiplier, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void NextTrackStepsForwardInMiddleOfPlaylist()
+    {
+        using var ctx = NewContext(out var pb);
+        // Fake paths: the middle-of-playlist branch never touches the filesystem.
+        ctx.LoadPaths(new[] { "/a.mp4", "/b.mp4", "/c.mp4" }, replace: true);
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4" }));
+
+        ctx.NextTrack();
+        Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(1));
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/b.mp4" }));
+    }
+
+    [Test]
+    public void PreviousTrackStepsBackInMiddleOfPlaylist()
+    {
+        using var ctx = NewContext(out var pb);
+        ctx.LoadPaths(new[] { "/a.mp4", "/b.mp4", "/c.mp4" }, replace: true);
+        ctx.PlayPlaylistItem(2);
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/c.mp4" }));
+
+        ctx.PreviousTrack();
+        Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(1));
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/c.mp4", "/b.mp4" }));
+    }
+
+    [Test]
+    public void NextTrackAtEndAppendsDirectoryNeighbor()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-nav-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "a.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "b.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "c.mp4"), "");
+            string b = Path.Combine(dir, "b.mp4");
+            string c = Path.Combine(dir, "c.mp4");
+
+            using var ctx = NewContext(out var pb);
+            ctx.LoadPaths(new[] { b }, replace: true);
+
+            ctx.NextTrack();
+            Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { b, c }));
+            Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(1));
+            Assert.That(pb.LoadedFiles[^1], Is.EqualTo(c));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void PreviousTrackAtStartPrependsDirectoryNeighbor()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-nav-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "a.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "b.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "c.mp4"), "");
+            string a = Path.Combine(dir, "a.mp4");
+            string b = Path.Combine(dir, "b.mp4");
+
+            using var ctx = NewContext(out var pb);
+            ctx.LoadPaths(new[] { b }, replace: true);
+
+            ctx.PreviousTrack();
+            Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { a, b }));
+            Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(0));
+            Assert.That(pb.LoadedFiles[^1], Is.EqualTo(a));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void NextAndPreviousNoOpAtDirectoryEdges()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-nav-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "a.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "b.mp4"), "");
+            string a = Path.Combine(dir, "a.mp4");
+            string b = Path.Combine(dir, "b.mp4");
+
+            using var ctx = NewContext(out var pb);
+            // Whole directory in the playlist, current at the last item.
+            ctx.LoadPaths(new[] { a, b }, replace: true);
+            ctx.PlayPlaylistItem(1);
+            int loadsBefore = pb.LoadedFiles.Count;
+
+            // At last item AND last dir file: no wrap-around.
+            ctx.NextTrack();
+            Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { a, b }), "playlist unchanged");
+            Assert.That(pb.LoadedFiles.Count, Is.EqualTo(loadsBefore), "no load");
+
+            // Back to first item, then Previous at the first dir file: no wrap-around.
+            ctx.PlayPlaylistItem(0);
+            int loadsBeforePrev = pb.LoadedFiles.Count;
+            ctx.PreviousTrack();
+            Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { a, b }), "playlist unchanged");
+            Assert.That(pb.LoadedFiles.Count, Is.EqualTo(loadsBeforePrev), "no load");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void NextTrackWalksRepeatedlyPastTheEnd()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-nav-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "b.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "c.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "d.mp4"), "");
+            string b = Path.Combine(dir, "b.mp4");
+            string c = Path.Combine(dir, "c.mp4");
+            string d = Path.Combine(dir, "d.mp4");
+
+            using var ctx = NewContext(out var pb);
+            ctx.LoadPaths(new[] { b }, replace: true);
+
+            // Two presses past the end: each walk anchors on the new current item, so it walks b → c → d rather than re-finding c's neighbor.
+            ctx.NextTrack();
+            ctx.NextTrack();
+            Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { b, c, d }));
+            Assert.That(ctx.Playlist.CurrentIndex, Is.EqualTo(2));
+            Assert.That(pb.LoadedFiles[^1], Is.EqualTo(d));
+
+            // d is the last dir file — third press stops.
+            int loadsBefore = pb.LoadedFiles.Count;
+            ctx.NextTrack();
+            Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { b, c, d }));
+            Assert.That(pb.LoadedFiles.Count, Is.EqualTo(loadsBefore));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void NextTrackDoesNotDuplicateAnAlreadyQueuedNeighbor()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-nav-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "a.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "b.mp4"), "");
+            string a = Path.Combine(dir, "a.mp4");
+            string b = Path.Combine(dir, "b.mp4");
+
+            using var ctx = NewContext(out var pb);
+            // Disordered playlist (b before a) with current on the last item a. The directory neighbor after a is b — already queued at index 0 — so the walk must NOT re-append b.
+            ctx.LoadPaths(new[] { b, a }, replace: true);
+            ctx.PlayPlaylistItem(1);
+            int loadsBefore = pb.LoadedFiles.Count;
+
+            ctx.NextTrack();
+            Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { b, a }), "no duplicate row appended");
+            Assert.That(pb.LoadedFiles.Count, Is.EqualTo(loadsBefore), "no load");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void NextTrackOnNonLocalCurrentItemNoOps()
+    {
+        using var ctx = NewContext(out var pb);
+        // Single-item URL playlist: no scannable directory → no neighbor → no-op (no wrap, no crash).
+        ctx.LoadPaths(new[] { "https://example.com/stream.m3u8" }, replace: true);
+        int loadsBefore = pb.LoadedFiles.Count;
+        ctx.NextTrack();
+        ctx.PreviousTrack();
+        Assert.That(pb.LoadedFiles.Count, Is.EqualTo(loadsBefore));
+        Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { "https://example.com/stream.m3u8" }));
     }
 }

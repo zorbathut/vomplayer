@@ -323,4 +323,52 @@ public class PlaylistTests
         p.Advance();
         Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Advance));
     }
+
+    [Test]
+    public void PrependToEmptySetsCurrentToZero()
+    {
+        var p = new Playlist();
+        p.Prepend(new[] { "a" });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void PrependPrefixesItemsAndShiftsCurrentIndex()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "b", "c" });
+        p.SetCurrent(1); // current = "c"
+        p.Prepend(new[] { "z", "a" });
+        Assert.That(p.Items, Is.EqualTo(new[] { "z", "a", "b", "c" }));
+        // current followed its item: was index 1, now index 1 + 2 = 3 (still "c").
+        Assert.That(p.CurrentIndex, Is.EqualTo(3));
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("c"));
+    }
+
+    [Test]
+    public void PrependFiresChangedOnceWithPrependKind()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "b" });
+        int fires = 0;
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => { fires++; lastKind = k; };
+        p.Prepend(new[] { "a" });
+        Assert.That(fires, Is.EqualTo(1));
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Prepend));
+    }
+
+    [Test]
+    public void PrependEmptyIsNoOp()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a" });
+        int fires = 0;
+        p.Changed += _ => fires++;
+        p.Prepend(Array.Empty<string>());
+        Assert.That(fires, Is.EqualTo(0));
+        Assert.That(p.Items, Is.EqualTo(new[] { "a" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));
+    }
 }

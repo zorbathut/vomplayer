@@ -533,6 +533,23 @@ public partial class ViewModelMainTests
     }
 
     [Test]
+    public void NextAndPreviousTrackRouteToPrimaryWithNoSelection()
+    {
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
+        // Fake paths exercise only the middle-of-playlist branch (no filesystem touch).
+        vm.LoadPaths(new[] { "/a.mp4", "/b.mp4", "/c.mp4" }, replace: true);
+
+        vm.NextTrack();
+        Assert.That(vm.Primary.Playlist.CurrentIndex, Is.EqualTo(1));
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/b.mp4" }));
+
+        vm.PreviousTrack();
+        Assert.That(vm.Primary.Playlist.CurrentIndex, Is.EqualTo(0));
+        Assert.That(pb.LoadedFiles, Is.EqualTo(new[] { "/a.mp4", "/b.mp4", "/a.mp4" }));
+    }
+
+    [Test]
     public void SeekValueTracksPlaybackPosition()
     {
         var pb = new FakePlayback();

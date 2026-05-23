@@ -35,6 +35,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private readonly Gtk.Label positionLabel;
     private readonly Gtk.Label durationLabel;
     private readonly Gtk.Button playPauseButton;
+    private readonly Gtk.Button prevButton;
+    private readonly Gtk.Button nextButton;
     private readonly Gtk.Button muteButton;
     private readonly Gtk.Scale volumeScale;
     private readonly Gtk.Box controlsBox;
@@ -179,6 +181,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         playPauseButton.SetTooltipText("Play");
         playPauseButton.SetSensitive(false);
 
+        // Previous/next-track buttons. Freedesktop "skip" icons (the to-track ⏮/⏭ glyphs, distinct from the "seek" double-arrows); present across Adwaita/Breeze/Yaru. Insensitive until media loads, like playPauseButton — at a true directory edge the command no-ops (we don't scan the directory on every state change just to grey them out).
+        prevButton = Gtk.Button.NewFromIconName("media-skip-backward");
+        prevButton.SetTooltipText("Previous");
+        prevButton.SetSensitive(false);
+        nextButton = Gtk.Button.NewFromIconName("media-skip-forward");
+        nextButton.SetTooltipText("Next");
+        nextButton.SetSensitive(false);
+
         seekScaleController = new SeekScaleController(playback);
         seekScaleController.SeekRequested += v => viewModel.SeekTo(v);
         // ChapterScrubber wraps the controller's scale in its own vertical Gtk.Box and adds chapter markers on top. The controller still owns the scale's input/state machine; the scrubber is purely additive layout.
@@ -212,6 +222,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         controlsBox.Append(positionLabel);
         controlsBox.Append(chapterScrubber.Widget);
         controlsBox.Append(durationLabel);
+        controlsBox.Append(prevButton);
+        controlsBox.Append(nextButton);
         controlsBox.Append(muteButton);
         controlsBox.Append(volumeScale);
 
@@ -259,6 +271,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         SetChild(rootBox);
 
         playPauseButton.OnClicked += (_, _) => viewModel.PlayPauseCommand.Execute(null);
+        prevButton.OnClicked += (_, _) => viewModel.PreviousTrack();
+        nextButton.OnClicked += (_, _) => viewModel.NextTrack();
         muteButton.OnClicked += (_, _) => viewModel.ToggleMute();
         volumeScale.OnValueChanged += OnVolumeScaleValueChanged;
 
@@ -372,6 +386,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
                 bool hasMedia = viewModel.Duration > TimeSpan.Zero;
                 seekScaleController.SetSensitive(hasMedia);
                 playPauseButton.SetSensitive(hasMedia);
+                prevButton.SetSensitive(hasMedia);
+                nextButton.SetSensitive(hasMedia);
                 // Re-push to the scrubber so its in-trough mark normalization (`time/duration`) updates whenever duration arrives or changes — covers both file-load (chapters fire before duration on some containers) and the rare same-file duration update.
                 chapterScrubber.SetChapters(viewModel.Chapters, viewModel.Duration.TotalSeconds);
                 break;

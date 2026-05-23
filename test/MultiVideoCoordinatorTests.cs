@@ -244,6 +244,24 @@ public partial class MultiVideoCoordinatorTests
     }
 
     [Test]
+    public void NextTrackInSyncModeActsOnPrimaryOnly()
+    {
+        // Prev/Next track is a per-video command (like PlayPlaylistItem / Open*), NOT a transport command — so in sync mode (PiP on, no selection) it targets Primary only and does NOT fan out to Secondary.
+        using var h = new Harness();
+        h.Vm.LoadPaths(new[] { "/a1.mp4", "/a2.mp4" }, replace: true);
+        h.EnablePip();
+        h.Vm.Secondary!.LoadPaths(new[] { "/b1.mp4", "/b2.mp4" }, replace: true);
+        Assert.That(h.Vm.SelectedSlot, Is.Null, "broadcast/sync mode");
+
+        h.Vm.NextTrack();
+
+        Assert.That(h.Vm.Primary.Playlist.CurrentIndex, Is.EqualTo(1), "primary advanced");
+        Assert.That(h.Vm.Secondary!.Playlist.CurrentIndex, Is.EqualTo(0), "secondary untouched");
+        Assert.That(h.PrimaryPlayback.LoadedFiles, Is.EqualTo(new[] { "/a1.mp4", "/a2.mp4" }));
+        Assert.That(h.SecondaryPlayback!.LoadedFiles, Is.EqualTo(new[] { "/b1.mp4" }), "secondary did not load a new file");
+    }
+
+    [Test]
     public void PipOnBothAtEofPrimaryOutOfItemsDoesNotAdvance()
     {
         using var h = new Harness();

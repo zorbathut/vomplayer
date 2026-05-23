@@ -568,6 +568,19 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         SingleTarget.PlayPlaylistItem(index);
     }
 
+    // Previous/next-track navigation from the control-bar buttons. Per-video commands (like PlayPlaylistItem / Open*), NOT transport: loading a different file targets SingleTarget only, it does not fan out to both PiP streams the way Seek/StepFrame do. In sync mode that's Primary, exactly like clicking a playlist row; the Primary-only load fires FileLoaded → ClearTargetOffset, which the sync machinery re-captures on the next edge. InvalidateSyncSeekAnchor mirrors PlayPlaylistItem (the load resets Primary.Position).
+    public void NextTrack()
+    {
+        InvalidateSyncSeekAnchor();
+        SingleTarget.NextTrack();
+    }
+
+    public void PreviousTrack()
+    {
+        InvalidateSyncSeekAnchor();
+        SingleTarget.PreviousTrack();
+    }
+
     public void OnRenderContextReady()
     {
         if (initialFileLoaded)

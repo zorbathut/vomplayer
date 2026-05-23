@@ -8,6 +8,7 @@ public enum PlaylistChangeKind
 {
     Replace,
     Append,
+    Prepend,
     Move,
     SetCurrent,
     Advance,
@@ -65,6 +66,32 @@ public sealed class Playlist
         }
         // CurrentIndex unchanged when appending to a non-empty playlist — the currently-playing file stays at the same index, just with more items behind it.
         Changed?.Invoke(PlaylistChangeKind.Append);
+    }
+
+    // Insert paths at the FRONT. Mirror of Append for the prepend-from-directory case (PreviousTrack walking into the file before the first playlist item). CurrentIndex shifts right by paths.Count so the currently-playing item keeps following its row; on an empty playlist it starts at the new first item. The caller (PreviousTrack) then PlayPlaylistItem(0)s to move onto the prepended item.
+    public void Prepend(IReadOnlyList<string> paths)
+    {
+        if (paths == null)
+        {
+            throw new ArgumentNullException(nameof(paths));
+        }
+        if (paths.Count == 0)
+        {
+            return;
+        }
+        var combined = new List<string>(Items.Count + paths.Count);
+        combined.AddRange(paths);
+        combined.AddRange(Items);
+        Items = combined.AsReadOnly();
+        if (CurrentIndex < 0)
+        {
+            CurrentIndex = 0;
+        }
+        else
+        {
+            CurrentIndex += paths.Count;
+        }
+        Changed?.Invoke(PlaylistChangeKind.Prepend);
     }
 
     // Reorder: take the item at `from`, remove it, insert at `to`. Throws on out-of-range — out-of-range is a programmer error in single-threaded GTK callers, not a user-facing condition (per CLAUDE.md, silent error handling is banned).

@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Playback;
 using Vomplayer.Services;
 using Vomplayer.UserData;
+using Vomplayer.Util;
 using Vomplayer.Wayland;
 
 namespace Vomplayer.ViewModels;
@@ -400,6 +402,63 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
         LoadCurrentItem(startPaused: false);
         return true;
+    }
+
+    // Previous/next-track navigation, driven by the control-bar buttons. In the middle of the playlist they step one item (the "obvious thing"); at an edge they walk into the previous/next file in the current item's directory — prepending/appending it and moving onto it — so a user can keep going past the explicit playlist into sibling files. No directory neighbor (directory edge, or a non-local current item with no scannable directory) ⇒ stop, no wrap-around. Both route through the existing load machinery (AdvanceAndLoadIfPossible / PlayPlaylistItem → LoadCurrentItem), so recents, directory-key, and resume-position all behave exactly as a playlist-row click does.
+    public void NextTrack()
+    {
+        if (Playlist.CurrentIndex < 0)
+        {
+            return;
+        }
+        // Middle of the playlist: AdvanceAndLoadIfPossible steps forward and returns true. It returns false only when already at the last item — that's the edge case where we extend from the directory.
+        if (AdvanceAndLoadIfPossible())
+        {
+            return;
+        }
+        var neighbor = DirectoryNeighbor(Playlist.Items[Playlist.CurrentIndex], +1);
+        if (neighbor == null || Playlist.Items.Contains(neighbor))
+        {
+            // No neighbor on this side, or the directory's next file is already queued elsewhere in the playlist (only possible when the playlist order diverges from directory name-order — e.g. out-of-order append-drops). Stop rather than re-add a duplicate row. Best-effort path-identity match (ordinal); a relative-vs-absolute spelling of the same file isn't deduped, matching the playlist's existing identity semantics.
+            return;
+        }
+        // Append the discovered file then advance onto it (CurrentIndex was at the old last item; after Append there's one more behind it, so Advance moves to it).
+        Playlist.Append(new[] { neighbor });
+        AdvanceAndLoadIfPossible();
+    }
+
+    public void PreviousTrack()
+    {
+        int idx = Playlist.CurrentIndex;
+        if (idx < 0)
+        {
+            return;
+        }
+        if (idx > 0)
+        {
+            PlayPlaylistItem(idx - 1);
+            return;
+        }
+        var neighbor = DirectoryNeighbor(Playlist.Items[0], -1);
+        if (neighbor == null || Playlist.Items.Contains(neighbor))
+        {
+            // See NextTrack: stop rather than prepend a duplicate of an already-queued file.
+            return;
+        }
+        // Prepend shifts the old current item to index 1; move onto the newly-prepended item at index 0.
+        Playlist.Prepend(new[] { neighbor });
+        PlayPlaylistItem(0);
+    }
+
+    // Resolve the directory neighbor of a playlist item. Returns null for non-local items (URIs / no-parent paths — TryGetDirectoryKey filters those) or when there's no neighbor on the requested side. Directory-listing failures are surfaced unconditionally per the never-swallow rule (not the env-gated PrefsLog).
+    private string? DirectoryNeighbor(string currentItemPath, int direction)
+    {
+        var dir = TrackPreferences.TryGetDirectoryKey(currentItemPath);
+        if (dir == null)
+        {
+            return null;
+        }
+        return MediaExtensions.FindDirectoryNeighbor(dir, currentItemPath, direction, msg => Console.Error.WriteLine($"[vompl] track-nav: {msg}"));
     }
 
     // The shared per-file setup: outgoing-position save, recents.Record, currentDirectoryKey resolve, currentFilePath set, lastSavedPositionSeconds reset, pendingResumePosition lookup, then playback.LoadFile. Called from LoadPaths (when starting / replacing a playlist), PlayPlaylistItem, and the auto-advance handler. Idempotent w.r.t. the playlist itself — the playlist mutation already happened.

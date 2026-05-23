@@ -79,6 +79,91 @@ public class MediaExtensionsTests
     }
 
     [Test]
+    public void FindAdjacentByNameStepsThroughMiddle()
+    {
+        var c = new[] { "/d/a.mp4", "/d/b.mp4", "/d/c.mp4" };
+        Assert.That(MediaExtensions.FindAdjacentByName(c, "/d/b.mp4", +1), Is.EqualTo("/d/c.mp4"));
+        Assert.That(MediaExtensions.FindAdjacentByName(c, "/d/b.mp4", -1), Is.EqualTo("/d/a.mp4"));
+    }
+
+    [Test]
+    public void FindAdjacentByNameReturnsNullAtEnds()
+    {
+        var c = new[] { "/d/a.mp4", "/d/b.mp4", "/d/c.mp4" };
+        Assert.That(MediaExtensions.FindAdjacentByName(c, "/d/c.mp4", +1), Is.Null, "no next after last");
+        Assert.That(MediaExtensions.FindAdjacentByName(c, "/d/a.mp4", -1), Is.Null, "no prev before first");
+        Assert.That(MediaExtensions.FindAdjacentByName(Array.Empty<string>(), "/d/a.mp4", +1), Is.Null, "empty candidates");
+    }
+
+    [Test]
+    public void FindAdjacentByNameResolvesWhenCurrentAbsent()
+    {
+        // Current file isn't in the candidate list (deleted, or a playable-but-non-video extension the walk skipped). Neighbor is still found by name position.
+        var c = new[] { "/d/a.mp4", "/d/c.mp4", "/d/e.mp4" };
+        Assert.That(MediaExtensions.FindAdjacentByName(c, "/d/b.mp4", +1), Is.EqualTo("/d/c.mp4"), "next after the gap");
+        Assert.That(MediaExtensions.FindAdjacentByName(c, "/d/d.mp4", -1), Is.EqualTo("/d/c.mp4"), "prev before the gap");
+    }
+
+    [Test]
+    public void FindAdjacentByNameComparesByFilenameNotFullPath()
+    {
+        // current is a bare relative name; candidates are absolute. Comparison is by filename, so the relative/absolute mismatch doesn't skew ordering.
+        var c = new[] { "/some/dir/a.mp4", "/some/dir/b.mp4", "/some/dir/c.mp4" };
+        Assert.That(MediaExtensions.FindAdjacentByName(c, "b.mp4", +1), Is.EqualTo("/some/dir/c.mp4"));
+    }
+
+    [Test]
+    public void FindAdjacentByNameIsCaseInsensitiveButTieBreaksDeterministically()
+    {
+        // Ordering is case-insensitive (so "Apple.mp4" sits next to "banana.mp4", not after all lowercase).
+        var mixed = new[] { "/d/Apple.mp4", "/d/banana.mp4", "/d/Cherry.mp4" };
+        Assert.That(MediaExtensions.FindAdjacentByName(mixed, "/d/banana.mp4", +1), Is.EqualTo("/d/Cherry.mp4"));
+        Assert.That(MediaExtensions.FindAdjacentByName(mixed, "/d/banana.mp4", -1), Is.EqualTo("/d/Apple.mp4"));
+
+        // Case-only-differing siblings (possible on a case-sensitive FS): they are distinct and ordered by the Ordinal tie-break — uppercase ('M' = 0x4D) sorts before lowercase ('m' = 0x6D).
+        var siblings = new[] { "/d/Movie.mp4", "/d/movie.mp4" };
+        Assert.That(MediaExtensions.FindAdjacentByName(siblings, "/d/Movie.mp4", +1), Is.EqualTo("/d/movie.mp4"), "next from upper goes to lower");
+        Assert.That(MediaExtensions.FindAdjacentByName(siblings, "/d/movie.mp4", -1), Is.EqualTo("/d/Movie.mp4"), "prev from lower goes to upper");
+        Assert.That(MediaExtensions.FindAdjacentByName(siblings, "/d/Movie.mp4", -1), Is.Null, "nothing before the upper sibling");
+    }
+
+    [Test]
+    public void FindDirectoryNeighborWalksDirectoryFilteringNonVideo()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-neighbor-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "a.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "b.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "c.mp4"), "");
+            File.WriteAllText(Path.Combine(dir, "notes.txt"), "");
+
+            var errors = new List<string>();
+            string b = Path.Combine(dir, "b.mp4");
+            Assert.That(MediaExtensions.FindDirectoryNeighbor(dir, b, +1, errors.Add), Is.EqualTo(Path.Combine(dir, "c.mp4")));
+            Assert.That(MediaExtensions.FindDirectoryNeighbor(dir, b, -1, errors.Add), Is.EqualTo(Path.Combine(dir, "a.mp4")));
+            Assert.That(MediaExtensions.FindDirectoryNeighbor(dir, Path.Combine(dir, "c.mp4"), +1, errors.Add), Is.Null, "no next past last; notes.txt excluded");
+            Assert.That(MediaExtensions.FindDirectoryNeighbor(dir, Path.Combine(dir, "a.mp4"), -1, errors.Add), Is.Null, "no prev before first");
+            Assert.That(errors, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void FindDirectoryNeighborReportsListingFailure()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "vompl-missing-" + Guid.NewGuid().ToString("N"));
+        var errors = new List<string>();
+        var result = MediaExtensions.FindDirectoryNeighbor(missing, Path.Combine(missing, "x.mp4"), +1, errors.Add);
+        Assert.That(result, Is.Null);
+        Assert.That(errors, Has.Count.EqualTo(1), "listing failure surfaced, not swallowed");
+    }
+
+    [Test]
     public void ExpandPathsEmptyDirectoryProducesEmpty()
     {
         var dir = Path.Combine(Path.GetTempPath(), "vompl-expand-empty-" + Guid.NewGuid().ToString("N"));

@@ -86,4 +86,82 @@ public static class MediaExtensions
         expanded.Sort(StringComparer.OrdinalIgnoreCase);
         return expanded;
     }
+
+    // Pure neighbor selection used by the previous/next-track buttons when they walk off the end of the playlist. Given the video files in a directory, returns the one immediately after (direction > 0) or before (direction < 0) `current` in name order — or null if `current` is already the last/first. Single-pass min/max scan (NOT sort-then-index) so it stays correct even when `current` isn't in `candidates` (deleted, or a playable-but-non-video-extension file the directory walk skipped). Comparison is by filename (Path.GetFileName) under a total order — OrdinalIgnoreCase with an Ordinal tie-break — so case-only-differing siblings (Movie.mp4 vs movie.mp4 on a case-sensitive FS) are ordered deterministically. Filename (not full path) comparison also means a relative `current` (e.g. an argv-passed "clip.mp4") compares correctly against the enumerator's absolute candidate paths; within one directory the two orderings coincide anyway.
+    public static string? FindAdjacentByName(IReadOnlyList<string> candidates, string current, int direction)
+    {
+        if (candidates == null)
+        {
+            throw new ArgumentNullException(nameof(candidates));
+        }
+        if (current == null)
+        {
+            throw new ArgumentNullException(nameof(current));
+        }
+        string currentName = Path.GetFileName(current);
+        string? best = null;
+        string? bestName = null;
+        foreach (var c in candidates)
+        {
+            string name = Path.GetFileName(c);
+            int cmp = CompareName(name, currentName);
+            bool onRequestedSide = direction > 0 ? cmp > 0 : cmp < 0;
+            if (!onRequestedSide)
+            {
+                continue;
+            }
+            // Track the running best: for "next" the smallest of the after-set; for "previous" the largest of the before-set.
+            if (best == null || (direction > 0 ? CompareName(name, bestName!) < 0 : CompareName(name, bestName!) > 0))
+            {
+                best = c;
+                bestName = name;
+            }
+        }
+        return best;
+    }
+
+    // Total order over filenames: case-insensitive first (matches ExpandPaths' sort), case-sensitive tie-break so siblings differing only in case stay distinct and deterministically ordered.
+    private static int CompareName(string a, string b)
+    {
+        int cmp = string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+        if (cmp != 0)
+        {
+            return cmp;
+        }
+        return string.Compare(a, b, StringComparison.Ordinal);
+    }
+
+    // Filesystem glue over FindAdjacentByName: list the directory (top level only — "same directory", non-recursive), keep video files, return the neighbor of currentPath in the requested direction. Returns null when there's no neighbor on that side or the listing fails (reported via onError, never swallowed — mirrors ExpandPaths). Caller resolves `directory` from currentPath (e.g. via TrackPreferences.TryGetDirectoryKey) so the URI / no-parent cases are filtered before we get here.
+    public static string? FindDirectoryNeighbor(string directory, string currentPath, int direction, Action<string> onError)
+    {
+        if (directory == null)
+        {
+            throw new ArgumentNullException(nameof(directory));
+        }
+        if (currentPath == null)
+        {
+            throw new ArgumentNullException(nameof(currentPath));
+        }
+        if (onError == null)
+        {
+            throw new ArgumentNullException(nameof(onError));
+        }
+        var candidates = new List<string>();
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly))
+            {
+                if (IsVideoFile(f))
+                {
+                    candidates.Add(f);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            onError($"directory listing failed for '{directory}': {ex.Message}");
+            return null;
+        }
+        return FindAdjacentByName(candidates, currentPath, direction);
+    }
 }

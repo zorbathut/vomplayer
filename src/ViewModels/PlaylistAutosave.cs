@@ -12,7 +12,7 @@ namespace Vomplayer.ViewModels;
 //   - Replace on Primary, with no Secondary bound or Secondary empty → new GUID (the whole playlist is being replaced)
 //   - Replace on Primary, with Secondary bound and non-empty → same GUID (only one slot is being replaced)
 //   - Replace on Secondary → same GUID
-//   - Append / SetCurrent / Move / Advance → same GUID (incremental mutation)
+//   - Append / Prepend / SetCurrent / Move / Advance → same GUID (incremental mutation)
 //
 // loading flag: BeginRestore sets it; Persist short-circuits while raised; EndRestore clears it WITHOUT triggering a save. Without this gate, restoring a saved entry would fire two Changed events (Replace + SetCurrent) and overwrite the stored title with placeholder filenames before mpv's media-title arrives.
 public sealed class PlaylistAutosave
