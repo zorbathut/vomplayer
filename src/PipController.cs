@@ -687,6 +687,8 @@ public sealed class PipController : IDisposable
         {
             return;
         }
+        // A click on the PiP video is activity too — reveal the (possibly sticky-hidden) fullscreen cursor/controls, matching the primary video's click behavior. A click-drag is claimed by the move gesture so this `released` won't fire, but the window-level motion controller covers the drag motion.
+        host.NotifyFullscreenActivity();
         var trigger = new Trigger.MouseClick(button, args.NPress);
         var action = host.Hotkeys.Lookup(trigger);
         if (action != null)
@@ -912,4 +914,5 @@ public interface IPipHost
     PlaylistPanel PlaylistPanel { get; }
     HotkeyMap Hotkeys { get; }
     void ExecuteAction(HotkeyAction action);
+    void NotifyFullscreenActivity();
 }

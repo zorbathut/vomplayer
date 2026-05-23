@@ -62,6 +62,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private const uint ControlsHideDelayMs = 2000;
     // Ignore motion events whose position is within this many px of the position at the last timer arm. Filters out sub-pixel jitter and any spurious synthetic events the compositor/GTK might emit. Real user motion easily exceeds this.
     private const double MotionDeadZonePx = 3.0;
+    // While the cursor is hidden (auto-hide timer fired), require this much straight-line displacement from armPosition — which, since the timer only fires after the pointer has rested within MotionDeadZonePx for the full delay, is where the pointer was sitting when it hid — before un-hiding. Much larger than MotionDeadZonePx so an accidental bump — a brushed mouse, a knocked desk — doesn't pop the cursor and controls back over the video; only a deliberate sweep (or a click) reveals them. Logical px, matching the motion-event coordinate space, so it's scale-independent like the dead zone.
+    private const double CursorRevealThresholdPx = 40.0;
     // Set VOMPL_FS_DEBUG=1 in the environment to dump [fs] traces to stderr covering timer arms, timer fires, motion events (rate-limited), and the hide path — helps diagnose why autohide isn't firing if the default logic fails in the wild.
     private static readonly bool FsDebug = Environment.GetEnvironmentVariable("VOMPL_FS_DEBUG") == "1";
     private static readonly System.Diagnostics.Stopwatch FsStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -469,6 +471,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         {
             return;
         }
+        // A click is activity: reveal the hidden cursor/controls even if the cursor was sticky-hidden through small movements, and regardless of whether the button is bound to an action.
+        NotifyFullscreenActivity();
         var trigger = new Trigger.MouseClick(button, args.NPress);
         var action = hotkeys.Lookup(trigger);
         if (action != null)
@@ -514,19 +518,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private bool OnWindowKeyPressed(Gtk.EventControllerKey sender, Gtk.EventControllerKey.KeyPressedSignalArgs args)
     {
         // In fullscreen, treat any key press as activity: un-hide controls + stream-selector toolbar (if currently hidden) and re-arm the auto-hide timer. Without this, a user keyboard-cueing PiP without mouse motion would silently lose the toolbar selection after 2s of mouse idleness — the auto-hide reset would clear SelectedSlot mid-sequence. Mouse motion already arms the timer (OnWindowPointerMotion); this extends the same affordance to keyboard input.
-        if (isFullscreen)
-        {
-            if (!controlsBox.GetVisible())
-            {
-                controlsBox.SetVisible(true);
-            }
-            if (viewModel.IsPipEnabled && !pipController.Toolbar.GetVisible())
-            {
-                pipController.Toolbar.SetVisible(true);
-            }
-            SetCursorFromName(null);
-            ArmControlsHideTimer();
-        }
+        NotifyFullscreenActivity();
         var trigger = Trigger.MakeKey(args.Keyval, args.State);
         var action = hotkeys.Lookup(trigger);
         if (action == null)
@@ -545,30 +537,51 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         motionEventCount++;
         double x = args.X;
         double y = args.Y;
-        if (!double.IsNaN(armPositionX))
+        // Hidden-ness is derived from controlsBox visibility (the auto-hide timer sets both invisible together, and every reveal path sets both visible together) — no separate flag to keep in sync. While hidden, motion must exceed CursorRevealThresholdPx; while visible, only the sub-pixel MotionDeadZonePx jitter filter applies.
+        bool cursorHidden = !controlsBox.GetVisible();
+        if (double.IsNaN(armPositionX))
         {
-            double dx = x - armPositionX;
-            double dy = y - armPositionY;
-            if (dx * dx + dy * dy < MotionDeadZonePx * MotionDeadZonePx)
+            // No reference yet — armPosition is reset to NaN on every fullscreen transition. Adopt this event's position as the origin. If the cursor is already hidden (entered fullscreen and idled out without ever moving), don't let the origin-setting event itself reveal: a real displacement from here must accumulate first, otherwise the very first micro-motion would defeat the sticky-cursor behavior.
+            armPositionX = x;
+            armPositionY = y;
+            if (cursorHidden)
             {
-                if (motionEventCount % 30 == 1)
-                {
-                    FsLog($"motion #{motionEventCount} x={x:F1} y={y:F1} (in dead zone, ignored)");
-                }
+                FsLog($"motion #{motionEventCount} x={x:F1} y={y:F1} (hidden, origin adopted, no reveal)");
                 return;
             }
+            NotifyFullscreenActivity();
+            return;
+        }
+        double dx = x - armPositionX;
+        double dy = y - armPositionY;
+        if (!CursorRevealPolicy.IsSignificantMotion(dx, dy, cursorHidden, MotionDeadZonePx, CursorRevealThresholdPx))
+        {
+            if (motionEventCount % 30 == 1)
+            {
+                FsLog($"motion #{motionEventCount} x={x:F1} y={y:F1} (sub-threshold, {(cursorHidden ? "below reveal threshold" : "dead zone")}, ignored)");
+            }
+            return;
         }
         armPositionX = x;
         armPositionY = y;
         if (motionEventCount % 10 == 1)
         {
-            FsLog($"motion #{motionEventCount} x={x:F1} y={y:F1}");
+            FsLog($"motion #{motionEventCount} x={x:F1} y={y:F1} (accepted, {(cursorHidden ? "reveal" : "dead-zone exceeded")})");
+        }
+        NotifyFullscreenActivity();
+    }
+
+    // Single reveal entry point for fullscreen "user is active" signals: pointer motion past the regime threshold, key press, and clicks on either video. Un-hides the bottom controls and the top stream-selector toolbar (the latter gated by IsPipEnabled — a single-stream session never shows it), restores the cursor, and re-arms the auto-hide timer. No-op outside fullscreen so callers needn't guard.
+    public void NotifyFullscreenActivity()
+    {
+        if (!isFullscreen)
+        {
+            return;
         }
         if (!controlsBox.GetVisible())
         {
             controlsBox.SetVisible(true);
         }
-        // Restore the top stream-selector toolbar alongside the bottom controls when the user moves the mouse. Visibility is gated by IsPipEnabled — a single-stream session never shows the toolbar.
         if (viewModel.IsPipEnabled && !pipController.Toolbar.GetVisible())
         {
             pipController.Toolbar.SetVisible(true);
