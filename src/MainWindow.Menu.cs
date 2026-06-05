@@ -41,6 +41,25 @@ public sealed partial class MainWindow
         openUrlAction.OnActivate += (_, _) => viewModel.OpenUrlCommand.Execute(null);
         AddAction(openUrlAction);
 
+        // Open/Save Playlist (File + Clipboard). The async handlers are fire-and-forget — each one
+        // catches-and-reports its own exceptions internally (see MainWindow.PlaylistIo.cs), so the
+        // discarded Task can never carry an unobserved exception. Save-to-clipboard is synchronous.
+        var openPlaylistFileAction = Gio.SimpleAction.New("open-playlist-file", null);
+        openPlaylistFileAction.OnActivate += (_, _) => { _ = OpenPlaylistFromFileAsync(); };
+        AddAction(openPlaylistFileAction);
+
+        var openPlaylistClipboardAction = Gio.SimpleAction.New("open-playlist-clipboard", null);
+        openPlaylistClipboardAction.OnActivate += (_, _) => { _ = OpenPlaylistFromClipboardAsync(); };
+        AddAction(openPlaylistClipboardAction);
+
+        var savePlaylistFileAction = Gio.SimpleAction.New("save-playlist-file", null);
+        savePlaylistFileAction.OnActivate += (_, _) => { _ = SavePlaylistToFileAsync(); };
+        AddAction(savePlaylistFileAction);
+
+        var savePlaylistClipboardAction = Gio.SimpleAction.New("save-playlist-clipboard", null);
+        savePlaylistClipboardAction.OnActivate += (_, _) => SavePlaylistToClipboard();
+        AddAction(savePlaylistClipboardAction);
+
         // Single parameterized action backing every Recent menu item — each menu item carries its playlist GUID stringified as the "s" target. One action vs. one-per-item keeps the action map size bounded across rebuilds.
         var openRecentAction = Gio.SimpleAction.New("open-recent-playlist", GLib.VariantType.New("s"));
         openRecentAction.OnActivate += (_, args) =>
@@ -147,6 +166,17 @@ public sealed partial class MainWindow
         // GirCore 0.7.0 doesn't expose gtk_menu_append_item as AppendItem, only the position-based InsertItem. Passing -1 as position appends per the gmenu contract.
         fileMenu.InsertItem(-1, Gio.MenuItem.New("Open File…", "win.open"));
         fileMenu.InsertItem(-1, Gio.MenuItem.New("Open URL…", "win.open-url"));
+        // Open/Save Playlist submenus, each with a File and a Clipboard variant. Inserted AFTER Open
+        // File…/Open URL… (positions 0/1) on purpose: menuAccelSlots addresses those two by fixed
+        // position, so these must land at File-menu index >= 2 to leave the accel slots untouched.
+        var openPlaylistMenu = Gio.Menu.New();
+        openPlaylistMenu.InsertItem(-1, Gio.MenuItem.New("From File…", "win.open-playlist-file"));
+        openPlaylistMenu.InsertItem(-1, Gio.MenuItem.New("From Clipboard", "win.open-playlist-clipboard"));
+        fileMenu.AppendSubmenu("Open Playlist", openPlaylistMenu);
+        var savePlaylistMenu = Gio.Menu.New();
+        savePlaylistMenu.InsertItem(-1, Gio.MenuItem.New("To File…", "win.save-playlist-file"));
+        savePlaylistMenu.InsertItem(-1, Gio.MenuItem.New("To Clipboard", "win.save-playlist-clipboard"));
+        fileMenu.AppendSubmenu("Save Playlist", savePlaylistMenu);
         // Recent submenu placeholder — populated by RebuildRecentMenu and live-mutated by subsequent calls (Gio.Menu mutations propagate to the live PopoverMenuBar without rebinding). AppendSubmenu wires the menu by reference, so later RemoveAll/InsertItem calls flow through.
         recentMenu = Gio.Menu.New();
         fileMenu.AppendSubmenu("Recent", recentMenu);
