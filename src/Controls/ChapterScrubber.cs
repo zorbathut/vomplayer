@@ -218,7 +218,7 @@ public sealed class ChapterScrubber
         hoverLayer.QueueDraw();
     }
 
-    // Paints every chapter as TWO 2-px-wide vertical Cairo line segments at the trough-relative X for that chapter's time: one above the trough (from troughTop-10 to troughTop-4) and one below (from troughBottom+4 to troughBottom+10). The 4-px inner gap on each side gives the trough room to breathe so the marker reads as bracketing the trough rather than crossing it. Both segments land inside the scale's natural slider-thumb-height padding, so the bar's allocated height is unchanged. Ticks use the scale's theme foreground color at low alpha so they read correctly across light/dark themes without dominating the bar.
+    // Paints every chapter as TWO 2-px-wide vertical Cairo line segments at the trough-relative X for that chapter's time: one above the trough (from troughTop-10 to troughTop-4) and one below (from troughBottom+4 to troughBottom+10). The 4-px inner gap on each side gives the trough room to breathe so the marker reads as bracketing the trough rather than crossing it. Both segments land inside the scale's natural slider-thumb-height padding, so the bar's allocated height is unchanged. Ticks use the scale's theme foreground color (which by definition contrasts with the bar background) at partial alpha — TickAlpha is the single contrast lever and works symmetrically in light and dark themes, since fg-over-bg blends toward the text color either way.
     private void DrawHover(Gtk.DrawingArea area, Cairo.Context cr, int width, int height)
     {
         if (durationSeconds <= 0 || chapters.Count == 0)
@@ -236,6 +236,8 @@ public sealed class ChapterScrubber
         // Two segments per chapter: upper [troughTop-10, troughTop-4] and lower [troughBottom+4, troughBottom+10]. Clamp to [0, height] in case the scale is unusually tight; if a segment ends up zero-length the Cairo stroke is a harmless no-op.
         const double TickInnerGapPx = 4.0;
         const double TickOuterPx = 10.0;
+        // Blend fraction from bar background toward the theme foreground (text) color. 0.2 read too faint in both light and dark; 0.3 lifts the contrast while staying subtle enough not to dominate the bar.
+        const double TickAlpha = 0.3;
         double troughBottomInHover = troughTopInHoverPx + troughHeightInHoverPx;
         double upperTop = Math.Max(0, troughTopInHoverPx - TickOuterPx);
         double upperBottom = Math.Max(0, troughTopInHoverPx - TickInnerGapPx);
@@ -256,7 +258,7 @@ public sealed class ChapterScrubber
             double x = effectiveLeft + (t / durationSeconds) * effectiveWidth;
             // Snap to integer X for a sharp 2-px stroke: at integer X the stroke covers [X-1, X+1] — two pixels at full coverage. At half-integer X it would smear over three pixels at partial coverage. The sub-pixel rounding shifts the tick by ≤0.5 px from its mathematical position — invisible against the slider thumb, which itself rounds to integer pixels.
             double sharpX = Math.Round(x);
-            cr.SetSourceRgba(fgR, fgG, fgB, 0.2);
+            cr.SetSourceRgba(fgR, fgG, fgB, TickAlpha);
             cr.MoveTo(sharpX, upperTop);
             cr.LineTo(sharpX, upperBottom);
             cr.Stroke();
