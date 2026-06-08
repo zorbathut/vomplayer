@@ -10,6 +10,7 @@ public enum PlaylistChangeKind
     Append,
     Prepend,
     Move,
+    Remove,
     SetCurrent,
     Advance,
 }
@@ -134,6 +135,43 @@ public sealed class Playlist
         Items = copy.AsReadOnly();
         CurrentIndex = newCurrent;
         Changed?.Invoke(PlaylistChangeKind.Move);
+    }
+
+    // Drop the item at `index`. Throws on out-of-range — same programmer-error contract as Move/SetCurrent (CLAUDE.md bans silent handling). Never a no-op: every call shrinks Items, so it always fires Changed.
+    //
+    // CurrentIndex adjustment, by case:
+    //  - List now empty → -1 (the standard "nothing playing" sentinel).
+    //  - index < CurrentIndex → the playing item shifted left by one; follow it.
+    //  - index == CurrentIndex (the playing row itself was removed) → Math.Min(index, newCount-1): the row that slid into the slot, or the new last row if the last was removed. The panel's remove handler plays this new current row so the highlight stays honest; keeping CurrentIndex in range (never -1 while non-empty) is also what lets the autosave round-trip without RestorePlaylist clamping a -1 back to 0.
+    //  - index > CurrentIndex → the playing item is unaffected.
+    public void Remove(int index)
+    {
+        if (index < 0 || index >= Items.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(index), index, $"Items count is {Items.Count}");
+        }
+        var copy = new List<string>(Items);
+        copy.RemoveAt(index);
+        int newCurrent;
+        if (copy.Count == 0)
+        {
+            newCurrent = -1;
+        }
+        else if (index < CurrentIndex)
+        {
+            newCurrent = CurrentIndex - 1;
+        }
+        else if (index == CurrentIndex)
+        {
+            newCurrent = Math.Min(index, copy.Count - 1);
+        }
+        else
+        {
+            newCurrent = CurrentIndex;
+        }
+        Items = copy.AsReadOnly();
+        CurrentIndex = newCurrent;
+        Changed?.Invoke(PlaylistChangeKind.Remove);
     }
 
     public void SetCurrent(int index)

@@ -325,6 +325,98 @@ public class PlaylistTests
     }
 
     [Test]
+    public void RemoveShiftsTailAndFiresRemoveKindOnce()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d" });
+        int fires = 0;
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => { fires++; lastKind = k; };
+        p.Remove(1);
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "c", "d" }));
+        Assert.That(fires, Is.EqualTo(1));
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Remove));
+    }
+
+    [Test]
+    public void RemoveBeforeCurrentDecrementsCurrent()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d" });
+        p.SetCurrent(2);                 // 'c'
+        p.Remove(0);
+        Assert.That(p.Items, Is.EqualTo(new[] { "b", "c", "d" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // 'c' now at index 1
+    }
+
+    [Test]
+    public void RemoveAfterCurrentLeavesCurrent()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d" });
+        p.SetCurrent(1);                 // 'b'
+        p.Remove(3);                     // remove 'd', after current
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // unchanged
+    }
+
+    [Test]
+    public void RemoveLastItemWhileNotCurrentDoesNotDisturbCurrent()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d" });
+        p.SetCurrent(0);                 // 'a'
+        p.Remove(3);                     // remove the last row; current sits before it
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void RemoveCurrentMidListPointsCurrentAtNextItem()
+    {
+        // Removing the playing row (index 0 here) makes the row that slid into the slot the new current,
+        // so the panel's play-next-on-remove-current branch resumes the *following* file.
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.SetCurrent(0);                 // 'a' playing
+        p.Remove(0);
+        Assert.That(p.Items, Is.EqualTo(new[] { "b", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("b"));   // the next file
+    }
+
+    [Test]
+    public void RemoveCurrentWhenLastRowClampsToNewLast()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.SetCurrent(2);                 // 'c' playing, last row
+        p.Remove(2);
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // new last row
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("b"));
+    }
+
+    [Test]
+    public void RemoveOnlyItemClearsToEmptyAndMinusOne()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a" });
+        p.Remove(0);
+        Assert.That(p.Items, Is.Empty);
+        Assert.That(p.CurrentIndex, Is.EqualTo(-1));
+    }
+
+    [Test]
+    public void RemoveOutOfRangeThrows()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.Remove(5));
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.Remove(-1));
+    }
+
+    [Test]
     public void PrependToEmptySetsCurrentToZero()
     {
         var p = new Playlist();

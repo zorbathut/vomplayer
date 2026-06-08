@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using Vomplayer.ViewModels;
 
 namespace Vomplayer.Controls;
@@ -38,6 +39,12 @@ public sealed class PlaylistPanel : IDisposable
         listBox.SetActivateOnSingleClick(false);
         listBox.OnRowActivated += OnRowActivated;
         listBox.AddCssClass("vompl-playlist-list");
+
+        // Secondary-button (3) gesture for the row context menu. Attached once to the persistent listBox (survives Rebuild/Rebind); SetButton(3) keeps it off button 1, so per-row select/activate/drag are untouched. Gesture coords are listBox-local — directly consumable by GetRowAtY and the popover's SetPointingTo.
+        var rightClick = Gtk.GestureClick.New();
+        rightClick.SetButton(3);
+        rightClick.OnPressed += OnRowRightClick;
+        listBox.AddController(rightClick);
 
         scrolledWindow = Gtk.ScrolledWindow.New();
         scrolledWindow.SetChild(listBox);
@@ -94,6 +101,117 @@ public sealed class PlaylistPanel : IDisposable
     private void OnRowActivated(Gtk.ListBox sender, Gtk.ListBox.RowActivatedSignalArgs args)
     {
         playItem(args.Row.GetIndex());
+    }
+
+    private void OnRowRightClick(Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
+    {
+        var row = listBox.GetRowAtY((int)args.Y);
+        if (row == null)
+        {
+            // Right-click below the last row (empty space) — nothing to act on.
+            return;
+        }
+        listBox.SelectRow(row);
+        ShowRowMenu(row.GetIndex(), args.X, args.Y);
+    }
+
+    // Per-click context menu. A plain Gtk.Popover of flat buttons rather than a Gio-action-backed PopoverMenu: the panel's idiom is direct callbacks (OnRowActivated, the drag OnPrepare/OnRowDrop), and a transient 4-item menu doesn't earn the action-map machinery the live menubar needs. Items adapt to the row kind — a URL opens in a browser, a local path reveals its folder. Built fresh each time and unparented on close so right-clicks don't accumulate parented popovers.
+    private void ShowRowMenu(int index, double x, double y)
+    {
+        string item = playlist.Items[index];
+        bool isUrl = item.Contains("://");
+
+        var box = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
+        box.AddCssClass("vompl-playlist-menu");
+
+        var popover = Gtk.Popover.New();
+        popover.SetParent(listBox);
+        popover.SetHasArrow(false);
+        popover.SetPointingTo(new Gdk.Rectangle { X = (int)x, Y = (int)y, Width = 1, Height = 1 });
+        popover.SetChild(box);
+        popover.OnClosed += (_, _) => popover.Unparent();
+
+        if (isUrl)
+        {
+            AppendMenuItem(box, popover, "Open in Browser", () => OpenInBrowser(item));
+            AppendMenuItem(box, popover, "Copy URL", () => CopyToClipboard(item));
+        }
+        else
+        {
+            AppendMenuItem(box, popover, "Open Containing Folder", () => OpenContainingFolder(item));
+            AppendMenuItem(box, popover, "Copy Path", () => CopyToClipboard(item));
+        }
+        box.Append(Gtk.Separator.New(Gtk.Orientation.Horizontal));
+        AppendMenuItem(box, popover, "Remove from Playlist", () => RemoveRow(index));
+
+        popover.Popup();
+    }
+
+    private static void AppendMenuItem(Gtk.Box box, Gtk.Popover popover, string label, Action action)
+    {
+        var button = Gtk.Button.NewWithLabel(label);
+        button.AddCssClass("flat");
+        button.SetHalign(Gtk.Align.Fill);
+        // NewWithLabel centers its label; left-align it so the popover reads like a menu rather than a stack of buttons.
+        if (button.GetChild() is Gtk.Label labelWidget)
+        {
+            labelWidget.SetXalign(0.0f);
+        }
+        button.OnClicked += (_, _) =>
+        {
+            popover.Popdown();
+            action();
+        };
+        box.Append(button);
+    }
+
+    private void OpenInBrowser(string url)
+    {
+        var window = scrolledWindow.GetRoot() as Gtk.Window;
+        var launcher = Gtk.UriLauncher.New(url);
+        _ = LaunchAndReport(launcher.LaunchAsync(window), "open in browser");
+    }
+
+    private void OpenContainingFolder(string path)
+    {
+        var window = scrolledWindow.GetRoot() as Gtk.Window;
+        var launcher = Gtk.FileLauncher.New(Gio.Functions.FileNewForPath(path));
+        _ = LaunchAndReport(launcher.OpenContainingFolderAsync(window), "open containing folder");
+    }
+
+    // Fire-and-forget for the GTK launchers. An exception escaping a discarded Task would be an unobserved TaskException — a silent failure, which CLAUDE.md bans — so we await and report to stderr (a user-dismissed portal dialog also lands here, harmlessly). Awaiting also keeps the launch Task, and thus the launcher GObject, alive until it completes.
+    private static async Task LaunchAndReport(Task launch, string what)
+    {
+        try
+        {
+            await launch;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[vompl] {what} failed: {ex.Message}");
+        }
+    }
+
+    private void CopyToClipboard(string text)
+    {
+        listBox.GetClipboard().SetText(text);
+    }
+
+    private void RemoveRow(int index)
+    {
+        // The captured index can in principle go stale between popup and click (a PiP Rebind, or another mutation). Guard so a stale index reports rather than throwing out of the button handler.
+        if (index < 0 || index >= playlist.Items.Count)
+        {
+            Console.Error.WriteLine($"[vompl] playlist remove: stale index {index} (count {playlist.Items.Count})");
+            return;
+        }
+        bool wasCurrent = index == playlist.CurrentIndex;
+        playlist.Remove(index);
+        // Removing the playing row: play whatever slid into its place (Remove already moved CurrentIndex there). Same activation path as double-click.
+        if (wasCurrent && playlist.Items.Count > 0)
+        {
+            playItem(playlist.CurrentIndex);
+        }
     }
 
     private void Rebuild()
