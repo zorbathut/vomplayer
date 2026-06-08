@@ -179,6 +179,45 @@ public class UserConfigTests
     }
 
     [Test]
+    public void ApplicationThemeDefaultsToAuto()
+    {
+        // Missing [application] section — pre-existing configs land here on upgrade and must follow the system by default.
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+        File.WriteAllText(path, "[hotkeys]\nplay_pause = [\"p\"]\n");
+
+        var cfg = UserConfig.LoadOrDefault(path);
+        Assert.That(cfg.Application.Theme, Is.EqualTo("auto"));
+    }
+
+    [Test]
+    public void ApplicationThemeHandEditedTomlReads()
+    {
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+        File.WriteAllText(path, "[application]\ntheme = \"dark\"\n");
+
+        var cfg = UserConfig.LoadOrDefault(path);
+        Assert.That(cfg.Application.Theme, Is.EqualTo("dark"));
+    }
+
+    [Test]
+    public void ApplicationThemeRoundTrips()
+    {
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+
+        var cfg = new UserConfig();
+        cfg.Application.Theme = "light";
+        cfg.Save(path);
+
+        var reloaded = UserConfig.LoadOrDefault(path);
+        Assert.That(reloaded.Application.Theme, Is.EqualTo("light"));
+        // Sibling application setting keeps its default through a theme-only save.
+        Assert.That(reloaded.Application.SingleInstance, Is.True);
+    }
+
+    [Test]
     public void SaveRoundTripsThroughLoad()
     {
         var path = Path.Combine(tempDir!, "config.toml");

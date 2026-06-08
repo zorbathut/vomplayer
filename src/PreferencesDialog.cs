@@ -3,7 +3,7 @@ using Vomplayer.UserData;
 
 namespace Vomplayer;
 
-// Modal preferences dialog. Two tabs in a Gtk.Notebook: "General" (one checkbox today — single-instance mode) and "Hotkeys" (the per-action shortcut grid). Snapshots the live state on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyPreferences swaps the runtime map, persists both sections to TOML, and refreshes menu accelerators. Cancel discards the snapshot.
+// Modal preferences dialog. Two tabs in a Gtk.Notebook: "General" (theme dropdown + single-instance checkbox) and "Hotkeys" (the per-action shortcut grid). Snapshots the live state on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyPreferences swaps the runtime map, applies the theme live, persists both sections to TOML, and refreshes menu accelerators. Cancel discards the snapshot.
 //
 // Hotkeys tab layout: a true spreadsheet via Gtk.Grid wrapped in Gtk.ScrolledWindow. Row 0 is the header (Action, Shortcut 1, Shortcut 2, …). Each subsequent row is one action: action label in column 0, then one cell per binding slot, then trailing empty cells the user can click to add new bindings. Column count is recomputed on each rebuild as `max(MinSlots, max_bindings_across_actions + 1)` so there's always at least one trailing empty cell on every row, but the grid never grows unboundedly: a user with 8 bindings on one action makes the dialog wide, by design — the alternative (truncating with a "more…" indicator) hides what's bound.
 //
@@ -28,6 +28,10 @@ internal sealed class PreferencesDialog : Gtk.Window
     private readonly Gtk.Label statusLabel;
     private readonly Gtk.MenuButton mouseMenuButton;
     private readonly Gtk.CheckButton singleInstanceCheck;
+    private readonly Gtk.DropDown themeDropDown;
+
+    // Dropdown row order. Indices are the wire contract between the DropDown's `Selected` uint and ThemeMode — keep aligned with the labels passed to NewFromStrings below.
+    private static readonly ThemeMode[] ThemeOrder = { ThemeMode.Auto, ThemeMode.Light, ThemeMode.Dark };
 
     public PreferencesDialog(MainWindow owner) : base()
     {
@@ -51,12 +55,22 @@ internal sealed class PreferencesDialog : Gtk.Window
         notebook.SetHexpand(true);
         outerBox.Append(notebook);
 
-        // General tab — one checkbox today; we'll add siblings as more app-level settings arrive.
+        // General tab — app-level settings: theme dropdown and the single-instance checkbox.
         var generalPage = Gtk.Box.New(Gtk.Orientation.Vertical, 8);
         generalPage.SetMarginStart(12);
         generalPage.SetMarginEnd(12);
         generalPage.SetMarginTop(12);
         generalPage.SetMarginBottom(12);
+
+        // Theme row — applies instantly on Save (no next-launch note, unlike single-instance below). Label + dropdown on one line.
+        var themeRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
+        var themeLabel = Gtk.Label.New("Theme:");
+        themeLabel.SetXalign(0);
+        themeRow.Append(themeLabel);
+        themeDropDown = Gtk.DropDown.NewFromStrings(new[] { "Auto", "Light", "Dark" });
+        themeDropDown.SetSelected((uint)Array.IndexOf(ThemeOrder, owner.GetThemePreference()));
+        themeRow.Append(themeDropDown);
+        generalPage.Append(themeRow);
 
         singleInstanceCheck = Gtk.CheckButton.NewWithLabel("Open files in the running window when launching from the command line");
         singleInstanceCheck.SetActive(owner.GetSingleInstancePreference());
@@ -149,7 +163,8 @@ internal sealed class PreferencesDialog : Gtk.Window
         saveButton.AddCssClass("suggested-action");
         saveButton.OnClicked += (_, _) =>
         {
-            owner.ApplyPreferences(editing.Clone(), singleInstanceCheck.Active);
+            // Selected is always 0..2 here: the model has three rows and is never deselected, so it can't be GTK_INVALID_LIST_POSITION.
+            owner.ApplyPreferences(editing.Clone(), singleInstanceCheck.Active, ThemeOrder[themeDropDown.Selected]);
             Close();
         };
         buttonRow.Append(saveButton);

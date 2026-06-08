@@ -28,6 +28,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private readonly ViewModelMain viewModel;
     private readonly UserConfig userConfig;
     private readonly string configPath;
+    // GTK's `gtk-application-prefer-dark-theme` value as the desktop reported it at launch, captured before we ever override it. The "Auto" theme mode resolves to this snapshot. See ApplyThemePreference.
+    private readonly bool systemPreferDarkDefault;
     private HotkeyMap hotkeys;
     private Gio.SimpleAction? diagnosticAction;
     private readonly SeekScaleController seekScaleController;
@@ -139,6 +141,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         AddCssClass("vompl-main-window");
 
         InstallVomplCss();
+
+        // Capture the desktop's prefer-dark value before applying the user's choice — this is the only window, so nothing has overridden it yet — then apply. Done before widgets are shown so the first paint is already the right polarity (no light->dark flash).
+        systemPreferDarkDefault = Gtk.Settings.GetDefault()?.GtkApplicationPreferDarkTheme ?? false;
+        ApplyThemePreference(ThemeModeParser.Parse(userConfig.Application.Theme, m => Console.Error.WriteLine($"[vompl] {m}")));
 
         this.filePicker = new FilePickerGtk(this);
         // Per-URL cache root sits under our regular XDG-aware cache dir (NOT /tmp — /tmp clears on reboot, which would make the 24h-mtime sweep mostly redundant). The cache class wipes stale entries on Cleanup(); we run that once at startup, and YtDlpDownloader runs it again per download to bound disk for long-running sessions.
@@ -756,11 +762,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     }
 
     // Reload the runtime keymap and application-level toggles from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by PreferencesDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated and new bindings are live; the user can retry. single_instance only takes effect on next launch (the toggle changes process-startup behavior), so we just record it.
-    internal void ApplyPreferences(HotkeyMap map, bool singleInstance)
+    internal void ApplyPreferences(HotkeyMap map, bool singleInstance, ThemeMode theme)
     {
         hotkeys = map;
         userConfig.Hotkeys = UserConfig.HotkeysSection.FromDictionary(map.ToTomlForm());
         userConfig.Application.SingleInstance = singleInstance;
+        userConfig.Application.Theme = ThemeModeParser.ToConfigString(theme);
+        // Theme applies live, independent of whether the save below succeeds — the running app and the persisted file are separate concerns. single_instance, by contrast, only changes process-startup behavior, so it just gets recorded for next launch.
+        ApplyThemePreference(theme);
         try
         {
             userConfig.Save(configPath);
@@ -772,6 +781,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         RefreshMenuAccels();
     }
 
+    // Push the chosen appearance onto GTK's `gtk-application-prefer-dark-theme`. Light/Dark force it; Auto restores the launch-time system value. This is the legacy GTK3-era knob, so it only restyles themes that honor it — GTK4's built-in Adwaita does, and there it restyles the running app immediately including our chrome CSS (the @theme_bg_color / @borders named colors re-resolve to the active variant). A theme that conveys dark via a separate theme NAME instead (e.g. KDE's Breeze / Breeze-Dark) may ignore this boolean, in which case Light/Dark no-op — the documented limitation of the GTK-native approach.
+    private void ApplyThemePreference(ThemeMode mode)
+    {
+        var settings = Gtk.Settings.GetDefault();
+        if (settings == null)
+        {
+            Console.Error.WriteLine("[vompl] theme: Gtk.Settings.GetDefault() returned null; cannot apply theme preference");
+            return;
+        }
+        settings.GtkApplicationPreferDarkTheme = ThemeModeParser.ResolvePreferDark(mode, systemPreferDarkDefault);
+    }
+
     internal HotkeyMap GetHotkeysSnapshot()
     {
         return hotkeys.Clone();
@@ -780,6 +801,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     internal bool GetSingleInstancePreference()
     {
         return userConfig.Application.SingleInstance;
+    }
+
+    // Current theme preference for the dialog to seed its dropdown. The warn is discarded (not a silent swallow): this same string was already parsed-and-warned at startup, and re-warning every time Preferences opens would just be noise.
+    internal ThemeMode GetThemePreference()
+    {
+        return ThemeModeParser.Parse(userConfig.Application.Theme, _ => { });
     }
 
     // Entry point for files arriving from outside the app — today, the GApplication OnOpen signal fired by a remote-instance forward. Targets Primary directly rather than going through viewModel.LoadPaths (which honors SelectedSlot/SingleTarget) because a CLI second-invocation has no concept of PiP slot selection; landing the file in Primary matches what a user typing `./vomplayer foo.mp4` expects regardless of the running instance's PiP state. Same code path as `HandlePrimaryDrop`, so resume positions, recents, and autosave behave identically. Replace semantics, not append.
