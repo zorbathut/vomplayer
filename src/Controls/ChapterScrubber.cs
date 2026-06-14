@@ -13,7 +13,7 @@ namespace Vomplayer.Controls;
 //
 // Click routing: a Capture-phase Gtk.GestureClick on the scale watches every press. If the press lands within the trough's Y range (Gtk.Range.GetRangeRect), we don't claim — the scale's own internal click gesture sees the press and runs normal click-to-seek. If the press lands above or below the trough (i.e. inside the tick-mark region) AND is within ClickToleranceTpx of a chapter's X, we emit ChapterClicked and SetState(Claimed) to deny the scale's own gesture; trough-Y clicks are never claimed, so "click on the bar itself even right over a marker" cannot snap to a chapter. Off-marker clicks in the tick region don't claim either, so they fall through to the scale's normal seek-to-X — keeps full-width clickability of the scale intact.
 //
-// Hover affordance: a motion controller on the scale tracks the hovered chapter (the chapter under the cursor's X within tolerance, when the cursor's Y is in the tick region). While a chapter is hovered, the scale's cursor switches to "pointer" — that's the only feedback. We deliberately don't change the tick's rendering on hover (earlier iterations brightened it but that read as "the tick vanishes" on light themes where the chosen highlight color blended into the background). The overlay is SetCanTarget(false) so clicks pass straight through to the scale.
+// Hover affordance: a motion controller on the scale tracks the hovered chapter (the chapter under the cursor's X within tolerance, when the cursor's Y is in the tick region). While a chapter is hovered, the scale's cursor switches to "pointer" and a tooltip shows the chapter's title (or "Chapter N" when the container carries no title). The tooltip is delivered via GTK's query-tooltip signal (SetHasTooltip + OnQueryTooltip) rather than the motion handler, so GTK owns the popup's show/hide/refresh as the pointer moves between markers and across the trough dead-zone — pushing text into SetTooltipText from motion leaves stale tooltips that don't refresh while the pointer stays inside the widget. The query handler reuses the same HitTestTickArea as the cursor. We deliberately don't change the tick's rendering on hover (earlier iterations brightened it but that read as "the tick vanishes" on light themes where the chosen highlight color blended into the background). The overlay is SetCanTarget(false) so clicks pass straight through to the scale.
 //
 // X math: chapter ticks are positioned at `effectiveLeft + V * effectiveWidth`, where the effective range is the trough's allocation rect (from Gtk.Widget.ComputeBounds) shrunk on each side by `trough.padding + trough.border + slider.padding + slider.border` (all from Gtk.StyleContext queries). Empirically (from a regression on 30+ logged sliderValue→slider.center pairs across the V range), GTK constrains the slider thumb's allocation such that its border-box fits inside the trough's content area — so the slider's center can never reach within `(trough.border+padding) + (slider.border+padding)` px of the trough's allocation edge. With Adwaita's `tBdr=(1,1) sBdr=(1,1)` that's 2 px on each side; with f3-formula residuals < 1px across V, vs the gtk_range_compute_slider_position-style documented formula which gave residuals up to ±7px, vs trough-padding-only which gave ±1.7px drifting linearly with V. The slider's CSS margin (typically negative on Adwaita: -9px each side) does NOT enter the position formula — it controls visual overhang of the rendered thumb beyond its allocation, not where the allocation sits. We deliberately don't use Gtk.Range.GetRangeRect / GetSliderRange: GetRangeRect coords are in a different coord space than the hoverLayer's Cairo coords (scale's CSS margin shifts them), and GetSliderRange has been observed to return zero/stale values during first paint. ComputeBounds gives the rendered rect directly in any target's coord space, so we ask for it in hoverLayer coords for paint and in scale coords for hit-test against motion-event args.X.
 public sealed class ChapterScrubber
@@ -86,6 +86,10 @@ public sealed class ChapterScrubber
         motion.OnMotion += OnScaleMotion;
         motion.OnLeave += OnScaleLeave;
         scale.AddController(motion);
+
+        // Position-dependent tooltip: GTK queries us per-pointer-position once has-tooltip is on. We hit-test the query coords (scale-local, same space as motion args) and supply the hovered chapter's label, or return false so no tooltip shows off-marker.
+        scale.SetHasTooltip(true);
+        scale.OnQueryTooltip += OnScaleQueryTooltip;
     }
 
     private void RefreshGeometry()
@@ -145,8 +149,8 @@ public sealed class ChapterScrubber
         return null;
     }
 
-    // True if (x, y) is in the tick region (outside the trough's Y range) AND aligned with a chapter's X within tolerance. Returns the chapter time when so; null otherwise. Trough-Y clicks deliberately return null even if X aligns with a marker — that's the "clicking the bar itself doesn't snap to chapter" requirement.
-    private double? HitTestTickArea(double x, double y)
+    // The chapter under (x, y) when (x, y) is in the tick region (outside the trough's Y range) AND aligned with a chapter's X within tolerance; null otherwise. Trough-Y clicks deliberately return null even if X aligns with a marker — that's the "clicking the bar itself doesn't snap to chapter" requirement.
+    private MediaChapter? HitTestTickArea(double x, double y)
     {
         if (durationSeconds <= 0)
         {
@@ -162,18 +166,18 @@ public sealed class ChapterScrubber
         {
             return null;
         }
-        return ChapterHitTest.NearestTimeSeconds(x, effectiveLeft, effectiveWidth, durationSeconds, chapters, ClickToleranceTpx);
+        return ChapterHitTest.NearestChapter(x, effectiveLeft, effectiveWidth, durationSeconds, chapters, ClickToleranceTpx);
     }
 
     private void OnScalePressed(Gtk.GestureClick gesture, Gtk.GestureClick.PressedSignalArgs args)
     {
         RefreshGeometry();
-        var time = HitTestTickArea(args.X, args.Y);
-        if (!time.HasValue)
+        var chapter = HitTestTickArea(args.X, args.Y);
+        if (chapter == null)
         {
             return;
         }
-        ChapterClicked?.Invoke(time.Value / durationSeconds);
+        ChapterClicked?.Invoke(chapter.TimeSeconds / durationSeconds);
         // Claim denies the scale's own click gesture. Without this, the scale would also seek-to-X for the same press and the chapter seek would be visibly overridden by the trough-X seek.
         gesture.SetState(Gtk.EventSequenceState.Claimed);
     }
@@ -181,13 +185,30 @@ public sealed class ChapterScrubber
     private void OnScaleMotion(Gtk.EventControllerMotion sender, Gtk.EventControllerMotion.MotionSignalArgs args)
     {
         RefreshGeometry();
-        var time = HitTestTickArea(args.X, args.Y);
+        double? time = HitTestTickArea(args.X, args.Y)?.TimeSeconds;
         if (time == hoveredChapterTime)
         {
             return;
         }
         hoveredChapterTime = time;
         scale.SetCursorFromName(time.HasValue ? "pointer" : null);
+    }
+
+    private bool OnScaleQueryTooltip(Gtk.Widget sender, Gtk.Widget.QueryTooltipSignalArgs args)
+    {
+        // Keyboard-triggered tooltips carry no meaningful pointer position; there's no "focused chapter" concept on the scrubber, so suppress.
+        if (args.KeyboardMode)
+        {
+            return false;
+        }
+        RefreshGeometry();
+        var chapter = HitTestTickArea(args.X, args.Y);
+        if (chapter == null)
+        {
+            return false;
+        }
+        args.Tooltip.SetText(ChapterLabel.For(chapter));
+        return true;
     }
 
     private void OnScaleLeave(Gtk.EventControllerMotion sender, EventArgs args)
