@@ -8,31 +8,70 @@ using System.Threading.Tasks;
 
 namespace Vomplayer.Services;
 
-// IUrlDownloader backed by an external yt-dlp binary on PATH. Dedup via UrlDownloadCache. Progress is parsed from yt-dlp's stdout — we use --progress-template to emit a stable "VOMPLPROG <downloaded> <total> <status>" prefix that's trivial to split on whitespace, sidestepping yt-dlp's default human-readable lines that change format between versions. --newline forces one update per line (default is carriage-return-rewrite which won't survive line-buffered redirection).
+// IUrlDownloader backed by an external yt-dlp binary. Dedup via UrlDownloadCache. Progress is parsed from yt-dlp's stdout — we use --progress-template to emit a stable "VOMPLPROG <downloaded> <total> <status>" prefix that's trivial to split on whitespace, sidestepping yt-dlp's default human-readable lines that change format between versions. --newline forces one update per line (default is carriage-return-rewrite which won't survive line-buffered redirection).
 //
-// IsAvailable() shells `yt-dlp --version`. Cached after the first call because subsequent UI gates would otherwise spawn the process repeatedly per click. The cache stays valid for the process lifetime; if the user installs yt-dlp mid-session they'll need to restart, but that's an extreme edge case.
+// The binary is supplied as a command list (see BuildCommand): bare ["yt-dlp"] on a normal host, or ["flatpak-spawn", "--host", "--watch-bus", "yt-dlp"] inside a flatpak sandbox, where the host's yt-dlp is reached through the Flatpak portal because the sandbox PATH doesn't see it. Every invocation goes through NewStartInfo so the executable + arg prefix are applied in exactly one place.
+//
+// IsAvailable() shells `<command> --version`. Cached after the first call because subsequent UI gates would otherwise spawn the process repeatedly per click. The cache stays valid for the process lifetime; if the user installs yt-dlp mid-session they'll need to restart, but that's an extreme edge case.
 public sealed class YtDlpDownloader : IUrlDownloader
 {
     private const string ProgressPrefix = "VOMPLPROG";
     private const string FilenamePrefix = "VOMPLFILE";
 
     private readonly UrlDownloadCache cache;
-    private readonly string binary;
+    private readonly string executable;
+    private readonly IReadOnlyList<string> argPrefix;
     // We cache only the *positive* IsAvailable result. A negative result is re-probed on every call so a user who installs yt-dlp mid-session ("oh, it's not on PATH? hold on, brew install yt-dlp; ok, click Open URL again") gets through without restarting the app.
     private bool isAvailableCachedTrue;
 
-    public YtDlpDownloader(UrlDownloadCache cache, string binary)
+    // command[0] is the executable; command[1..] is a fixed arg prefix prepended to every invocation. See BuildCommand.
+    public YtDlpDownloader(UrlDownloadCache cache, IReadOnlyList<string> command)
     {
         if (cache == null)
         {
             throw new ArgumentNullException(nameof(cache));
         }
-        if (string.IsNullOrEmpty(binary))
+        if (command == null || command.Count == 0)
         {
-            throw new ArgumentException("binary must be non-empty", nameof(binary));
+            throw new ArgumentException("command must be non-empty", nameof(command));
         }
         this.cache = cache;
-        this.binary = binary;
+        this.executable = command[0];
+        this.argPrefix = command.Skip(1).ToArray();
+    }
+
+    // Resolve the yt-dlp invocation command for the current environment. Pure so it's unit-testable; the environment probe lives in FlatpakDetect.IsSandboxed.
+    public static IReadOnlyList<string> BuildCommand(bool inFlatpak)
+    {
+        // Inside a flatpak sandbox the host's yt-dlp is reached via flatpak-spawn --host.
+        // --watch-bus binds the host process to flatpak-spawn's D-Bus connection: when we
+        // Kill() the in-sandbox flatpak-spawn, the kernel closes its FDs (incl. the bus
+        // socket) and the portal tears down the host yt-dlp. So a cancelled download leaves
+        // no orphan, and neither does an app crash. (flatpak-spawn forwards no signals; the
+        // bus-drop is what does the work — see flatpak/flatpak#4827.)
+        if (inFlatpak)
+        {
+            return new[] { "flatpak-spawn", "--host", "--watch-bus", "yt-dlp" };
+        }
+        return new[] { "yt-dlp" };
+    }
+
+    // Build a ProcessStartInfo for a yt-dlp invocation: the resolved executable, the shared redirect/no-window flags every call needs, and the fixed arg prefix. Callers add only their own args afterward, so the prefix is applied in exactly one place.
+    private ProcessStartInfo NewStartInfo()
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = executable,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var arg in argPrefix)
+        {
+            psi.ArgumentList.Add(arg);
+        }
+        return psi;
     }
 
     public bool IsAvailable()
@@ -43,14 +82,9 @@ public sealed class YtDlpDownloader : IUrlDownloader
         }
         try
         {
-            using var probe = new Process();
-            probe.StartInfo.FileName = binary;
-            probe.StartInfo.Arguments = "--version";
-            probe.StartInfo.RedirectStandardOutput = true;
-            probe.StartInfo.RedirectStandardError = true;
-            probe.StartInfo.UseShellExecute = false;
-            probe.StartInfo.CreateNoWindow = true;
-            probe.Start();
+            var psi = NewStartInfo();
+            psi.ArgumentList.Add("--version");
+            using var probe = Process.Start(psi) ?? throw new InvalidOperationException("yt-dlp failed to start");
             // 2s is generous — `yt-dlp --version` reads no network and just prints a string.
             if (!probe.WaitForExit(2000))
             {
@@ -81,14 +115,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         {
             throw new ArgumentException("url must be non-empty", nameof(url));
         }
-        var psi = new ProcessStartInfo
-        {
-            FileName = binary,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+        var psi = NewStartInfo();
         psi.ArgumentList.Add("--flat-playlist");
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--print");
@@ -145,14 +172,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         {
             throw new ArgumentException("url must be non-empty", nameof(url));
         }
-        var psi = new ProcessStartInfo
-        {
-            FileName = binary,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+        var psi = NewStartInfo();
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--flat-playlist");
         psi.ArgumentList.Add("--print");
@@ -234,19 +254,12 @@ public sealed class YtDlpDownloader : IUrlDownloader
         }
         cache.EnsureDirectoryExists(url);
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = binary,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+        var psi = NewStartInfo();
         // --newline: emit each progress update on its own line (default rewrites in place via \r). Required for stdout line-by-line parsing.
         // --progress-template: stable machine-parseable format. We split on whitespace and read fields by index.
         // --print after_move:filepath: emit the final-file path AFTER all post-processing (merge of separate video+audio streams, format conversion, etc.) so we know exactly which file mpv should open.
         // --no-quiet: --print implicitly enables --quiet, which suppresses *all* other output including the progress lines we depend on. Restore the default verbosity so progress-template lines land on stdout.
-        // -P: place all output (incl. .part files) inside the per-URL cache subdir. -o template ensures a single canonical file name; %(ext)s lets yt-dlp pick the actual extension.
+        // -P: place all output (incl. .part files) inside the per-URL cache subdir. -o template ensures a single canonical file name; %(ext)s lets yt-dlp pick the actual extension. targetDir is absolute. In the flatpak case a host-spawned yt-dlp writes via this path; it lands where the sandbox reads only because the cache lives under $XDG_DATA_HOME (~/.var/app/<id>/data), a real host path visible at the same absolute location on both sides. Moving the cache to a path-virtualized location (e.g. /tmp, or a --filesystem-mapped dir the host sees elsewhere) would break that.
         // --no-warnings + --no-progress in stderr keeps stderr clean for actual error output.
         psi.ArgumentList.Add("--newline");
         psi.ArgumentList.Add("--progress-template");

@@ -31,6 +31,11 @@ finish-args:
   - --filesystem=xdg-pictures
   - --filesystem=xdg-run/pipewire-0
   - --filesystem=host:ro
+  # Lets the app reach the host's yt-dlp via `flatpak-spawn --host` (there is no
+  # yt-dlp flatpak to depend on, and we don't bundle it). This grants host-command
+  # execution, which substantially weakens the sandbox — acceptable for a personal
+  # build; revisit before any Flathub submission.
+  - --talk-name=org.freedesktop.Flatpak
   - --talk-name=org.freedesktop.ScreenSaver
   - --talk-name=org.freedesktop.PowerManagement.Inhibit
   - --talk-name=org.gnome.SessionManager

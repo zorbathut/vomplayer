@@ -57,4 +57,27 @@ public class YtDlpDownloaderTests
         Assert.That(ok, Is.True);
         Assert.That(p.Status, Is.EqualTo("finished"));
     }
+
+    [Test]
+    public void BuildCommandOutsideFlatpakIsBareBinary()
+    {
+        // Outside a sandbox we invoke yt-dlp directly on PATH — no wrapping.
+        Assert.That(YtDlpDownloader.BuildCommand(false), Is.EqualTo(new[] { "yt-dlp" }));
+    }
+
+    [Test]
+    public void BuildCommandInsideFlatpakWrapsWithHostSpawn()
+    {
+        // Full ordered sequence: --host must precede the command, and --watch-bus must not silently drop out (it's what tears down the host yt-dlp on cancel/crash).
+        Assert.That(
+            YtDlpDownloader.BuildCommand(true),
+            Is.EqualTo(new[] { "flatpak-spawn", "--host", "--watch-bus", "yt-dlp" }));
+    }
+
+    [Test]
+    public void ConstructorRejectsEmptyCommand()
+    {
+        var cache = new UrlDownloadCache(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vompl-ctor-test"));
+        Assert.Throws<System.ArgumentException>(() => new YtDlpDownloader(cache, System.Array.Empty<string>()));
+    }
 }

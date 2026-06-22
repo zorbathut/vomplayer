@@ -150,7 +150,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         // Per-URL cache root sits under our regular XDG-aware cache dir (NOT /tmp — /tmp clears on reboot, which would make the 24h-mtime sweep mostly redundant). The cache class wipes stale entries on Cleanup(); we run that once at startup, and YtDlpDownloader runs it again per download to bound disk for long-running sessions.
         var urlDownloadCache = new UrlDownloadCache(UserDataPaths.UrlDownloadCacheRoot);
         urlDownloadCache.Cleanup(DateTimeOffset.UtcNow, msg => Console.Error.WriteLine($"[vompl] {msg}"));
-        this.urlDownloader = new YtDlpDownloader(urlDownloadCache, "yt-dlp");
+        this.urlDownloader = new YtDlpDownloader(urlDownloadCache, YtDlpDownloader.BuildCommand(FlatpakDetect.IsSandboxed()));
         this.urlPrompt = new UrlPromptGtk(this);
         viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         // AttachAutosave before InitialFile is consumed (OnRenderContextReady) so the very first user-visible action — even one driven by the CLI arg — is captured.
