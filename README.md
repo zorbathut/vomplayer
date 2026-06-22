@@ -32,11 +32,11 @@ dotnet test
 Flatpak:
 
 ```sh
-flatpak-builder --user --install --force-clean build-flatpak flatpak/io.github.zorbathut.vomplayer.yml
+make install        # validate prereqs, build the bundle, install for the current user
 flatpak run io.github.zorbathut.vomplayer [path-or-url]
 ```
 
-See [flatpak/README.md](flatpak/README.md) for prerequisites, hardware acceleration notes, file associations, and how to produce a redistributable `.flatpak` bundle.
+`make` on its own builds a redistributable `vomplayer.flatpak` bundle without installing it; `make check` just validates the runtimes/SDK extensions the build needs (a one-time install). See [flatpak/README.md](flatpak/README.md) for those prerequisites, hardware acceleration notes, file associations, and the bundle workflow.
 
 ## Architecture
 

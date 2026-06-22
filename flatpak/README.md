@@ -27,6 +27,25 @@ flatpak install --user flathub \
 NVIDIA users get the matching `org.freedesktop.Platform.GL.nvidia-*`
 extension auto-installed on first run if the host driver is proprietary.)
 
+## Make targets
+
+A `Makefile` at the repo root wraps the commands below for everyday use.
+It assumes the runtimes/SDK extensions above are already installed —
+`make check` verifies them but does not install them.
+
+| Target | What it does |
+|--------|--------------|
+| `make check` | Verify `flatpak`, `flatpak-builder`, and the required runtimes/SDK extensions are present. Runs automatically before `make` and `make install`. |
+| `make` | Build the redistributable `vomplayer.flatpak` bundle (into `./repo`, then `flatpak build-bundle`). |
+| `make install` | Build the bundle if needed, then `flatpak install --user` it. |
+| `make clean` | Remove `build-flatpak/`, `repo/`, and `vomplayer.flatpak`. |
+
+`make` and `make install` go through the local-repo + bundle flow (see
+*Build a redistributable bundle* below). The standalone
+`flatpak-builder --user --install` in the next section is a bundle-free
+one-shot — handy for a quick local install when you don't need the
+`.flatpak` artifact.
+
 ## Build + install
 
 From the repo root:
