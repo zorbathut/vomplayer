@@ -35,9 +35,7 @@ public sealed class UrlLoadCoordinator : IDisposable
         // Gate before prompting. yt-dlp not available is a hard stop for this flow — there's no sensible fallback (mpv-direct doesn't handle YouTube), so the right UX is a clear "install yt-dlp" message rather than letting the user type a URL and *then* failing.
         if (!downloader.IsAvailable())
         {
-            prompt.ShowError(
-                "yt-dlp not found",
-                "Install yt-dlp to play URLs (e.g. `pip install yt-dlp`, or your distribution's package manager). Once installed, retry without restarting Vomplayer.");
+            ShowYtDlpMissingError();
             return null;
         }
         var url = await prompt.PromptForUrlAsync("Open URL");
@@ -116,10 +114,24 @@ public sealed class UrlLoadCoordinator : IDisposable
         }
         // Defense-in-depth: the host's load-current path also calls CancelActive at its top to cover the local-file case (no StartUrlLoad follows). On the URL branch, both calls run; CancelActive is idempotent so the second one is a no-op. Removing this internal call would mean a caller that forgets to cancel first would leak the prior yt-dlp process until its natural completion.
         CancelActive();
+        // Same hard gate as the interactive OpenUrlInteractiveAsync flow. Without yt-dlp, ClassifyAsync would throw and RunAsync would fall back to mpv-direct, which then can't resolve an extractor URL and fails silently — the user sees nothing happen. Gating here surfaces the identical "install yt-dlp" dialog for every non-interactive load (playlist row, drag-drop, command line, autosave restore). We can't tell a direct stream from an extractor URL without yt-dlp, so any http(s) URL that reaches here (ShouldProbe already filtered) is treated as needing it.
+        if (!downloader.IsAvailable())
+        {
+            ShowYtDlpMissingError();
+            return;
+        }
         var cts = new CancellationTokenSource();
         activeCts = cts;
         // Fire-and-forget — exceptions are caught inside RunAsync and surfaced via the prompt's ShowError. Keeping the public entry-point synchronous matches the host's load-current path, which can't await.
         _ = RunAsync(url, cts, onResolved);
+    }
+
+    // The "yt-dlp absent" dialog, shared by the interactive prompt gate and the load-path gate so both surface byte-identical guidance.
+    private void ShowYtDlpMissingError()
+    {
+        prompt.ShowError(
+            "yt-dlp not found",
+            "Install yt-dlp to play URLs (e.g. `pip install yt-dlp`, or your distribution's package manager). Once installed, retry without restarting Vomplayer.");
     }
 
     private async Task RunAsync(string url, CancellationTokenSource cts, Action<string, string> onResolved)
@@ -127,7 +139,7 @@ public sealed class UrlLoadCoordinator : IDisposable
         UrlProgressHandle? progressHandle = null;
         try
         {
-            // Classification step. A failure here (yt-dlp absent, network glitch, extractor crash) falls back to mpv-direct — mpv's built-in ytdl-hook will surface "yt-dlp couldn't be found" or similar if the URL actually needs an extractor, and a true direct stream plays without any further help. Cancellation must propagate (the user clicked another row mid-probe).
+            // Classification step. StartUrlLoad already gated on IsAvailable(), so yt-dlp is present here — a failure is a transient classify glitch (network blip, extractor crash), not an absent binary. We fall back to mpv-direct: a true direct stream plays natively, and an extractor URL that needed yt-dlp simply fails in mpv (our build disables Lua, so there's no ytdl-hook fallback). That's a best-effort for the rare transient case; the common "yt-dlp not installed" case never reaches here. Cancellation must propagate (the user clicked another row mid-probe).
             UrlLoadKind kind;
             try
             {

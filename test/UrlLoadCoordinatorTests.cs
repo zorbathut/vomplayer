@@ -235,6 +235,44 @@ public class UrlLoadCoordinatorTests
     }
 
     [Test]
+    public void StartUrlLoad_YtDlpUnavailable_ShowsSameErrorAsOpenUrlAndSkipsLoad()
+    {
+        // The non-interactive load path (playlist row click, drag-drop, command line, autosave restore) must gate on yt-dlp availability exactly like the interactive Open-URL path — otherwise a URL load with yt-dlp absent silently falls back to mpv-direct and "nothing happens". Same dialog, no classify, no onResolved.
+        var dl = new FakeUrlDownloader { Available = false };
+        var prompt = new FakeUrlPrompt();
+        using var coord = new UrlLoadCoordinator(dl, prompt);
+
+        bool fired = false;
+        coord.StartUrlLoad("https://youtu.be/X", (_, _) => fired = true);
+
+        Assert.That(fired, Is.False, "no load should fire when yt-dlp is unavailable");
+        Assert.That(dl.ClassifyCalls, Is.Empty, "classification must not run without yt-dlp");
+        Assert.That(dl.Downloads, Is.Empty);
+        Assert.That(prompt.ProgressShown, Is.EqualTo(0));
+        Assert.That(prompt.Errors, Has.Count.EqualTo(1));
+        Assert.That(prompt.Errors[0].Title, Does.Contain("yt-dlp"));
+        Assert.That(prompt.Errors[0].Message, Does.Contain("Install yt-dlp"));
+    }
+
+    [Test]
+    public async Task StartUrlLoad_YtDlpUnavailable_ErrorMatchesOpenUrlInteractive()
+    {
+        // Lock in "the same error dialog" — both gates must surface byte-identical title+message.
+        var unavailable = new FakeUrlDownloader { Available = false };
+        var interactivePrompt = new FakeUrlPrompt { NextUrl = "https://x" };
+        var interactiveCoord = new UrlLoadCoordinator(unavailable, interactivePrompt);
+        await interactiveCoord.OpenUrlInteractiveAsync();
+
+        var loadPrompt = new FakeUrlPrompt();
+        using var loadCoord = new UrlLoadCoordinator(unavailable, loadPrompt);
+        loadCoord.StartUrlLoad("https://x", (_, _) => { });
+
+        Assert.That(interactivePrompt.Errors, Has.Count.EqualTo(1));
+        Assert.That(loadPrompt.Errors, Has.Count.EqualTo(1));
+        Assert.That(loadPrompt.Errors[0], Is.EqualTo(interactivePrompt.Errors[0]));
+    }
+
+    [Test]
     public async Task StartUrlLoad_ClassifyExtractor_DownloadsAndFiresOnResolved()
     {
         var dl = new FakeUrlDownloader();  // ClassifyResult defaults to YtDlpDownload
