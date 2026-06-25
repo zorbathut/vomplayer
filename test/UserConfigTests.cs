@@ -138,42 +138,42 @@ public class UserConfigTests
     }
 
     [Test]
-    public void ApplicationSectionDefaultsToSingleInstance()
+    public void ApplicationSectionDefaultsToReuseWindow()
     {
-        // Missing [application] section in TOML — every pre-existing user config falls in here on upgrade. The Tomlyn POCO-default behavior is the contract we rely on for single-instance-on-by-default to apply silently.
+        // Missing [application] section in TOML — every pre-existing user config falls in here on upgrade. The Tomlyn POCO-default behavior is the contract we rely on for open-in-new-window-off-by-default to apply silently.
         var path = Path.Combine(tempDir!, "config.toml");
         Directory.CreateDirectory(tempDir!);
         File.WriteAllText(path, "[hotkeys]\nplay_pause = [\"p\"]\n");
 
         var cfg = UserConfig.LoadOrDefault(path);
         Assert.That(cfg.Application, Is.Not.Null);
-        Assert.That(cfg.Application.SingleInstance, Is.True);
+        Assert.That(cfg.Application.OpenInNewWindow, Is.False);
     }
 
     [Test]
-    public void ApplicationSingleInstanceHandEditedTomlReads()
+    public void ApplicationOpenInNewWindowHandEditedTomlReads()
     {
         // A user hand-writes the TOML file (not via Save). Exercises the snake_case naming policy on the read path directly, independent of Save's serialization shape. Catches the failure mode where Tomlyn's naming policy changes shape and Save→Load round-trips silently while hand-edited configs revert to default.
         var path = Path.Combine(tempDir!, "config.toml");
         Directory.CreateDirectory(tempDir!);
-        File.WriteAllText(path, "[application]\nsingle_instance = false\n");
+        File.WriteAllText(path, "[application]\nopen_in_new_window = true\n");
 
         var cfg = UserConfig.LoadOrDefault(path);
-        Assert.That(cfg.Application.SingleInstance, Is.False);
+        Assert.That(cfg.Application.OpenInNewWindow, Is.True);
     }
 
     [Test]
-    public void ApplicationSingleInstanceFalseRoundTrips()
+    public void ApplicationOpenInNewWindowTrueRoundTrips()
     {
         var path = Path.Combine(tempDir!, "config.toml");
         Directory.CreateDirectory(tempDir!);
 
         var cfg = new UserConfig();
-        cfg.Application.SingleInstance = false;
+        cfg.Application.OpenInNewWindow = true;
         cfg.Save(path);
 
         var reloaded = UserConfig.LoadOrDefault(path);
-        Assert.That(reloaded.Application.SingleInstance, Is.False);
+        Assert.That(reloaded.Application.OpenInNewWindow, Is.True);
         // Hotkey defaults survive a setting-only save.
         Assert.That(reloaded.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
     }
@@ -214,7 +214,7 @@ public class UserConfigTests
         var reloaded = UserConfig.LoadOrDefault(path);
         Assert.That(reloaded.Application.Theme, Is.EqualTo("light"));
         // Sibling application setting keeps its default through a theme-only save.
-        Assert.That(reloaded.Application.SingleInstance, Is.True);
+        Assert.That(reloaded.Application.OpenInNewWindow, Is.False);
     }
 
     [Test]

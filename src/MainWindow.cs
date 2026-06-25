@@ -748,14 +748,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         diagnosticAction.ChangeState(GLib.Variant.NewBoolean(!current));
     }
 
-    // Reload the runtime keymap and application-level toggles from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by PreferencesDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated and new bindings are live; the user can retry. single_instance only takes effect on next launch (the toggle changes process-startup behavior), so we just record it.
-    internal void ApplyPreferences(HotkeyMap map, bool singleInstance, ThemeMode theme)
+    // Reload the runtime keymap and application-level toggles from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by PreferencesDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated and new bindings are live; the user can retry. open_in_new_window only takes effect on next launch (the toggle changes process-startup behavior), so we just record it.
+    internal void ApplyPreferences(HotkeyMap map, bool openInNewWindow, ThemeMode theme)
     {
         hotkeys = map;
         userConfig.Hotkeys = UserConfig.HotkeysSection.FromDictionary(map.ToTomlForm());
-        userConfig.Application.SingleInstance = singleInstance;
+        userConfig.Application.OpenInNewWindow = openInNewWindow;
         userConfig.Application.Theme = ThemeModeParser.ToConfigString(theme);
-        // Theme applies live, independent of whether the save below succeeds — the running app and the persisted file are separate concerns. single_instance, by contrast, only changes process-startup behavior, so it just gets recorded for next launch.
+        // Theme applies live, independent of whether the save below succeeds — the running app and the persisted file are separate concerns. open_in_new_window, by contrast, only changes process-startup behavior, so it just gets recorded for next launch.
         ApplyThemePreference(theme);
         try
         {
@@ -785,9 +785,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         return hotkeys.Clone();
     }
 
-    internal bool GetSingleInstancePreference()
+    internal bool GetOpenInNewWindowPreference()
     {
-        return userConfig.Application.SingleInstance;
+        return userConfig.Application.OpenInNewWindow;
     }
 
     // Current theme preference for the dialog to seed its dropdown. The warn is discarded (not a silent swallow): this same string was already parsed-and-warned at startup, and re-warning every time Preferences opens would just be noise.

@@ -7,17 +7,17 @@ namespace Vomplayer.Tests;
 public class StartupHelpersTests
 {
     [Test]
-    public void ComputeAppFlagsSingleInstanceHasHandlesCommandLineWithoutNonUnique()
+    public void ComputeAppFlagsReuseWindowHasHandlesCommandLineWithoutNonUnique()
     {
-        var flags = StartupHelpers.ComputeAppFlags(singleInstance: true);
+        var flags = StartupHelpers.ComputeAppFlags(openInNewWindow: false);
         Assert.That(flags & Gio.ApplicationFlags.HandlesCommandLine, Is.EqualTo(Gio.ApplicationFlags.HandlesCommandLine));
         Assert.That(flags & Gio.ApplicationFlags.NonUnique, Is.EqualTo(Gio.ApplicationFlags.FlagsNone));
     }
 
     [Test]
-    public void ComputeAppFlagsMultiInstanceHasBothHandlesCommandLineAndNonUnique()
+    public void ComputeAppFlagsNewWindowHasBothHandlesCommandLineAndNonUnique()
     {
-        var flags = StartupHelpers.ComputeAppFlags(singleInstance: false);
+        var flags = StartupHelpers.ComputeAppFlags(openInNewWindow: true);
         Assert.That(flags & Gio.ApplicationFlags.HandlesCommandLine, Is.EqualTo(Gio.ApplicationFlags.HandlesCommandLine));
         Assert.That(flags & Gio.ApplicationFlags.NonUnique, Is.EqualTo(Gio.ApplicationFlags.NonUnique));
     }

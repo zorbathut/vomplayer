@@ -7,13 +7,13 @@ namespace Vomplayer;
 // Pure-function helpers used by Program.Main. Extracted so they can be unit-tested without a GTK main loop.
 internal static class StartupHelpers
 {
-    // Translates the user-facing "single-instance mode" toggle into the GApplication flag set we register with. HandlesCommandLine is used (rather than HandlesOpen) because GirCore 0.7.0's OpenSignalArgs.Files getter currently throws on the GFile[] marshalling — the command-line signal hands us a plain string[] which works around that.
-    //   single instance: HandlesCommandLine alone → GApplication claims the bus name; second invocations forward their command line via D-Bus to the primary's OnCommandLine.
-    //   multi-window:    HandlesCommandLine | NonUnique → GApplication never tries to be remote; every process is its own primary. HandlesCommandLine is still set so OnCommandLine is the single file-load entry point on both modes.
-    internal static Gio.ApplicationFlags ComputeAppFlags(bool singleInstance)
+    // Translates the user-facing "open files in a new window" toggle into the GApplication flag set we register with. HandlesCommandLine is used (rather than HandlesOpen) because GirCore 0.7.0's OpenSignalArgs.Files getter currently throws on the GFile[] marshalling — the command-line signal hands us a plain string[] which works around that.
+    //   reuse window (default): HandlesCommandLine alone → GApplication claims the bus name; second invocations forward their command line via D-Bus to the primary's OnCommandLine.
+    //   new window:             HandlesCommandLine | NonUnique → GApplication never tries to be remote; every process is its own primary. HandlesCommandLine is still set so OnCommandLine is the single file-load entry point on both modes.
+    internal static Gio.ApplicationFlags ComputeAppFlags(bool openInNewWindow)
     {
         var flags = Gio.ApplicationFlags.HandlesCommandLine;
-        if (!singleInstance)
+        if (openInNewWindow)
         {
             flags |= Gio.ApplicationFlags.NonUnique;
         }

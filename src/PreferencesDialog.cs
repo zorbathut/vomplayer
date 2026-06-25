@@ -3,7 +3,7 @@ using Vomplayer.UserData;
 
 namespace Vomplayer;
 
-// Modal preferences dialog. Two tabs in a Gtk.Notebook: "General" (theme dropdown + single-instance checkbox) and "Hotkeys" (the per-action shortcut grid). Snapshots the live state on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyPreferences swaps the runtime map, applies the theme live, persists both sections to TOML, and refreshes menu accelerators. Cancel discards the snapshot.
+// Modal preferences dialog. Two tabs in a Gtk.Notebook: "General" (theme dropdown + open-in-new-window checkbox) and "Hotkeys" (the per-action shortcut grid). Snapshots the live state on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyPreferences swaps the runtime map, applies the theme live, persists both sections to TOML, and refreshes menu accelerators. Cancel discards the snapshot.
 //
 // Hotkeys tab layout: a true spreadsheet via Gtk.Grid wrapped in Gtk.ScrolledWindow. Row 0 is the header (Action, Shortcut 1, Shortcut 2, …). Each subsequent row is one action: action label in column 0, then one cell per binding slot, then trailing empty cells the user can click to add new bindings. Column count is recomputed on each rebuild as `max(MinSlots, max_bindings_across_actions + 1)` so there's always at least one trailing empty cell on every row, but the grid never grows unboundedly: a user with 8 bindings on one action makes the dialog wide, by design — the alternative (truncating with a "more…" indicator) hides what's bound.
 //
@@ -27,7 +27,7 @@ internal sealed class PreferencesDialog : Gtk.Window
     private readonly Gtk.Box statusBar;
     private readonly Gtk.Label statusLabel;
     private readonly Gtk.MenuButton mouseMenuButton;
-    private readonly Gtk.CheckButton singleInstanceCheck;
+    private readonly Gtk.CheckButton openInNewWindowCheck;
     private readonly Gtk.DropDown themeDropDown;
 
     // Dropdown row order. Indices are the wire contract between the DropDown's `Selected` uint and ThemeMode — keep aligned with the labels passed to NewFromStrings below.
@@ -55,14 +55,14 @@ internal sealed class PreferencesDialog : Gtk.Window
         notebook.SetHexpand(true);
         outerBox.Append(notebook);
 
-        // General tab — app-level settings: theme dropdown and the single-instance checkbox.
+        // General tab — app-level settings: theme dropdown and the open-in-new-window checkbox.
         var generalPage = Gtk.Box.New(Gtk.Orientation.Vertical, 8);
         generalPage.SetMarginStart(12);
         generalPage.SetMarginEnd(12);
         generalPage.SetMarginTop(12);
         generalPage.SetMarginBottom(12);
 
-        // Theme row — applies instantly on Save (no next-launch note, unlike single-instance below). Label + dropdown on one line.
+        // Theme row — applies instantly on Save (no next-launch note, unlike open-in-new-window below). Label + dropdown on one line.
         var themeRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
         var themeLabel = Gtk.Label.New("Theme:");
         themeLabel.SetXalign(0);
@@ -72,15 +72,15 @@ internal sealed class PreferencesDialog : Gtk.Window
         themeRow.Append(themeDropDown);
         generalPage.Append(themeRow);
 
-        singleInstanceCheck = Gtk.CheckButton.NewWithLabel("Open files in the running window when launching from the command line");
-        singleInstanceCheck.SetActive(owner.GetSingleInstancePreference());
-        generalPage.Append(singleInstanceCheck);
+        openInNewWindowCheck = Gtk.CheckButton.NewWithLabel("Open files in a new window when launching from the command line");
+        openInNewWindowCheck.SetActive(owner.GetOpenInNewWindowPreference());
+        generalPage.Append(openInNewWindowCheck);
 
-        var singleInstanceNote = Gtk.Label.New("Changes apply on next launch.");
-        singleInstanceNote.AddCssClass("dim-label");
-        singleInstanceNote.SetXalign(0);
-        singleInstanceNote.SetMarginStart(24);
-        generalPage.Append(singleInstanceNote);
+        var openInNewWindowNote = Gtk.Label.New("Changes apply on next launch.");
+        openInNewWindowNote.AddCssClass("dim-label");
+        openInNewWindowNote.SetXalign(0);
+        openInNewWindowNote.SetMarginStart(24);
+        generalPage.Append(openInNewWindowNote);
 
         notebook.AppendPage(generalPage, Gtk.Label.New("General"));
 
@@ -164,7 +164,7 @@ internal sealed class PreferencesDialog : Gtk.Window
         saveButton.OnClicked += (_, _) =>
         {
             // Selected is always 0..2 here: the model has three rows and is never deselected, so it can't be GTK_INVALID_LIST_POSITION.
-            owner.ApplyPreferences(editing.Clone(), singleInstanceCheck.Active, ThemeOrder[themeDropDown.Selected]);
+            owner.ApplyPreferences(editing.Clone(), openInNewWindowCheck.Active, ThemeOrder[themeDropDown.Selected]);
             Close();
         };
         buttonRow.Append(saveButton);
