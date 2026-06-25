@@ -70,6 +70,21 @@ public class ChapterHitTestTests
     }
 
     [Test]
+    public void OverlappingBandsSplitAtMidpoint()
+    {
+        // With a wide tolerance the two markers' bands overlap, but nearest-wins splits ownership at the midpoint between them, not at a band edge.
+        // Chapters at t=50 (x=60) and t=60 (x=70); midpoint x=65. WideTol=12 makes both bands ([48,72] and [58,82]) cover the midpoint.
+        const double WideTol = 12;
+        var chapters = Build(50, 60);
+        // Just left of the midpoint → left chapter.
+        Assert.That(ChapterHitTest.NearestChapter(64, TroughLeft, TroughWidth, Duration, chapters, WideTol)?.TimeSeconds, Is.EqualTo(50));
+        // Just right of the midpoint → right chapter.
+        Assert.That(ChapterHitTest.NearestChapter(66, TroughLeft, TroughWidth, Duration, chapters, WideTol)?.TimeSeconds, Is.EqualTo(60));
+        // Exactly on the midpoint → deterministic: the left (earlier) chapter owns the boundary point.
+        Assert.That(ChapterHitTest.NearestChapter(65, TroughLeft, TroughWidth, Duration, chapters, WideTol)?.TimeSeconds, Is.EqualTo(50));
+    }
+
+    [Test]
     public void DurationZeroReturnsNull()
     {
         var chapters = Build(25, 50);

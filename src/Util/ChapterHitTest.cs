@@ -3,7 +3,7 @@ using Vomplayer.Playback;
 
 namespace Vomplayer.Util;
 
-// Pure hit-test for chapter-marker clicks. The visual layout maps a chapter at TimeSeconds=t to pixel x = troughLeftPx + (t/durationSeconds) * troughWidthPx, matching how Gtk.Scale.AddMark positions a tick (the trough-rect range, not the scale's full widget width — the slider thumb's reachable range is inset on both sides). Returns the chapter whose pixel position is closest to clickX *and* within toleranceTpx; null if nothing's in range. The full record is returned (not just its time) so callers can read Title/Index for the hover tooltip as well as TimeSeconds for the seek.
+// Pure hit-test for chapter-marker clicks. The visual layout maps a chapter at TimeSeconds=t to pixel x = troughLeftPx + (t/durationSeconds) * troughWidthPx, matching how Gtk.Scale.AddMark positions a tick (the trough-rect range, not the scale's full widget width — the slider thumb's reachable range is inset on both sides). Returns the chapter whose pixel position is closest to clickX *and* within toleranceTpx; null if nothing's in range. Because it's nearest-wins (not first-band-hit), two markers whose tolerance bands overlap split cleanly at the midpoint between them — the click box for each ends at the centerpoint rather than overlapping its neighbor. The full record is returned (not just its time) so callers can read Title/Index for the hover tooltip as well as TimeSeconds for the seek.
 internal static class ChapterHitTest
 {
     internal static MediaChapter? NearestChapter(
