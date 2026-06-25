@@ -98,115 +98,199 @@ public class PlaylistTests
         Assert.That(p.Items, Is.Empty);
     }
 
+    // ---- MoveMany (gap-based group move; replaced the old single-item Move(from,to)) ----
+    // gap is an insertion point in CURRENT-index coordinates: "insert the extracted block before original row `gap`"; gap == Count means end.
+
     [Test]
-    public void MoveForwardReorders()
+    public void MoveManyForwardReorders()
     {
+        // Port of the old MoveForwardReorders: move item 1 ('b') to the end → gap == Count.
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c", "d" });
         p.SetCurrent(0);
-        p.Move(1, 3);
+        p.MoveMany(new[] { 1 }, 4);
         Assert.That(p.Items, Is.EqualTo(new[] { "a", "c", "d", "b" }));
     }
 
     [Test]
-    public void MoveBackwardReorders()
+    public void MoveManyBackwardReorders()
     {
+        // Port of MoveBackwardReorders: move item 3 ('d') to gap 1 (between 'a' and 'b').
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c", "d" });
         p.SetCurrent(0);
-        p.Move(3, 1);
+        p.MoveMany(new[] { 3 }, 1);
         Assert.That(p.Items, Is.EqualTo(new[] { "a", "d", "b", "c" }));
     }
 
     [Test]
-    public void MoveAdjustsCurrentIndexWhenCurrentItemMoves()
+    public void MoveManyCurrentItemFollows()
     {
-        // The current item itself is moved; CurrentIndex follows it.
+        // Port of MoveAdjustsCurrentIndexWhenCurrentItemMoves: the playing item is the one moved.
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c", "d" });
-        p.SetCurrent(1);
-        p.Move(1, 3);
+        p.SetCurrent(1);                 // 'b'
+        p.MoveMany(new[] { 1 }, 4);
         Assert.That(p.Items, Is.EqualTo(new[] { "a", "c", "d", "b" }));
         Assert.That(p.CurrentIndex, Is.EqualTo(3));
     }
 
     [Test]
-    public void MoveAdjustsCurrentIndexWhenItemMovesPastCurrentForward()
+    public void MoveManyBlockLandingAfterCurrentLeavesCurrent()
     {
-        // from < current <= to (forward move that crosses current). Current shifts left by one.
+        // Port of MoveAdjustsCurrentIndexWhenItemMovesPastCurrentForward: move item 0 ('a') to the end,
+        // past the playing 'c'. 'c' shifts left by one (one item removed from before it).
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c", "d" });
         p.SetCurrent(2);                 // 'c'
-        p.Move(0, 3);
+        p.MoveMany(new[] { 0 }, 4);
         Assert.That(p.Items, Is.EqualTo(new[] { "b", "c", "d", "a" }));
         Assert.That(p.CurrentIndex, Is.EqualTo(1));   // 'c' is now at index 1
     }
 
     [Test]
-    public void MoveAdjustsCurrentIndexWhenItemMovesIntoCurrentSlotForward()
+    public void MoveManyBlockLandingBeforeCurrentShiftsCurrentRight()
     {
-        // The off-by-one trap: from < current AND current == to. Same forward-move adjustment.
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c", "d" });
-        p.SetCurrent(2);                 // 'c'
-        p.Move(0, 2);
-        Assert.That(p.Items, Is.EqualTo(new[] { "b", "c", "a", "d" }));
-        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // 'c' is now at index 1
-    }
-
-    [Test]
-    public void MoveAdjustsCurrentIndexWhenItemMovesPastCurrentBackward()
-    {
-        // to <= current < from (backward move that crosses current). Current shifts right by one.
+        // Port of MoveAdjustsCurrentIndexWhenItemMovesPastCurrentBackward: move item 3 ('d') to the front,
+        // landing before the playing 'b'. 'b' shifts right by the block size (1).
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c", "d" });
         p.SetCurrent(1);                 // 'b'
-        p.Move(3, 0);
+        p.MoveMany(new[] { 3 }, 0);
         Assert.That(p.Items, Is.EqualTo(new[] { "d", "a", "b", "c" }));
         Assert.That(p.CurrentIndex, Is.EqualTo(2));   // 'b' is now at index 2
     }
 
     [Test]
-    public void MoveAdjustsCurrentIndexWhenItemMovesIntoCurrentSlotBackward()
+    public void MoveManyOutsideCurrentDoesNotShiftIndex()
     {
-        // The symmetric off-by-one trap: to == current AND current < from.
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c", "d" });
-        p.SetCurrent(1);                 // 'b'
-        p.Move(3, 1);
-        Assert.That(p.Items, Is.EqualTo(new[] { "a", "d", "b", "c" }));
-        Assert.That(p.CurrentIndex, Is.EqualTo(2));   // 'b' is now at index 2
-    }
-
-    [Test]
-    public void MoveOutsideCurrentDoesNotShiftIndex()
-    {
+        // Port of MoveOutsideCurrentDoesNotShiftIndex.
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c", "d" });
         p.SetCurrent(0);                 // 'a'
-        p.Move(2, 3);                    // both indices > current
+        p.MoveMany(new[] { 2 }, 4);      // move 'c' to end, all positions after current
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "d", "c" }));
         Assert.That(p.CurrentIndex, Is.EqualTo(0));
     }
 
     [Test]
-    public void MoveSamePositionDoesNotFireChanged()
+    public void MoveManyContiguousBlockMovesTogether()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.MoveMany(new[] { 1, 2 }, 5);   // move {b,c} to the end
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "d", "e", "b", "c" }));
+    }
+
+    [Test]
+    public void MoveManyNonContiguousBecomesContiguous()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.MoveMany(new[] { 0, 2 }, 4);   // extract {a,c}, insert before original row 4 ('e')
+        Assert.That(p.Items, Is.EqualTo(new[] { "b", "d", "a", "c", "e" }));
+    }
+
+    [Test]
+    public void MoveManyCurrentInsideSelectionFollowsToBlock()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.SetCurrent(2);                 // 'c', which is inside the moved set
+        p.MoveMany(new[] { 0, 2 }, 4);
+        Assert.That(p.Items, Is.EqualTo(new[] { "b", "d", "a", "c", "e" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(3));   // 'c' rode along to its slot in the block
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("c"));
+    }
+
+    [Test]
+    public void MoveManyCurrentOutsideShiftsWhenBlockLandsBefore()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.SetCurrent(4);                 // 'e'
+        p.MoveMany(new[] { 0, 1 }, 3);   // {a,b} land before 'd', ahead of 'e'
+        Assert.That(p.Items, Is.EqualTo(new[] { "c", "a", "b", "d", "e" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(4));   // 'e' stays last
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("e"));
+    }
+
+    [Test]
+    public void MoveManyCurrentOutsideUnchangedWhenBlockLandsAfter()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.SetCurrent(0);                 // 'a'
+        p.MoveMany(new[] { 3, 4 }, 2);   // {d,e} land after 'a'
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "d", "e", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void MoveManyToEnd()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.MoveMany(new[] { 0 }, 3);      // gap == Count
+        Assert.That(p.Items, Is.EqualTo(new[] { "b", "c", "a" }));
+    }
+
+    [Test]
+    public void MoveManyDropInPlaceDoesNotFireChanged()
+    {
+        // Dropping a contiguous selection back onto its own span produces an identical list — no Changed.
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d" });
+        int fires = 0;
+        p.Changed += _ => fires++;
+        p.MoveMany(new[] { 1, 2 }, 3);   // {b,c} reinserted exactly where they were
+        Assert.That(fires, Is.EqualTo(0));
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "c", "d" }));
+    }
+
+    [Test]
+    public void MoveManyDuplicateIndicesDeduped()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d" });
+        p.MoveMany(new[] { 2, 1, 1 }, 4); // {1,2} after dedupe
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "d", "b", "c" }));
+    }
+
+    [Test]
+    public void MoveManyFiresMoveKindOnce()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        int fires = 0;
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => { fires++; lastKind = k; };
+        p.MoveMany(new[] { 0 }, 3);
+        Assert.That(fires, Is.EqualTo(1));
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Move));
+    }
+
+    [Test]
+    public void MoveManyEmptyIndicesIsNoOp()
     {
         var p = new Playlist();
         p.Replace(new[] { "a", "b", "c" });
         int fires = 0;
         p.Changed += _ => fires++;
-        p.Move(1, 1);
+        p.MoveMany(Array.Empty<int>(), 1);
         Assert.That(fires, Is.EqualTo(0));
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "c" }));
     }
 
     [Test]
-    public void MoveOutOfRangeThrows()
+    public void MoveManyOutOfRangeThrows()
     {
         var p = new Playlist();
         p.Replace(new[] { "a", "b" });
-        Assert.Throws<ArgumentOutOfRangeException>(() => p.Move(5, 0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => p.Move(0, 5));
-        Assert.Throws<ArgumentOutOfRangeException>(() => p.Move(-1, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.MoveMany(new[] { 5 }, 0));   // bad index
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.MoveMany(new[] { -1 }, 0));  // negative index
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.MoveMany(new[] { 0 }, 5));   // gap > Count
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.MoveMany(new[] { 0 }, -1));  // gap < 0
     }
 
     [Test]
@@ -298,7 +382,7 @@ public class PlaylistTests
         p.Replace(new[] { "a", "b", "c" });
         PlaylistChangeKind? lastKind = null;
         p.Changed += k => lastKind = k;
-        p.Move(0, 2);
+        p.MoveMany(new[] { 0 }, 3);
         Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Move));
     }
 
@@ -322,98 +406,6 @@ public class PlaylistTests
         p.Changed += k => lastKind = k;
         p.Advance();
         Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Advance));
-    }
-
-    [Test]
-    public void RemoveShiftsTailAndFiresRemoveKindOnce()
-    {
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c", "d" });
-        int fires = 0;
-        PlaylistChangeKind? lastKind = null;
-        p.Changed += k => { fires++; lastKind = k; };
-        p.Remove(1);
-        Assert.That(p.Items, Is.EqualTo(new[] { "a", "c", "d" }));
-        Assert.That(fires, Is.EqualTo(1));
-        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Remove));
-    }
-
-    [Test]
-    public void RemoveBeforeCurrentDecrementsCurrent()
-    {
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c", "d" });
-        p.SetCurrent(2);                 // 'c'
-        p.Remove(0);
-        Assert.That(p.Items, Is.EqualTo(new[] { "b", "c", "d" }));
-        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // 'c' now at index 1
-    }
-
-    [Test]
-    public void RemoveAfterCurrentLeavesCurrent()
-    {
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c", "d" });
-        p.SetCurrent(1);                 // 'b'
-        p.Remove(3);                     // remove 'd', after current
-        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "c" }));
-        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // unchanged
-    }
-
-    [Test]
-    public void RemoveLastItemWhileNotCurrentDoesNotDisturbCurrent()
-    {
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c", "d" });
-        p.SetCurrent(0);                 // 'a'
-        p.Remove(3);                     // remove the last row; current sits before it
-        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "c" }));
-        Assert.That(p.CurrentIndex, Is.EqualTo(0));
-    }
-
-    [Test]
-    public void RemoveCurrentMidListPointsCurrentAtNextItem()
-    {
-        // Removing the playing row (index 0 here) makes the row that slid into the slot the new current,
-        // so the panel's play-next-on-remove-current branch resumes the *following* file.
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c" });
-        p.SetCurrent(0);                 // 'a' playing
-        p.Remove(0);
-        Assert.That(p.Items, Is.EqualTo(new[] { "b", "c" }));
-        Assert.That(p.CurrentIndex, Is.EqualTo(0));
-        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("b"));   // the next file
-    }
-
-    [Test]
-    public void RemoveCurrentWhenLastRowClampsToNewLast()
-    {
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b", "c" });
-        p.SetCurrent(2);                 // 'c' playing, last row
-        p.Remove(2);
-        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b" }));
-        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // new last row
-        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("b"));
-    }
-
-    [Test]
-    public void RemoveOnlyItemClearsToEmptyAndMinusOne()
-    {
-        var p = new Playlist();
-        p.Replace(new[] { "a" });
-        p.Remove(0);
-        Assert.That(p.Items, Is.Empty);
-        Assert.That(p.CurrentIndex, Is.EqualTo(-1));
-    }
-
-    [Test]
-    public void RemoveOutOfRangeThrows()
-    {
-        var p = new Playlist();
-        p.Replace(new[] { "a", "b" });
-        Assert.Throws<ArgumentOutOfRangeException>(() => p.Remove(5));
-        Assert.Throws<ArgumentOutOfRangeException>(() => p.Remove(-1));
     }
 
     [Test]
@@ -462,5 +454,220 @@ public class PlaylistTests
         Assert.That(fires, Is.EqualTo(0));
         Assert.That(p.Items, Is.EqualTo(new[] { "a" }));
         Assert.That(p.CurrentIndex, Is.EqualTo(0));
+    }
+
+    // ---- RemoveMany (batch delete; generalizes Remove(int)) ----
+
+    [Test]
+    public void RemoveManyRemovesAllSelectedAndShiftsTail()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.RemoveMany(new[] { 1, 3 });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "c", "e" }));
+    }
+
+    [Test]
+    public void RemoveManyBeforeCurrentDecrementsByCount()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.SetCurrent(4);                 // 'e'
+        p.RemoveMany(new[] { 0, 1 });
+        Assert.That(p.Items, Is.EqualTo(new[] { "c", "d", "e" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(2));   // 'e' shifted left by 2
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("e"));
+    }
+
+    [Test]
+    public void RemoveManyIncludingCurrentLandsOnNextSurvivor()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.SetCurrent(2);                 // 'c' playing, inside the removed run
+        p.RemoveMany(new[] { 1, 2, 3 });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "e" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(1));   // the survivor that slid into the slot
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("e"));
+    }
+
+    [Test]
+    public void RemoveManyIncludingCurrentAtTailClampsToNewLast()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.SetCurrent(2);                 // 'c' playing, last row
+        p.RemoveMany(new[] { 1, 2 });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));   // clamped to new last
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("a"));
+    }
+
+    [Test]
+    public void RemoveManyAllItemsClearsToEmptyMinusOne()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.RemoveMany(new[] { 0, 1, 2 });
+        Assert.That(p.Items, Is.Empty);
+        Assert.That(p.CurrentIndex, Is.EqualTo(-1));
+    }
+
+    [Test]
+    public void RemoveManyNonContiguousCurrentSurvivesBetween()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d", "e" });
+        p.SetCurrent(2);                 // 'c' survives; one removed index below it
+        p.RemoveMany(new[] { 0, 4 });
+        Assert.That(p.Items, Is.EqualTo(new[] { "b", "c", "d" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(1));
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("c"));
+    }
+
+    [Test]
+    public void RemoveManyDuplicateIndicesDeduped()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.RemoveMany(new[] { 1, 1 });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "c" }));  // 'b' removed once, not double
+    }
+
+    [Test]
+    public void RemoveManyFiresRemoveKindOnce()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c", "d" });
+        int fires = 0;
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => { fires++; lastKind = k; };
+        p.RemoveMany(new[] { 0, 2 });
+        Assert.That(fires, Is.EqualTo(1));
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Remove));
+    }
+
+    [Test]
+    public void RemoveManyEmptyIsNoOp()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        int fires = 0;
+        p.Changed += _ => fires++;
+        p.RemoveMany(Array.Empty<int>());
+        Assert.That(fires, Is.EqualTo(0));
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b" }));
+    }
+
+    [Test]
+    public void RemoveManyOutOfRangeThrows()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.RemoveMany(new[] { 5 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.RemoveMany(new[] { -1 }));
+    }
+
+    // ---- Insert (positional insert; gap semantics) ----
+
+    [Test]
+    public void InsertAtMiddleShiftsTailAndCurrent()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.SetCurrent(2);                 // 'c'
+        p.Insert(1, new[] { "x", "y" });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "x", "y", "b", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(4));   // 'c' pushed right by 2
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("c"));
+    }
+
+    [Test]
+    public void InsertBeforeCurrentShiftsCurrent()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.SetCurrent(1);                 // 'b'
+        p.Insert(0, new[] { "x" });
+        Assert.That(p.Items, Is.EqualTo(new[] { "x", "a", "b", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(2));
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("b"));
+    }
+
+    [Test]
+    public void InsertAtCurrentSlotShiftsCurrent()
+    {
+        // Boundary: index == CurrentIndex. The playing item follows its content to the right.
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.SetCurrent(1);                 // 'b'
+        p.Insert(1, new[] { "x" });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "x", "b", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(2));
+        Assert.That(p.Items[p.CurrentIndex], Is.EqualTo("b"));
+    }
+
+    [Test]
+    public void InsertAfterCurrentLeavesCurrent()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b", "c" });
+        p.SetCurrent(0);                 // 'a'
+        p.Insert(2, new[] { "x" });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "x", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void InsertAtEndAppends()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        p.Insert(2, new[] { "c" });      // index == Count
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b", "c" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));  // current 'a' unaffected
+    }
+
+    [Test]
+    public void InsertIntoEmptySetsCurrentToZero()
+    {
+        var p = new Playlist();
+        p.Insert(0, new[] { "a", "b" });
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b" }));
+        Assert.That(p.CurrentIndex, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void InsertEmptyPathsIsNoOp()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        int fires = 0;
+        p.Changed += _ => fires++;
+        p.Insert(1, Array.Empty<string>());
+        Assert.That(fires, Is.EqualTo(0));
+        Assert.That(p.Items, Is.EqualTo(new[] { "a", "b" }));
+    }
+
+    [Test]
+    public void InsertFiresInsertKindOnce()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        int fires = 0;
+        PlaylistChangeKind? lastKind = null;
+        p.Changed += k => { fires++; lastKind = k; };
+        p.Insert(1, new[] { "x" });
+        Assert.That(fires, Is.EqualTo(1));
+        Assert.That(lastKind, Is.EqualTo(PlaylistChangeKind.Insert));
+    }
+
+    [Test]
+    public void InsertOutOfRangeGapThrows()
+    {
+        var p = new Playlist();
+        p.Replace(new[] { "a", "b" });
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.Insert(3, new[] { "x" }));   // gap > Count
+        Assert.Throws<ArgumentOutOfRangeException>(() => p.Insert(-1, new[] { "x" }));  // gap < 0
     }
 }

@@ -8,7 +8,7 @@ namespace Vomplayer;
 
 // File ▸ Open/Save Playlist handlers. The playlist is a newline-delimited textfile (PlaylistFile owns
 // the pure format); the GTK file-dialog / clipboard / disk-I/O glue lives here in the view, mirroring
-// the drag-and-drop handlers (HandleWindowDrop/HandlePanelDrop) — both do view-level I/O then call the
+// the window drag-and-drop handler (HandleWindowDrop) — both do view-level I/O then call the
 // public viewModel.LoadPaths(replace:true) / read viewModel.Playlist.Items. Open replaces, and Save
 // exports, the focused stream's playlist (LoadPaths/Playlist resolve to SingleTarget).
 //

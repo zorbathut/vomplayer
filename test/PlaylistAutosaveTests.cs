@@ -281,7 +281,7 @@ public partial class PlaylistAutosaveTests
         primary.Playlist.SetCurrent(2);
         Assert.That(autosave.CurrentGuid, Is.EqualTo(initial), "SetCurrent");
 
-        primary.Playlist.Move(0, 1);
+        primary.Playlist.MoveMany(new[] { 0 }, 2);
         Assert.That(autosave.CurrentGuid, Is.EqualTo(initial), "Move");
 
         primary.Playlist.Advance();
@@ -452,7 +452,7 @@ public partial class PlaylistAutosaveTests
         primary.Playlist.Replace(new[] { "/x.mp4" });
         primary.Playlist.SetCurrent(0);
         primary.Playlist.Append(new[] { "/y.mp4" });
-        primary.Playlist.Move(0, 1);
+        primary.Playlist.MoveMany(new[] { 0 }, 2);
         primaryPb.RaiseMediaTitle("Title After Detach");
 
         Assert.That(repo.SaveCalls.Count, Is.EqualTo(saveCountBefore), "No Persist after Detach");

@@ -301,13 +301,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         var primaryDrop = UriListDropTarget.Create(paths => HandlePrimaryDrop(paths));
         videoWidget.AddController(primaryDrop);
 
-        // Drag-and-drop loading. We use Gtk.DropTargetAsync via UriListDropTarget rather than the older Gtk.DropTarget(Gdk.FileList) path because GTK 4's content-deserializer machinery for FileList drops in a Flatpak sandbox always tries to mediate via the FileTransfer/Documents portals — which hard-rejects paths outside the trusted-roots list (e.g. Steam Deck /var/mnt/* drops). UriListDropTarget calls gdk_drop_read_async with explicit mime list ["text/uri-list"], bypassing the deserializer machinery entirely and the portal call with it. With --filesystem=host:ro in the manifest, the sandbox already has read access to whatever the source dropped. See UriListDropTarget.cs's header for full details. Window-level target REPLACES the playlist; the panel-level target wired below APPENDS. GTK4's drop dispatch picks the topmost widget under the pointer that matches the offered formats, so a drop on the panel triggers ONLY the panel's target — replace and append are properly disjoint without a propagation dance. Copy|Move|Link is accepted because Wayland/X11 sources negotiate the action set with the destination; we read the file either way.
+        // Drag-and-drop loading. We use Gtk.DropTargetAsync via UriListDropTarget rather than the older Gtk.DropTarget(Gdk.FileList) path because GTK 4's content-deserializer machinery for FileList drops in a Flatpak sandbox always tries to mediate via the FileTransfer/Documents portals — which hard-rejects paths outside the trusted-roots list (e.g. Steam Deck /var/mnt/* drops). UriListDropTarget calls gdk_drop_read_async with explicit mime list ["text/uri-list"], bypassing the deserializer machinery entirely and the portal call with it. With --filesystem=host:ro in the manifest, the sandbox already has read access to whatever the source dropped. See UriListDropTarget.cs's header for full details. This window-level target REPLACES the playlist; the PlaylistPanel owns its own positional-insert target (drops onto the panel insert at the pointer position). GTK4's drop dispatch picks the topmost widget under the pointer that matches the offered formats, so a drop on the panel triggers ONLY the panel's target — replace and insert are properly disjoint without a propagation dance. Copy|Move|Link is accepted because Wayland/X11 sources negotiate the action set with the destination; we read the file either way.
         var dropTarget = UriListDropTarget.Create(paths => HandleWindowDrop(paths));
         AddController(dropTarget);
-
-        // Panel-level append target, attached to the panel's drop area (the inner ListBox, so drops on the scrollbar don't accidentally consume). Only matched when the user drops onto the panel itself.
-        var panelDropTarget = UriListDropTarget.Create(paths => HandlePanelDrop(paths));
-        playlistPanel.DropArea.AddController(panelDropTarget);
 
         // Mirror the real fullscreen state rather than treating a local bool as authority. Covers compositor/WM-initiated un-fullscreen that bypasses our key/gesture paths.
         OnNotify += OnWindowNotify;
@@ -532,7 +528,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private static void InstallVomplCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; } .vompl-selected-video { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.9); } .vompl-stream-toolbar { padding: 4px 6px; }");
+        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; } .vompl-playlist-list row.vompl-drop-before { border-top: 2px solid rgb(53, 132, 228); } .vompl-playlist-list row.vompl-drop-after { border-bottom: 2px solid rgb(53, 132, 228); } .vompl-selected-video { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.9); } .vompl-stream-toolbar { padding: 4px 6px; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
@@ -646,15 +642,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         {
             ShowPlaylistPanel();
         }
-    }
-
-    private void HandlePanelDrop(List<string> paths)
-    {
-        if (paths.Count == 0)
-        {
-            return;
-        }
-        viewModel.LoadPaths(paths, replace: false);
     }
 
     // Single dispatch site for HotkeyMap-bound actions. Returns true when the input has been consumed so the key controller can short-circuit propagation; the click handler ignores the return value because GestureClick doesn't propagate the same way. ExitFullscreen returns false when not actually fullscreen so the bound key (typically Escape) doesn't get silently swallowed in non-fullscreen state — matches the pre-customization behavior.

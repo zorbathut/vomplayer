@@ -9,6 +9,7 @@ public enum PlaylistChangeKind
     Replace,
     Append,
     Prepend,
+    Insert,
     Move,
     Remove,
     SetCurrent,
@@ -95,79 +96,185 @@ public sealed class Playlist
         Changed?.Invoke(PlaylistChangeKind.Prepend);
     }
 
-    // Reorder: take the item at `from`, remove it, insert at `to`. Throws on out-of-range — out-of-range is a programmer error in single-threaded GTK callers, not a user-facing condition (per CLAUDE.md, silent error handling is banned).
-    public void Move(int from, int to)
+    // Insert `paths` at `index` (gap semantics: the new items end up starting at `index`, pushing the item previously at `index` and everything after it to the right). index == Items.Count appends. Out-of-range throws — programmer-error contract shared with Move/Remove/SetCurrent. Empty paths is a no-op (no Changed). Used by the panel's positional drag-and-drop-of-external-files path.
+    public void Insert(int index, IReadOnlyList<string> paths)
     {
-        if (from < 0 || from >= Items.Count)
+        if (paths == null)
         {
-            throw new ArgumentOutOfRangeException(nameof(from), from, $"Items count is {Items.Count}");
+            throw new ArgumentNullException(nameof(paths));
         }
-        if (to < 0 || to >= Items.Count)
+        if (index < 0 || index > Items.Count)
         {
-            throw new ArgumentOutOfRangeException(nameof(to), to, $"Items count is {Items.Count}");
+            throw new ArgumentOutOfRangeException(nameof(index), index, $"Items count is {Items.Count}");
         }
-        if (from == to)
+        if (paths.Count == 0)
         {
             return;
         }
-        var copy = new List<string>(Items);
-        var moved = copy[from];
-        copy.RemoveAt(from);
-        copy.Insert(to, moved);
-        // CurrentIndex adjustment:
-        //  - If the current item itself moved, CurrentIndex follows it to `to`.
-        //  - Forward move (from < to) that crosses current (from < current <= to): current shifts left by 1.
-        //  - Backward move (from > to) that crosses current (to <= current < from): current shifts right by 1.
-        //  - Otherwise current is on the same side of the moved item before and after; no adjustment.
+        var combined = new List<string>(Items.Count + paths.Count);
+        combined.AddRange(Items);
+        combined.InsertRange(index, paths);
+        if (CurrentIndex < 0)
+        {
+            CurrentIndex = 0;
+        }
+        else if (CurrentIndex >= index)
+        {
+            // The playing item sat at or after the insertion gap, so the inserted block pushed it right. Follow it so the highlight stays on the same content.
+            CurrentIndex += paths.Count;
+        }
+        Items = combined.AsReadOnly();
+        Changed?.Invoke(PlaylistChangeKind.Insert);
+    }
+
+    // Reorder a (possibly multi-item, possibly non-contiguous) selection to a single gap. `gap` ∈ [0, Count] is an insertion point in CURRENT-index coordinates ("insert the block before original row `gap`"; gap == Count means end). The selected items are extracted in ascending-index order and re-inserted as a contiguous block at the gap. Replaces the old single-item Move(from,to): gap semantics are unambiguous for non-contiguous selections and map directly to the panel's drop-indicator. Throws on out-of-range index/gap; empty indices and drop-in-place (resulting list + CurrentIndex unchanged) are no-ops that don't fire Changed.
+    public void MoveMany(IReadOnlyList<int> indices, int gap)
+    {
+        if (indices == null)
+        {
+            throw new ArgumentNullException(nameof(indices));
+        }
+        if (gap < 0 || gap > Items.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(gap), gap, $"Items count is {Items.Count}");
+        }
+        // Dedupe + sort ascending. The selection arrives from GTK in arbitrary order and could in principle carry duplicates; a sorted distinct set makes the block well-defined and the index math below order-independent.
+        var sel = new SortedSet<int>();
+        foreach (int i in indices)
+        {
+            if (i < 0 || i >= Items.Count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(indices), i, $"Items count is {Items.Count}");
+            }
+            sel.Add(i);
+        }
+        if (sel.Count == 0)
+        {
+            return;
+        }
+
+        // block = selected items in ascending-index order; remaining = the rest, order preserved.
+        var selList = new List<int>(sel);
+        var block = new List<string>(selList.Count);
+        foreach (int i in selList)
+        {
+            block.Add(Items[i]);
+        }
+        var remaining = new List<string>(Items.Count - selList.Count);
+        for (int i = 0; i < Items.Count; i++)
+        {
+            if (!sel.Contains(i))
+            {
+                remaining.Add(Items[i]);
+            }
+        }
+
+        // Translate the gap (in original coordinates) to a position in `remaining`: subtract the selected indices that fell below it.
+        int selBelowGap = 0;
+        foreach (int i in selList)
+        {
+            if (i < gap)
+            {
+                selBelowGap++;
+            }
+        }
+        int insertPos = gap - selBelowGap;
+
+        var newItems = new List<string>(Items.Count);
+        newItems.AddRange(remaining.GetRange(0, insertPos));
+        newItems.AddRange(block);
+        newItems.AddRange(remaining.GetRange(insertPos, remaining.Count - insertPos));
+
+        // CurrentIndex follows its item: into the block if the playing item was selected, otherwise to its new spot in `remaining` (shifted right by the block size when the block landed at or before it).
         int newCurrent = CurrentIndex;
-        if (CurrentIndex == from)
+        if (CurrentIndex >= 0)
         {
-            newCurrent = to;
+            int posInBlock = selList.IndexOf(CurrentIndex);
+            if (posInBlock >= 0)
+            {
+                newCurrent = insertPos + posInBlock;
+            }
+            else
+            {
+                int selBelowCurrent = 0;
+                foreach (int i in selList)
+                {
+                    if (i < CurrentIndex)
+                    {
+                        selBelowCurrent++;
+                    }
+                }
+                int r = CurrentIndex - selBelowCurrent;
+                newCurrent = r >= insertPos ? r + block.Count : r;
+            }
         }
-        else if (from < to && from < CurrentIndex && CurrentIndex <= to)
+
+        var newReadOnly = newItems.AsReadOnly();
+        if (SequenceEquals(Items, newReadOnly) && newCurrent == CurrentIndex)
         {
-            newCurrent--;
+            // Drop-in-place (selection reinserted exactly where it was): no observable change, so don't fire.
+            return;
         }
-        else if (from > to && to <= CurrentIndex && CurrentIndex < from)
-        {
-            newCurrent++;
-        }
-        Items = copy.AsReadOnly();
+        Items = newReadOnly;
         CurrentIndex = newCurrent;
         Changed?.Invoke(PlaylistChangeKind.Move);
     }
 
-    // Drop the item at `index`. Throws on out-of-range — same programmer-error contract as Move/SetCurrent (CLAUDE.md bans silent handling). Never a no-op: every call shrinks Items, so it always fires Changed.
+    // Delete the items at `indices` (the Del key and the context-menu remove; single- and multi-row both route here). Indices are deduped and may arrive in any order. Out-of-range throws (programmer-error contract, same as Move/SetCurrent — CLAUDE.md bans silent handling); empty input is a no-op (no Changed). Fires a single PlaylistChangeKind.Remove.
     //
-    // CurrentIndex adjustment, by case:
-    //  - List now empty → -1 (the standard "nothing playing" sentinel).
-    //  - index < CurrentIndex → the playing item shifted left by one; follow it.
-    //  - index == CurrentIndex (the playing row itself was removed) → Math.Min(index, newCount-1): the row that slid into the slot, or the new last row if the last was removed. The panel's remove handler plays this new current row so the highlight stays honest; keeping CurrentIndex in range (never -1 while non-empty) is also what lets the autosave round-trip without RestorePlaylist clamping a -1 back to 0.
-    //  - index > CurrentIndex → the playing item is unaffected.
-    public void Remove(int index)
+    // CurrentIndex adjustment: survivors shift left by the count of removed indices below them; if the playing item was itself removed, CurrentIndex lands on the survivor that slid into its slot — clamped to the new last row if the tail was removed. The panel's remove handler plays this new current row so the highlight stays honest; keeping CurrentIndex in range (never -1 while non-empty) is also what lets the autosave round-trip without RestorePlaylist clamping a -1 back to 0. List now empty → -1 (the "nothing playing" sentinel).
+    public void RemoveMany(IReadOnlyList<int> indices)
     {
-        if (index < 0 || index >= Items.Count)
+        if (indices == null)
         {
-            throw new ArgumentOutOfRangeException(nameof(index), index, $"Items count is {Items.Count}");
+            throw new ArgumentNullException(nameof(indices));
         }
-        var copy = new List<string>(Items);
-        copy.RemoveAt(index);
+        var removed = new SortedSet<int>();
+        foreach (int i in indices)
+        {
+            if (i < 0 || i >= Items.Count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(indices), i, $"Items count is {Items.Count}");
+            }
+            removed.Add(i);
+        }
+        if (removed.Count == 0)
+        {
+            return;
+        }
+        var copy = new List<string>(Items.Count - removed.Count);
+        for (int i = 0; i < Items.Count; i++)
+        {
+            if (!removed.Contains(i))
+            {
+                copy.Add(Items[i]);
+            }
+        }
         int newCurrent;
         if (copy.Count == 0)
         {
             newCurrent = -1;
         }
-        else if (index < CurrentIndex)
-        {
-            newCurrent = CurrentIndex - 1;
-        }
-        else if (index == CurrentIndex)
-        {
-            newCurrent = Math.Min(index, copy.Count - 1);
-        }
         else
         {
-            newCurrent = CurrentIndex;
+            int removedBeforeCur = 0;
+            foreach (int i in removed)
+            {
+                if (i < CurrentIndex)
+                {
+                    removedBeforeCur++;
+                }
+            }
+            int shifted = CurrentIndex - removedBeforeCur;
+            if (removed.Contains(CurrentIndex))
+            {
+                // The playing item was deleted: land on the survivor that slid into its slot, or the new last row if we deleted the tail.
+                newCurrent = Math.Clamp(shifted, 0, copy.Count - 1);
+            }
+            else
+            {
+                newCurrent = shifted;
+            }
         }
         Items = copy.AsReadOnly();
         CurrentIndex = newCurrent;

@@ -33,6 +33,27 @@ public static class UriListDropTarget
         return dropTarget;
     }
 
+    // Like Create, but the callback also receives the drop point (x, y) in the target widget's coordinates, frozen at drop time. The playlist panel uses these to compute a positional insert gap. The (x, y) is captured synchronously here; the async read path is identical to Create's.
+    public static Gtk.DropTargetAsync CreatePositional(System.Action<List<string>, double, double> onFilesDroppedAt)
+    {
+        if (onFilesDroppedAt == null)
+        {
+            throw new ArgumentNullException(nameof(onFilesDroppedAt));
+        }
+
+        var formats = Gdk.ContentFormats.New(new[] { "text/uri-list" });
+        var dropTarget = Gtk.DropTargetAsync.New(formats, Gdk.DragAction.Copy | Gdk.DragAction.Move | Gdk.DragAction.Link);
+        dropTarget.OnDrop += (sender, args) =>
+        {
+            var drop = args.Drop;
+            double x = args.X;
+            double y = args.Y;
+            ReadAndDispatch(drop, paths => onFilesDroppedAt(paths, x, y));
+            return true;
+        };
+        return dropTarget;
+    }
+
     private static void ReadAndDispatch(Gdk.Drop drop, System.Action<List<string>> onFilesDropped)
     {
         var mimes = GLib.Internal.Utf8StringArrayNullTerminatedOwnedHandle.Create(new[] { "text/uri-list" });
