@@ -85,8 +85,6 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Step exactly one decoded frame. mpv pauses playback if not already paused.
     void StepFrameForward();
     void StepFrameBack();
-    // Jump by `delta` chapters relative to the current chapter (typically ±1). No-op when the file has no chapters or the resulting index is out of range — mpv's `add chapter` clamps past the ends. Lives on IPlayback rather than computed VM-side from Chapters[] because mpv applies the chapter→time lookup atomically with the seek; routing through the VM mirror would risk a stale Chapters list across a postToMainThread hop.
-    void StepChapter(int delta);
     // Load an external audio or subtitle file via mpv's `audio-add` / `sub-add` command. mpv selects the new track and, if it can be parsed, fires the usual track-list change events that drive the UI refresh. (Video doesn't get a Load* method — multi-angle external video is rare enough not to justify the surface; the existing track-list still picks up any video that's added via mpv's command line or scripted entry.)
     void LoadAudio(string path);
     void LoadSubtitle(string path);

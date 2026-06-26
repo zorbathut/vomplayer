@@ -104,7 +104,6 @@ public partial class ViewModelMainTests
         public List<double> RelativeSeeks { get; } = new();
         public int FrameStepForwardCalls { get; private set; }
         public int FrameStepBackCalls { get; private set; }
-        public List<int> ChapterSteps { get; } = new();
         public List<double> VolumeWrites { get; } = new();
         public List<double> VolumeAdjustments { get; } = new();
         public int ToggleMuteCalls { get; private set; }
@@ -153,11 +152,6 @@ public partial class ViewModelMainTests
         public void StepFrameBack()
         {
             FrameStepBackCalls++;
-        }
-
-        public void StepChapter(int delta)
-        {
-            ChapterSteps.Add(delta);
         }
 
         public void LoadAudio(string path)
@@ -523,13 +517,22 @@ public partial class ViewModelMainTests
     }
 
     [Test]
-    public void StepChapterForwardsToPlayback()
+    public void StepChapterSeeksToComputedChapterTarget()
     {
+        // Single-video chapter nav computes the target from the mirror Chapters + Position (no mpv add-chapter) and seeks there. preroll defaults to 0, so it lands on the exact cue.
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
-        vm.StepChapter(-1);
-        vm.StepChapter(1);
-        Assert.That(pb.ChapterSteps, Is.EqualTo(new[] { -1, 1 }));
+        pb.Chapters = new[]
+        {
+            new MediaChapter(0, "a", 0),
+            new MediaChapter(1, "b", 60),
+            new MediaChapter(2, "c", 120),
+        };
+        pb.PositionSeconds = 70;          // in chapter 1
+        vm.StepChapter(1);                // → chapter 2 (120)
+        Assert.That(pb.LastSeekSeconds, Is.EqualTo(120));
+        vm.StepChapter(-1);               // position still 70 (fake Seek doesn't advance) → chapter 0 (0)
+        Assert.That(pb.LastSeekSeconds, Is.EqualTo(0));
     }
 
     [Test]

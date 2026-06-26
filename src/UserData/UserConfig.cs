@@ -18,10 +18,12 @@ public sealed class UserConfig
     //
     // `open_in_new_window` defaults to false — a second `./vomplayer foo.mp4` invocation forwards the file to the running primary via GApplication's D-Bus handshake instead of spawning a fresh window. Set it true to make every command-line invocation spawn its own window instead. Pre-existing user TOMLs without this section fall back to the POCO default, so they keep the reuse-window behavior.
     // `theme` is the appearance preference: "auto" (follow the desktop), "light", or "dark". Stored as a raw string — not the ThemeMode enum — so this POCO stays GTK-free (config loads before gtk_init) and the file stays human-editable; MainWindow parses it into a ThemeMode after init, falling back to auto on anything unrecognized. Defaults to "auto" so pre-existing TOMLs and fresh installs follow the system.
+    // `chapter_seek_preroll_seconds` shifts chapter seeks (marker clicks and next/previous-chapter) to land this many seconds *before* the chapter's cue, for a short lead-in. Defaults to 0.0 (land exactly on the cue). The value is read at startup and on each preferences save, then applied by ViewModelMain via the pure ChapterStep resolver.
     public sealed class ApplicationSection
     {
         public bool OpenInNewWindow { get; set; } = false;
         public string Theme { get; set; } = "auto";
+        public double ChapterSeekPrerollSeconds { get; set; } = 0.0;
     }
 
     // Trigger strings stay as raw text here so we can read/write the file without depending on GTK being initialized — config loads before gtk_init in Program.Main, and gtk_accelerator_parse / gtk_accelerator_name would then be unsafe to call. The HotkeyMap derived from this section is built later, on the GTK main thread, in MainWindow.

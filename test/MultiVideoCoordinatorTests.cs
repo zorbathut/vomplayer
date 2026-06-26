@@ -94,7 +94,6 @@ public partial class MultiVideoCoordinatorTests
         public List<double> SeekRelativeCalls { get; } = new();
         public int StepFrameForwardCalls { get; private set; }
         public int StepFrameBackCalls { get; private set; }
-        public List<int> StepChapterCalls { get; } = new();
         public List<double> SetVolumeCalls { get; } = new();
         public int ToggleMuteCalls { get; private set; }
         public int EnableHdrOutputCalls { get; private set; }
@@ -110,7 +109,6 @@ public partial class MultiVideoCoordinatorTests
         public void SeekRelative(double seconds) { SeekRelativeCalls.Add(seconds); }
         public void StepFrameForward() { StepFrameForwardCalls++; }
         public void StepFrameBack() { StepFrameBackCalls++; }
-        public void StepChapter(int delta) { StepChapterCalls.Add(delta); }
         public void LoadAudio(string path) { }
         public void LoadSubtitle(string path) { }
         public void SetVideo(int? trackId) { }
@@ -347,9 +345,11 @@ public partial class MultiVideoCoordinatorTests
         Assert.That(h.SecondaryPlayback!.StepFrameForwardCalls, Is.EqualTo(1));
         Assert.That(h.SecondaryPlayback!.StepFrameBackCalls, Is.EqualTo(1));
 
+        // StepChapter fans out too: Primary takes an absolute seek to the chapter target (cue, preroll 0), Secondary mirrors the same absolute-seconds delta. Primary is at position 0 with a chapter at 45s, so Primary seeks to 45 and Secondary shifts by +45.
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 45) };
         h.Vm.StepChapter(1);
-        Assert.That(h.PrimaryPlayback.StepChapterCalls, Is.EqualTo(new[] { 1 }));
-        Assert.That(h.SecondaryPlayback!.StepChapterCalls, Is.EqualTo(new[] { 1 }));
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0, 45.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0, 5.0, 45.0 }));
     }
 
     [Test]
@@ -430,7 +430,7 @@ public partial class MultiVideoCoordinatorTests
     [Test]
     public void SyncStepChapterFromBeforeFirstChapter()
     {
-        // Primary's position is BEFORE chapter 0's time (rare — chapters that don't start at 0). The general targetIndex math handles this: currentIndex = -1, delta = +1 → targetIndex = 0, target = chapters[0].TimeSeconds.
+        // Primary's position is BEFORE chapter 0's time (rare — chapters that don't start at 0). ChapterStep handles it: current = -1, +1 → chapter 0's landing (its cue, preroll 0). Primary seeks there; Secondary mirrors the delta.
         using var h = new Harness();
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 300;
@@ -442,15 +442,14 @@ public partial class MultiVideoCoordinatorTests
         };
         h.PrimaryPlayback.PositionSeconds = 10;  // before chapter 0
 
-        h.Vm.StepChapter(1);   // mpv: lands at chapter 0 (time 30). Delta = 30 - 10 = 20.
-        Assert.That(h.PrimaryPlayback.StepChapterCalls, Is.EqualTo(new[] { 1 }));
+        h.Vm.StepChapter(1);   // lands at chapter 0 (time 30). Delta = 30 - 10 = 20.
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0 }));
         Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 20.0 }));
-        Assert.That(h.SecondaryPlayback!.StepChapterCalls, Is.Empty, "absolute-delta path, not fan-out");
 
-        // Step back from before chapter 0: targetIndex = -1 + (-1) = -2 → out of range → fan out (no chapter exists before chapter 0 to seek to).
+        // Step back while still before chapter 0 (position unchanged at 10): nothing earlier exists → true no-op, no seeks added.
         h.Vm.StepChapter(-1);
-        Assert.That(h.PrimaryPlayback.StepChapterCalls, Is.EqualTo(new[] { 1, -1 }));
-        Assert.That(h.SecondaryPlayback!.StepChapterCalls, Is.EqualTo(new[] { -1 }));
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0 }), "previous before the first chapter is a no-op");
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 20.0 }));
     }
 
     [Test]
@@ -495,17 +494,110 @@ public partial class MultiVideoCoordinatorTests
         h.PrimaryPlayback.PositionSeconds = 30;   // currently in Intro (chapter 0)
         h.SecondaryPlayback!.PositionSeconds = 95; // arbitrary unrelated offset
 
-        // Step +1 → Primary's target is chapter 1 at 60s; delta from Primary.Position (30) is +30. Secondary moves by +30, NOT to its own chapter 1.
+        // Step +1 → Primary's target is chapter 1 at 60s; Primary seeks there, delta from Primary.Position (30) is +30. Secondary moves by +30, NOT to its own chapter 1.
         h.Vm.StepChapter(1);
-        Assert.That(h.PrimaryPlayback.StepChapterCalls, Is.EqualTo(new[] { 1 }));
-        Assert.That(h.SecondaryPlayback!.StepChapterCalls, Is.Empty, "Secondary takes a relative seek, not its own chapter step");
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0 }));
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 60.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0 }), "Secondary takes a relative seek, not its own chapter step");
+    }
+
+    // SeekToChapter routes through SeekTo's normalized contract (divide-by-then-multiply-by the same duration), so a tiny FP tolerance is used; the real seek is F3-formatted at the mpv boundary anyway.
+
+    [Test]
+    public void SeekToChapterLandsOnCueWithDefaultPreroll()
+    {
+        using var h = new Harness();
+        h.PrimaryPlayback.DurationSeconds = 300;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 120) };
+        h.Vm.SeekToChapter(120);
+        Assert.That(h.PrimaryPlayback.SeekCalls.Count, Is.EqualTo(1));
+        Assert.That(h.PrimaryPlayback.SeekCalls[0], Is.EqualTo(120.0).Within(1e-6));
     }
 
     [Test]
-    public void SyncStepChapterClampingFallsBackToFanOut()
+    public void SeekToChapterAppliesPreroll()
     {
-        // When Primary's chapter step would clamp past either end, mpv's `add chapter` re-seek behavior at clamp boundaries isn't worth reproducing VM-side (re-seek to current chapter start? stay put? version-dependent). Fall back to per-context StepChapter so both contexts mpv-clamp independently — matches the pre-fix behavior at boundaries.
+        using var h = new Harness();
+        h.Vm.ChapterSeekPrerollSeconds = 5;
+        h.PrimaryPlayback.DurationSeconds = 300;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 120) };
+        h.Vm.SeekToChapter(120);   // 120 - 5 = 115 (previous-cue floor of 0 doesn't bind)
+        Assert.That(h.PrimaryPlayback.SeekCalls[0], Is.EqualTo(115.0).Within(1e-6));
+    }
+
+    [Test]
+    public void SeekToChapterClampsPrerollAtZeroForEarlyChapter()
+    {
+        using var h = new Harness();
+        h.Vm.ChapterSeekPrerollSeconds = 10;
+        h.PrimaryPlayback.DurationSeconds = 300;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 5), new MediaChapter(1, "b", 120) };
+        h.Vm.SeekToChapter(5);     // 5 - 10 < 0 → floored at 0
+        Assert.That(h.PrimaryPlayback.SeekCalls[0], Is.EqualTo(0.0).Within(1e-6));
+    }
+
+    [Test]
+    public void SeekToChapterInSyncModeAppliesPrerollAndFansOutToSecondary()
+    {
+        // Marker click in PiP sync mode: Primary takes the prerolled absolute target, Secondary mirrors the same absolute-seconds delta off Primary's position — same offset-preserving contract as any sync-mode absolute seek.
+        using var h = new Harness();
+        h.EnablePip();
+        h.Vm.ChapterSeekPrerollSeconds = 5;
+        h.PrimaryPlayback.DurationSeconds = 300;
+        h.SecondaryPlayback!.DurationSeconds = 300;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 120) };
+        h.PrimaryPlayback.PositionSeconds = 20;
+        h.Vm.SeekToChapter(120);   // target 120 - 5 = 115; Secondary delta = 115 - 20 = 95
+        Assert.That(h.PrimaryPlayback.SeekCalls.Count, Is.EqualTo(1));
+        Assert.That(h.PrimaryPlayback.SeekCalls[0], Is.EqualTo(115.0).Within(1e-6));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls.Count, Is.EqualTo(1));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls[0], Is.EqualTo(95.0).Within(1e-6));
+    }
+
+    [Test]
+    public void StepChapterSingleVideoAppliesPreroll()
+    {
+        using var h = new Harness();
+        h.Vm.ChapterSeekPrerollSeconds = 5;
+        h.PrimaryPlayback.DurationSeconds = 300;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 60), new MediaChapter(2, "c", 180) };
+        h.PrimaryPlayback.PositionSeconds = 30;   // in chapter 0
+        h.Vm.StepChapter(1);   // → chapter 1 at 60, preroll 5 → 55 (seeks the computed target directly, no round-trip)
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 55.0 }));
+    }
+
+    [Test]
+    public void StepChapterAdvancesFromSubFrameLandingWhilePaused()
+    {
+        // Regression for the paused "forward-forward sticks" bug: mpv's exact seek to a cue lands on the frame at-or-just-below it, so the echoed position is a sub-frame below the target. A follow-up "next" must still advance rather than recompute (and re-cue) the same chapter. (While playing this never showed because playback advances past the cue first.)
+        using var h = new Harness();
+        h.PrimaryPlayback.DurationSeconds = 300;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 60), new MediaChapter(2, "c", 120) };
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.Vm.StepChapter(1);                        // → 60
+        h.PrimaryPlayback.PositionSeconds = 59.96;  // mpv's exact-seek landing, echoed back while paused
+        h.Vm.StepChapter(1);                        // must advance to 120, not re-cue 60
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 60.0, 120.0 }));
+    }
+
+    [Test]
+    public void SyncStepChapterAppliesPreroll()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        h.Vm.ChapterSeekPrerollSeconds = 5;
+        h.PrimaryPlayback.DurationSeconds = 300;
+        h.SecondaryPlayback!.DurationSeconds = 300;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 60), new MediaChapter(2, "c", 180) };
+        h.PrimaryPlayback.PositionSeconds = 30;   // in chapter 0
+        h.Vm.StepChapter(1);   // Primary target chapter 1 (60) - preroll 5 = 55; delta 55 - 30 = 25
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 55.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 25.0 }));
+    }
+
+    [Test]
+    public void SyncStepChapterPastLastChapterIsNoOp()
+    {
+        // Stepping past the last chapter has nowhere to go: ChapterStep returns null → true no-op. Neither context moves (no mpv-clamp fan-out), and the sync offset is left untouched.
         using var h = new Harness();
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 300;
@@ -517,9 +609,9 @@ public partial class MultiVideoCoordinatorTests
         };
         h.PrimaryPlayback.PositionSeconds = 250;  // currently in Outro (chapter 1, the last)
 
-        h.Vm.StepChapter(1);   // would clamp past end
-        Assert.That(h.PrimaryPlayback.StepChapterCalls, Is.EqualTo(new[] { 1 }));
-        Assert.That(h.SecondaryPlayback!.StepChapterCalls, Is.EqualTo(new[] { 1 }), "clamping → fan out per-context");
+        h.Vm.StepChapter(1);   // past the end
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.Empty);
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
         Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.Empty);
     }
 
@@ -1038,9 +1130,9 @@ public partial class MultiVideoCoordinatorTests
     }
 
     [Test]
-    public void SyncStepChapterFanOutNoChaptersClearsOffsetAndDoesNotRaise()
+    public void SyncStepChapterNoChaptersIsNoOpAndPreservesOffset()
     {
-        // Fan-out fallback (no chapters on Primary): each context advances per its own mpv. Offset is no longer meaningful — clear it so the next correction edge lazy-captures rather than defending stale state. Crucially, do NOT raise the correction event: a corrective seek would yank Secondary back to the old offset and undo the fan-out the user implicitly accepted.
+        // No chapters on Primary → ChapterStep returns null → true no-op. Nothing moves, so the correction event isn't raised AND the captured offset stays valid (unlike the old fan-out, which cleared it). Verify the offset survives: a later correction still defends offset = 5.
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
@@ -1052,20 +1144,20 @@ public partial class MultiVideoCoordinatorTests
 
         int eventCount = 0;
         h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
-        h.Vm.StepChapter(1);  // Primary has no chapters → fan-out
-        Assert.That(eventCount, Is.EqualTo(0), "fan-out path must not raise the correction event");
+        h.Vm.StepChapter(1);  // Primary has no chapters → no-op
+        Assert.That(eventCount, Is.EqualTo(0), "no-op step must not raise the correction event");
 
-        // Verify offset was cleared: an arbitrary subsequent correction takes the lazy-capture path, not a seek defending offset=5.
+        // Offset preserved: a subsequent correction defends offset = 5 (seek Secondary to Primary.Pos + 5), it does NOT lazy-capture.
         h.PrimaryPlayback.PositionSeconds = 30;
-        h.SecondaryPlayback!.PositionSeconds = 99;  // drift vs old offset would be (99 - 30) - 5 = 64; would seek if offset=5 were still cached
+        h.SecondaryPlayback!.PositionSeconds = 99;  // drift (99 - 30) - 5 = 64 → corrective seek to 30 + 5 = 35
         h.Vm.ApplyPostEdgeCorrection();
-        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty, "offset cleared → lazy-capture, no defending the old invariant");
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 35.0 }), "offset preserved → correction still defends the invariant");
     }
 
     [Test]
-    public void SyncStepChapterFanOutOutOfRangeClearsOffsetAndDoesNotRaise()
+    public void SyncStepChapterPastLastIsNoOpAndPreservesOffset()
     {
-        // Same fan-out semantics when targetIndex is out of range (stepping past the last chapter / before the first).
+        // Same no-op semantics when the target is out of range (stepping past the last chapter): nothing moves, offset preserved.
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
@@ -1074,22 +1166,21 @@ public partial class MultiVideoCoordinatorTests
             new MediaChapter(0, "Intro", 0),
             new MediaChapter(1, "Outro", 200),
         };
-        h.PrimaryPlayback.PositionSeconds = 250;  // currently in last chapter
         h.PrimaryPlayback.PositionSeconds = 0;
         h.SecondaryPlayback!.PositionSeconds = 5;
         h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
         h.Vm.SetSelected(null);  // captures offset = 5
 
-        h.PrimaryPlayback.PositionSeconds = 250;
+        h.PrimaryPlayback.PositionSeconds = 250;  // in the last chapter
         int eventCount = 0;
         h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
-        h.Vm.StepChapter(1);  // out-of-range past end
+        h.Vm.StepChapter(1);  // past the end → no-op
         Assert.That(eventCount, Is.EqualTo(0));
 
         h.PrimaryPlayback.PositionSeconds = 300;
-        h.SecondaryPlayback!.PositionSeconds = 999;
+        h.SecondaryPlayback!.PositionSeconds = 999;  // drift → corrective seek to 300 + 5 = 305
         h.Vm.ApplyPostEdgeCorrection();
-        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 305.0 }), "offset preserved → correction still defends the invariant");
     }
 
     [Test]

@@ -112,7 +112,6 @@ public partial class PlaylistAutosaveTests
         public void SeekRelative(double seconds) { }
         public void StepFrameForward() { }
         public void StepFrameBack() { }
-        public void StepChapter(int delta) { }
         public void LoadAudio(string path) { }
         public void LoadSubtitle(string path) { }
         public void SetVideo(int? trackId) { }

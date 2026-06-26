@@ -531,7 +531,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.Post(h => h.Command("seek", target, "relative+exact"));
     }
 
-    // DurationSeconds gate here is a UX no-op (do nothing when no file is loaded), not crash-defense — frame-step / add chapter don't have Seek's pre-load abort hazard. Kept for parity with Seek so all the per-frame/chapter inputs are uniformly inert pre-load.
+    // DurationSeconds gate here is a UX no-op (do nothing when no file is loaded), not crash-defense — frame-step doesn't have Seek's pre-load abort hazard. Kept for parity with Seek so all the per-frame inputs are uniformly inert pre-load.
     public void StepFrameForward()
     {
         if (DurationSeconds <= 0)
@@ -548,16 +548,6 @@ public sealed partial class Playback : ObservableObject, IPlayback
             return;
         }
         dispatcher.Post(h => h.Command("frame-back-step"));
-    }
-
-    public void StepChapter(int delta)
-    {
-        if (DurationSeconds <= 0)
-        {
-            return;
-        }
-        var deltaStr = delta.ToString(CultureInfo.InvariantCulture);
-        dispatcher.Post(h => h.Command("add", "chapter", deltaStr));
     }
 
     // Hands the MpvDispatcher to a render-surface attacher. Consumers call CreateRenderContext on it (which runs on the caller's GL-owning thread) rather than accessing an MpvClient directly. Internal because MpvDispatcher is internal — this seam is for same-assembly render surfaces only.

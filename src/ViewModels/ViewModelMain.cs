@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.Input;
 using Vomplayer.Playback;
 using Vomplayer.Services;
 using Vomplayer.UserData;
+using Vomplayer.Util;
 
 namespace Vomplayer.ViewModels;
 
@@ -649,6 +650,21 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
     }
 
+    // Chapter-seek preroll, in seconds: chapter seeks land this many seconds before the cue (0 = exactly on the cue). Synced from UserConfig by MainWindow at startup and on each preferences save. Applied here (policy, not mpv) via the pure ChapterStep resolver in SeekToChapter and StepChapter.
+    public double ChapterSeekPrerollSeconds { get; set; }
+
+    // Chapter-marker click target: a chapter's absolute cue time. Apply the preroll (ChapterStep.LandingForCue floors it at the previous cue / 0), then route through SeekTo so the click reuses the same PiP-sync burst-anchor / Secondary-relative / post-edge-correction machinery as any other absolute seek. Normalizing by SingleTarget.Duration round-trips exactly: SeekTo denormalizes against the same context's duration (SelectedContext when isolated, Primary in sync), which is the context whose chapters the scrubber is showing.
+    public void SeekToChapter(double cueSeconds)
+    {
+        double dur = SingleTarget.Duration.TotalSeconds;
+        if (dur <= 0)
+        {
+            return;
+        }
+        double target = ChapterStep.LandingForCue(SingleTarget.Chapters, cueSeconds, ChapterSeekPrerollSeconds);
+        SeekTo(target / dur);
+    }
+
     // Clear the implicit-burst anchor so the next SeekTo re-anchors against Primary.Position. Called from anywhere that mutates Primary's position outside SeekTo (SeekRelative, Step*, OpenFile, etc.) and from lifecycle events that reset the Primary–Secondary relationship (file load, EnablePip / DisablePip, selection-mode transitions).
     private void InvalidateSyncSeekAnchor()
     {
@@ -756,64 +772,40 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
     }
 
-    // Sync-mode StepChapter: derive Primary's resulting target from its mirror Chapters list and apply the same absolute-seconds delta to Secondary. The general `targetIndex = currentIndex + delta` math handles the pre-chapter-0 case (currentIndex == -1) too: `add chapter +1` from there lands at chapter 0 (-1 + 1 = 0), and `add chapter -1` underflows to -2 → fan-out fallback (correctly, since there's nothing before chapter 0). Out-of-range past either end falls back to per-context StepChapter so both mpv-clamp independently — reproducing mpv's exact clamp-seek semantics VM-side isn't worth the fragility. When Primary has no chapters at all, Primary.StepChapter is a no-op upstream; we still issue Secondary.StepChapter so Secondary's own chapters (if any) advance.
+    // Next/previous-chapter step. One computed path for all preroll values: ChapterStep resolves the absolute target (cue minus preroll, floored so repeated steps stay monotonic — see ChapterStep) from the context's own mirror Chapters + Position, and we seek there. preroll == 0 reduces to landing exactly on the cue, reproducing the prior in-range behavior; we no longer route through mpv's `add chapter` (now removed). ResolveTarget returns null when there's nowhere to go (no chapters; next past the last; previous before the first) — a true no-op, so unlike the old fan-out we don't touch targetOffsetSeconds.
     public void StepChapter(int delta)
     {
         InvalidateSyncSeekAnchor();
         if (SelectedContext != null)
         {
-            SelectedContext.StepChapter(delta);
+            StepChapterIsolated(SelectedContext, delta);
             return;
         }
         if (Secondary == null)
         {
-            Primary.StepChapter(delta);
+            StepChapterIsolated(Primary, delta);
             return;
         }
-        var chapters = Primary.Chapters;
-        if (chapters.Count == 0)
+        // Sync mode: derive Primary's target from its mirror and mirror the same absolute-seconds delta onto Secondary (same offset-preserving contract as SeekTo). Chapter navigation tracks Primary's chapters — the stream whose chapters the scrubber shows.
+        double? target = ChapterStep.ResolveTarget(Primary.Chapters, Primary.Position.TotalSeconds, delta, ChapterSeekPrerollSeconds);
+        if (!target.HasValue)
         {
-            Primary.StepChapter(delta);
-            Secondary.StepChapter(delta);
-            // Per-context fan-out lands the two videos at independent chapter timestamps — the previously-captured offset no longer reflects user intent. Clear so the next correction edge lazy-captures from the post-fan-out state instead of trying to defend the stale invariant. We deliberately do NOT raise PostEdgeCorrectionRequested here: a correction would yank Secondary back to the OLD offset, undoing the fan-out the user implicitly accepted.
-            targetOffsetSeconds = null;
             return;
         }
-        double primaryPos = Primary.Position.TotalSeconds;
-        int currentIndex = FindCurrentChapterIndex(chapters, primaryPos);
-        int targetIndex = currentIndex + delta;
-        if (targetIndex < 0 || targetIndex >= chapters.Count)
-        {
-            Primary.StepChapter(delta);
-            Secondary.StepChapter(delta);
-            // Same rationale as the no-chapters fan-out above.
-            targetOffsetSeconds = null;
-            return;
-        }
-        double primaryTargetSeconds = chapters[targetIndex].TimeSeconds;
-        double deltaSeconds = primaryTargetSeconds - primaryPos;
-        Primary.StepChapter(delta);
+        double deltaSeconds = target.Value - Primary.Position.TotalSeconds;
+        Primary.Playback.Seek(target.Value);
         Secondary.SeekRelative(deltaSeconds);
         // Same post-edge correction rationale as SeekTo: both seeks finish at independent wall-clock times.
         PostEdgeCorrectionRequested?.Invoke();
     }
 
-    // Largest index whose chapter time ≤ position — mpv's "current chapter" semantics (chapter K is current while position is in [chapters[K].time, chapters[K+1].time)). Returns -1 when position is before chapter 0's time (mpv reports "no current chapter" in that case). Linear scan because chapter counts are small (typically <50).
-    private static int FindCurrentChapterIndex(IReadOnlyList<MediaChapter> chapters, double positionSeconds)
+    private void StepChapterIsolated(VideoContext context, int delta)
     {
-        int found = -1;
-        for (int i = 0; i < chapters.Count; i++)
+        double? target = ChapterStep.ResolveTarget(context.Chapters, context.Position.TotalSeconds, delta, ChapterSeekPrerollSeconds);
+        if (target.HasValue)
         {
-            if (chapters[i].TimeSeconds <= positionSeconds)
-            {
-                found = i;
-            }
-            else
-            {
-                break;
-            }
+            context.Playback.Seek(target.Value);
         }
-        return found;
     }
 
     public void SetVolume(double percent)

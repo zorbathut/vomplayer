@@ -29,6 +29,7 @@ internal sealed class PreferencesDialog : Gtk.Window
     private readonly Gtk.MenuButton mouseMenuButton;
     private readonly Gtk.CheckButton openInNewWindowCheck;
     private readonly Gtk.DropDown themeDropDown;
+    private readonly Gtk.SpinButton chapterPrerollSpin;
 
     // Dropdown row order. Indices are the wire contract between the DropDown's `Selected` uint and ThemeMode — keep aligned with the labels passed to NewFromStrings below.
     private static readonly ThemeMode[] ThemeOrder = { ThemeMode.Auto, ThemeMode.Light, ThemeMode.Dark };
@@ -81,6 +82,18 @@ internal sealed class PreferencesDialog : Gtk.Window
         openInNewWindowNote.SetXalign(0);
         openInNewWindowNote.SetMarginStart(24);
         generalPage.Append(openInNewWindowNote);
+
+        // Chapter-seek preroll row — applies live on Save (the running VM is updated). Label + spin button, same single-line layout as the theme row. 0.1 s steps to one decimal; 0 means "land exactly on the cue".
+        var prerollRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
+        var prerollLabel = Gtk.Label.New("Chapter seek preroll (seconds):");
+        prerollLabel.SetXalign(0);
+        prerollRow.Append(prerollLabel);
+        chapterPrerollSpin = Gtk.SpinButton.NewWithRange(0.0, 60.0, 0.1);
+        chapterPrerollSpin.SetDigits(1);
+        chapterPrerollSpin.SetValue(owner.GetChapterSeekPrerollPreference());
+        chapterPrerollSpin.SetTooltipText("Start chapter jumps this many seconds before the cue (0 = exactly at the cue).");
+        prerollRow.Append(chapterPrerollSpin);
+        generalPage.Append(prerollRow);
 
         notebook.AppendPage(generalPage, Gtk.Label.New("General"));
 
@@ -164,7 +177,7 @@ internal sealed class PreferencesDialog : Gtk.Window
         saveButton.OnClicked += (_, _) =>
         {
             // Selected is always 0..2 here: the model has three rows and is never deselected, so it can't be GTK_INVALID_LIST_POSITION.
-            owner.ApplyPreferences(editing.Clone(), openInNewWindowCheck.Active, ThemeOrder[themeDropDown.Selected]);
+            owner.ApplyPreferences(editing.Clone(), openInNewWindowCheck.Active, ThemeOrder[themeDropDown.Selected], chapterPrerollSpin.GetValue());
             Close();
         };
         buttonRow.Append(saveButton);

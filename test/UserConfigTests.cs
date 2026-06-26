@@ -218,6 +218,43 @@ public class UserConfigTests
     }
 
     [Test]
+    public void ApplicationChapterSeekPrerollDefaultsToZero()
+    {
+        // Missing [application] section — pre-existing configs must default to "exactly at the cue".
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+        File.WriteAllText(path, "[hotkeys]\nplay_pause = [\"p\"]\n");
+
+        var cfg = UserConfig.LoadOrDefault(path);
+        Assert.That(cfg.Application.ChapterSeekPrerollSeconds, Is.EqualTo(0.0));
+    }
+
+    [Test]
+    public void ApplicationChapterSeekPrerollHandEditedTomlReads()
+    {
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+        File.WriteAllText(path, "[application]\nchapter_seek_preroll_seconds = 2.5\n");
+
+        var cfg = UserConfig.LoadOrDefault(path);
+        Assert.That(cfg.Application.ChapterSeekPrerollSeconds, Is.EqualTo(2.5));
+    }
+
+    [Test]
+    public void ApplicationChapterSeekPrerollRoundTrips()
+    {
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+
+        var cfg = new UserConfig();
+        cfg.Application.ChapterSeekPrerollSeconds = 3.5;
+        cfg.Save(path);
+
+        var reloaded = UserConfig.LoadOrDefault(path);
+        Assert.That(reloaded.Application.ChapterSeekPrerollSeconds, Is.EqualTo(3.5));
+    }
+
+    [Test]
     public void SaveRoundTripsThroughLoad()
     {
         var path = Path.Combine(tempDir!, "config.toml");

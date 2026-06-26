@@ -551,11 +551,6 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         playback.StepFrameBack();
     }
 
-    public void StepChapter(int delta)
-    {
-        playback.StepChapter(delta);
-    }
-
     public void SetVolume(double percent)
     {
         playback.SetVolume(percent);

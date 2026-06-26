@@ -153,6 +153,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         this.urlDownloader = new YtDlpDownloader(urlDownloadCache, YtDlpDownloader.BuildCommand(FlatpakDetect.IsSandboxed()));
         this.urlPrompt = new UrlPromptGtk(this);
         viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
+        viewModel.ChapterSeekPrerollSeconds = userConfig.Application.ChapterSeekPrerollSeconds;
         // AttachAutosave before InitialFile is consumed (OnRenderContextReady) so the very first user-visible action — even one driven by the CLI arg — is captured.
         viewModel.AttachAutosave(savedPlaylists);
         viewModel.Autosave!.Saved += RebuildRecentMenu;
@@ -199,7 +200,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         seekScaleController.SeekRequested += v => viewModel.SeekTo(v);
         // ChapterScrubber wraps the controller's scale in its own vertical Gtk.Box and adds chapter markers on top. The controller still owns the scale's input/state machine; the scrubber is purely additive layout.
         chapterScrubber = new Controls.ChapterScrubber(seekScaleController.Scale);
-        chapterScrubber.ChapterClicked += normalized => viewModel.SeekTo(normalized);
+        chapterScrubber.ChapterClicked += cueSeconds => viewModel.SeekToChapter(cueSeconds);
 
         positionLabel = Gtk.Label.New("00:00");
         durationLabel = Gtk.Label.New("00:00");
@@ -749,14 +750,16 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     }
 
     // Reload the runtime keymap and application-level toggles from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by PreferencesDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated and new bindings are live; the user can retry. open_in_new_window only takes effect on next launch (the toggle changes process-startup behavior), so we just record it.
-    internal void ApplyPreferences(HotkeyMap map, bool openInNewWindow, ThemeMode theme)
+    internal void ApplyPreferences(HotkeyMap map, bool openInNewWindow, ThemeMode theme, double chapterSeekPreroll)
     {
         hotkeys = map;
         userConfig.Hotkeys = UserConfig.HotkeysSection.FromDictionary(map.ToTomlForm());
         userConfig.Application.OpenInNewWindow = openInNewWindow;
         userConfig.Application.Theme = ThemeModeParser.ToConfigString(theme);
-        // Theme applies live, independent of whether the save below succeeds — the running app and the persisted file are separate concerns. open_in_new_window, by contrast, only changes process-startup behavior, so it just gets recorded for next launch.
+        userConfig.Application.ChapterSeekPrerollSeconds = chapterSeekPreroll;
+        // Theme applies live, independent of whether the save below succeeds — the running app and the persisted file are separate concerns. open_in_new_window, by contrast, only changes process-startup behavior, so it just gets recorded for next launch. The preroll also applies live — push it onto the running VM.
         ApplyThemePreference(theme);
+        viewModel.ChapterSeekPrerollSeconds = chapterSeekPreroll;
         try
         {
             userConfig.Save(configPath);
@@ -788,6 +791,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     internal bool GetOpenInNewWindowPreference()
     {
         return userConfig.Application.OpenInNewWindow;
+    }
+
+    internal double GetChapterSeekPrerollPreference()
+    {
+        return userConfig.Application.ChapterSeekPrerollSeconds;
     }
 
     // Current theme preference for the dialog to seed its dropdown. The warn is discarded (not a silent swallow): this same string was already parsed-and-warned at startup, and re-warning every time Preferences opens would just be noise.

@@ -46,6 +46,7 @@ public sealed class ChapterScrubber
     // Time of the chapter currently under the cursor, null when no marker is hovered.
     private double? hoveredChapterTime;
 
+    // Fired when a chapter marker (not the trough) is clicked. Payload is the chapter's absolute cue time in seconds — the VM applies the chapter-seek preroll and routing, so the scrubber stays policy-free.
     public event Action<double>? ChapterClicked;
 
     public Gtk.Widget Widget
@@ -177,7 +178,7 @@ public sealed class ChapterScrubber
         {
             return;
         }
-        ChapterClicked?.Invoke(chapter.TimeSeconds / durationSeconds);
+        ChapterClicked?.Invoke(chapter.TimeSeconds);
         // Claim denies the scale's own click gesture. Without this, the scale would also seek-to-X for the same press and the chapter seek would be visibly overridden by the trough-X seek.
         gesture.SetState(Gtk.EventSequenceState.Claimed);
     }
