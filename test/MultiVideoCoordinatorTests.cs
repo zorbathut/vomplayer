@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -328,15 +327,15 @@ public partial class MultiVideoCoordinatorTests
         h.PrimaryPlayback.DurationSeconds = 60;
         h.SecondaryPlayback!.DurationSeconds = 60;
 
-        // Sync-mode SeekTo: Primary takes the absolute target derived from the normalized scrubber value; Secondary takes the same absolute-seconds delta off its own current position via SeekRelative. With both at position 0 and equal 60s durations, a 0.5 click puts Primary at 30 and shifts Secondary by +30. The asymmetric-durations / non-zero-positions test below pins the actual offset-preserving behavior.
+        // Sync-mode SeekTo: Primary takes the absolute target from the normalized scrubber value; Secondary is absolute-pinned to primaryTarget + offset. EnablePip established offset = 0, so a 0.5 click puts both at 30. The asymmetric-offset test below pins the offset-preserving behavior.
         h.Vm.SeekTo(0.5);
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 30.0 }));
 
+        // SeekRelative stays a relative fan-out (offset-preserving by construction) — both move by the same delta.
         h.Vm.SeekRelative(5);
         Assert.That(h.PrimaryPlayback.SeekRelativeCalls, Is.EqualTo(new[] { 5.0 }));
-        // SeekRelative appends to Secondary's relative-seek log alongside the prior sync-mode SeekTo call (which lands here too, see above).
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0, 5.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 5.0 }));
 
         h.Vm.StepFrameForward();
         h.Vm.StepFrameBack();
@@ -345,86 +344,33 @@ public partial class MultiVideoCoordinatorTests
         Assert.That(h.SecondaryPlayback!.StepFrameForwardCalls, Is.EqualTo(1));
         Assert.That(h.SecondaryPlayback!.StepFrameBackCalls, Is.EqualTo(1));
 
-        // StepChapter fans out too: Primary takes an absolute seek to the chapter target (cue, preroll 0), Secondary mirrors the same absolute-seconds delta. Primary is at position 0 with a chapter at 45s, so Primary seeks to 45 and Secondary shifts by +45.
+        // StepChapter fans out too: Primary takes an absolute seek to the chapter target (cue, preroll 0), Secondary is absolute-pinned to target + offset. Primary at position 0 with a chapter at 45s and offset 0 → both seek to 45.
         h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 45) };
         h.Vm.StepChapter(1);
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0, 45.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0, 5.0, 45.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 30.0, 45.0 }));
     }
 
     [Test]
     public void SyncSeekToAppliesAbsoluteDeltaToSecondary()
     {
-        // The whole point of switching SeekTo from proportional-of-own-duration to absolute-delta: when the videos have different durations and/or different starting offsets, a scrubber click that takes Primary "back N seconds" must take Secondary back the same N seconds — not "back N% of its own duration".
+        // When the videos have different durations and/or a non-zero established offset, a scrubber click that takes Primary "back N seconds" must take Secondary back the same N seconds — not "back N% of its own duration". The new model pins Secondary to the absolute target primaryTarget + offset, which is offset-preserving by construction.
         using var h = new Harness();
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 600;   // 10:00
         h.SecondaryPlayback!.DurationSeconds = 900; // 15:00, asymmetric on purpose
         h.PrimaryPlayback.PositionSeconds = 480;   // Primary at 8:00
-        h.SecondaryPlayback!.PositionSeconds = 700; // Secondary at 11:40 (offset +220s from Primary)
+        h.SecondaryPlayback!.PositionSeconds = 700; // Secondary at 11:40
 
-        // Click takes Primary from 8:00 (480s) back to 5:00 (300s) — a -180s delta. Secondary must move by -180s as well, NOT to 0.5 * 900 = 450s.
+        // Establish offset = +220 (Secondary 220s ahead) via the authorized select round-trip.
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // captures offset = 700 - 480 = 220
+
+        // Click takes Primary from 8:00 (480s) to 5:00 (300s). Secondary is absolute-pinned to 300 + 220 = 520 — which is 700 - 180, i.e. the same -180s net move Primary made, NOT 0.5 * 900 = 450.
         h.Vm.SeekTo(0.5);
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 300.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty, "Secondary must not receive an absolute seek to a normalized-of-own-duration target");
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { -180.0 }));
-    }
-
-    [Test]
-    public void SyncSeekToBurstAnchorsAcrossRapidTicks()
-    {
-        // Scrubber drag (and scroll-wheel spin, and rapid hotkey presses) emit SeekTo faster than mpv echoes time-pos back into Primary.Position. Without anchoring, each in-burst SeekTo would compute deltaSeconds against the same stale Primary.Position and Secondary would cumulatively overshoot. The implicit-burst anchor uses the *previous* commanded Primary target as the anchor when the next SeekTo lands within SyncSeekImplicitBurstTicks (250 ms) — the test runs in microseconds, so all four SeekTos fall inside the window.
-        using var h = new Harness();
-        h.EnablePip();
-        h.PrimaryPlayback.DurationSeconds = 100;
-        h.SecondaryPlayback!.DurationSeconds = 100;
-        h.PrimaryPlayback.PositionSeconds = 0;
-        h.SecondaryPlayback!.PositionSeconds = 0;
-
-        // Four rapid SeekTos with no Position echo in between. If the VM read Primary.Position fresh on every call, deltas would be {30, 50, 70, 40} = 190 cumulative — wrong. Correct delta-of-deltas given the anchor mechanism: first uses Position=0 (anchor=null at start), then each uses the previous commanded target as the anchor.
-        h.Vm.SeekTo(0.3);  // anchor=0 (Position),     delta=+30, anchor→30
-        h.Vm.SeekTo(0.5);  // anchor=30 (last target), delta=+20, anchor→50
-        h.Vm.SeekTo(0.7);  // anchor=50,               delta=+20, anchor→70
-        h.Vm.SeekTo(0.4);  // anchor=70,               delta=-30, anchor→40
-
-        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0, 50.0, 70.0, 40.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0, 20.0, 20.0, -30.0 }));
-    }
-
-    [Test]
-    public void SyncSeekToAnchorExpiresAfterBurstWindow()
-    {
-        // Test the OTHER half of the implicit-burst design: when SeekTos straddle the SyncSeekImplicitBurstTicks window, the second one should re-anchor against Primary.Position rather than reuse the previous commanded target. We drive ViewModelMain.NowProvider explicitly so the expiration is deterministic and not flaky on slow CI.
-        using var h = new Harness();
-        h.EnablePip();
-        h.PrimaryPlayback.DurationSeconds = 100;
-        h.SecondaryPlayback!.DurationSeconds = 100;
-
-        long now = 0;
-        h.Vm.NowProvider = () => now;
-
-        // First SeekTo at t=0 — anchor=Primary.Position=0, target=50.
-        h.PrimaryPlayback.PositionSeconds = 0;
-        h.Vm.SeekTo(0.5);
-        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 50.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 50.0 }));
-
-        // Advance the clock past the burst threshold AND simulate that mpv echoed Primary's position to the commanded target. The next SeekTo must read Primary.Position fresh (=50) rather than reuse the stored anchor (also 50 — coincidentally the same here, so use a different new target to make the expectation visible).
-        now += (long)(Stopwatch.Frequency * 0.5);   // 500 ms — well past the 250 ms threshold
-        h.PrimaryPlayback.PositionSeconds = 50;
-        h.Vm.SeekTo(0.7);
-        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 50.0, 70.0 }));
-        // delta = 70 - Primary.Position(=50) = 20. Same value the burst-anchor path would have given (50→70=20), but this value is computed from Position, not from the stored anchor — verify that by next testing the case where Position has DRIFTED past the anchor (natural playback).
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 50.0, 20.0 }));
-
-        // Long pause: Primary plays naturally to 95s. Threshold expired. Next SeekTo back to 30 must compute delta = 30 - 95 = -65, NOT delta = 30 - 70 = -40 (stale anchor).
-        now += (long)(Stopwatch.Frequency * 10.0);
-        h.PrimaryPlayback.PositionSeconds = 95;
-        h.Vm.SeekTo(0.3);
-        Assert.That(h.PrimaryPlayback.SeekCalls.Count, Is.EqualTo(3));
-        Assert.That(h.PrimaryPlayback.SeekCalls[2], Is.EqualTo(30.0));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls.Count, Is.EqualTo(3));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls[2], Is.EqualTo(-65.0), "expired anchor → re-read Primary.Position = 95");
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 520.0 }), "Secondary absolute-pinned to primaryTarget + offset");
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.Empty, "Secondary is absolute-pinned, not relatively moved");
     }
 
     [Test]
@@ -442,45 +388,86 @@ public partial class MultiVideoCoordinatorTests
         };
         h.PrimaryPlayback.PositionSeconds = 10;  // before chapter 0
 
-        h.Vm.StepChapter(1);   // lands at chapter 0 (time 30). Delta = 30 - 10 = 20.
+        h.Vm.StepChapter(1);   // lands at chapter 0 (time 30). Secondary absolute-pinned to 30 + offset(0) = 30.
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 20.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 30.0 }));
 
         // Step back while still before chapter 0 (position unchanged at 10): nothing earlier exists → true no-op, no seeks added.
         h.Vm.StepChapter(-1);
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 30.0 }), "previous before the first chapter is a no-op");
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 20.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 30.0 }));
     }
 
     [Test]
-    public void SyncSeekToAnchorClearsOnFileLoad()
+    public void SyncSeekToBaselinesOffsetOnFirstUseAfterLoad()
     {
-        // File reload resets Primary.Position to 0 and resets the user's "established offset" between the two streams entirely — an implicit-burst anchor commanded against the previous file would mis-anchor the first SeekTo against the new file. Verify FileLoaded clears the anchor so the next SeekTo reads Primary.Position fresh.
+        // A file load clears the offset to "pending" (null); the first sync transport that needs it baselines ONCE from the current divergence, then locks it. Here Primary loads a new file (offset cleared) and the streams sit at a +12s divergence; the first SeekTo must adopt offset=12 and absolute-pin Secondary to primaryTarget + 12 — never SeekRelative, never re-read on later seeks.
         using var h = new Harness();
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 100;
         h.SecondaryPlayback!.DurationSeconds = 100;
 
-        // Establish an anchor at 50.
-        h.Vm.SeekTo(0.5);
-        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 50.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 50.0 }));
-
-        // New file loads on Primary; anchor invalidates. New file is shorter for visibility.
-        h.PrimaryPlayback.PositionSeconds = 10;  // pretend the new file's position-0 was followed by a quick natural-playback tick to 10
+        // FileLoaded clears the offset to pending.
         h.PrimaryPlayback.RaiseFileLoaded();
+        // Streams diverge by +12 at the moment of the first seek.
+        h.PrimaryPlayback.PositionSeconds = 8;
+        h.SecondaryPlayback!.PositionSeconds = 20;  // offset to be baselined = 20 - 8 = 12
 
-        // Next SeekTo (still within the 250 ms timestamp window) must read Primary.Position=10 fresh, not use the stale anchor=50.
-        h.Vm.SeekTo(0.3);
+        h.Vm.SeekTo(0.5);  // primaryTarget = 50; Secondary absolute = 50 + 12 = 62
+        Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 50.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 62.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.Empty, "Secondary must be absolute-pinned, not relatively moved");
+
+        // Offset is now locked at 12: a second seek pins against the SAME offset, independent of the (unechoed) positions.
+        h.Vm.SeekTo(0.3);  // primaryTarget = 30; Secondary absolute = 30 + 12 = 42
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 50.0, 30.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls.Count, Is.EqualTo(2));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls[1], Is.EqualTo(30.0 - 10.0), "FileLoaded must clear the anchor — delta is computed from fresh Primary.Position");
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 62.0, 42.0 }));
+    }
+
+    [Test]
+    public void SyncTransportNeverChangesEstablishedOffset()
+    {
+        // The headline invariant: once an offset is established, NO sync-mode transport (SeekTo, SeekRelative, StepChapter, StepFrame) may change it. Only single-track selection does. We establish offset = 5 via a select round-trip, run every transport kind, then prove the offset survived by checking a follow-up correction still defends 5.
+        using var h = new Harness();
+        h.EnablePip();
+        h.PrimaryPlayback.DurationSeconds = 200;
+        h.SecondaryPlayback!.DurationSeconds = 200;
+        h.PrimaryPlayback.VideoFps = 30;
+        h.SecondaryPlayback!.VideoFps = 30;
+        h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 80) };
+
+        // Establish offset = 5 (Secondary 5s ahead) via the authorized select→deselect adjustment.
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 5;
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // captures offset = 5
+
+        // Now simulate the streams drifting during playback so the LIVE divergence (12) differs from the STORED offset (5). If any seek re-derived the offset from live positions instead of reading the stored value, the assertions below would see primaryTarget + 12, not + 5 — this is what pins "stored, not re-derived".
+        h.PrimaryPlayback.PositionSeconds = 40;
+        h.SecondaryPlayback!.PositionSeconds = 52;  // live divergence = 12 ≠ stored offset 5
+
+        // Every sync transport kind. Each absolute seek must pin Secondary to primaryTarget + 5 (the stored offset), never primaryTarget + 12 (the live divergence).
+        h.Vm.SeekTo(0.25);  // primaryTarget = 50; Secondary = 55, NOT 62
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 55.0 }), "absolute pin uses the stored offset (5), not the live divergence (12)");
+        h.Vm.SeekRelative(10);    // relative fan-out, offset-preserving
+        h.Vm.StepChapter(1);      // chapter 1 at 80; Secondary = 85, NOT 92
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 55.0, 85.0 }), "chapter pin uses the stored offset (5), not the live divergence (12)");
+        h.Vm.StepFrameForward();  // frame-step both, equal fps → no correction
+
+        // The offset must still be 5. Introduce drift and confirm the correction defends 5 (seek to Primary.Pos + 5), not some shifted value.
+        h.PrimaryPlayback.IsPaused = false;
+        h.SecondaryPlayback!.IsPaused = false;
+        h.PrimaryPlayback.PositionSeconds = 100;
+        h.SecondaryPlayback!.PositionSeconds = 105.5;  // drift = (105.5 - 100) - 5 = 0.5 > threshold
+        h.SecondaryPlayback!.SeekCalls.Clear();
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 105.0 }), "offset unchanged at 5 → correction targets Primary.Pos + 5 = 105");
     }
 
     [Test]
     public void SyncStepChapterAppliesAbsoluteDeltaToSecondary()
     {
-        // Per-context StepChapter would advance each video to its own next chapter — chapter timestamps differ wildly between videos (one per scene vs. one per act, etc.) so the streams drift apart. Rule: derive Primary's chapter target seconds-delta and apply that delta to Secondary as a relative seek.
+        // Per-context StepChapter would advance each video to its own next chapter — chapter timestamps differ wildly between videos (one per scene vs. one per act, etc.) so the streams drift apart. Rule: seek Primary to its chapter target and absolute-pin Secondary to target + offset, so Secondary tracks Primary's move rather than its own chapter grid.
         using var h = new Harness();
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 300;
@@ -492,12 +479,17 @@ public partial class MultiVideoCoordinatorTests
             new MediaChapter(2, "Act 2", 180),
         };
         h.PrimaryPlayback.PositionSeconds = 30;   // currently in Intro (chapter 0)
-        h.SecondaryPlayback!.PositionSeconds = 95; // arbitrary unrelated offset
+        h.SecondaryPlayback!.PositionSeconds = 95; // 65s ahead of Primary
 
-        // Step +1 → Primary's target is chapter 1 at 60s; Primary seeks there, delta from Primary.Position (30) is +30. Secondary moves by +30, NOT to its own chapter 1.
+        // Establish offset = +65 via the authorized select round-trip.
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // captures offset = 95 - 30 = 65
+
+        // Step +1 → Primary's target is chapter 1 at 60s; Secondary is absolute-pinned to 60 + 65 = 125 (= 95 + Primary's +30 move), NOT to its own chapter 1.
         h.Vm.StepChapter(1);
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 60.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 30.0 }), "Secondary takes a relative seek, not its own chapter step");
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 125.0 }), "Secondary absolute-pinned to target + offset, not its own chapter step");
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.Empty);
     }
 
     // SeekToChapter routes through SeekTo's normalized contract (divide-by-then-multiply-by the same duration), so a tiny FP tolerance is used; the real seek is F3-formatted at the mpv boundary anyway.
@@ -538,7 +530,7 @@ public partial class MultiVideoCoordinatorTests
     [Test]
     public void SeekToChapterInSyncModeAppliesPrerollAndFansOutToSecondary()
     {
-        // Marker click in PiP sync mode: Primary takes the prerolled absolute target, Secondary mirrors the same absolute-seconds delta off Primary's position — same offset-preserving contract as any sync-mode absolute seek.
+        // Marker click in PiP sync mode routes through SeekTo: Primary takes the prerolled absolute target, Secondary is absolute-pinned to target + offset — same offset-preserving contract as any sync-mode absolute seek.
         using var h = new Harness();
         h.EnablePip();
         h.Vm.ChapterSeekPrerollSeconds = 5;
@@ -546,11 +538,18 @@ public partial class MultiVideoCoordinatorTests
         h.SecondaryPlayback!.DurationSeconds = 300;
         h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 120) };
         h.PrimaryPlayback.PositionSeconds = 20;
-        h.Vm.SeekToChapter(120);   // target 120 - 5 = 115; Secondary delta = 115 - 20 = 95
+        h.SecondaryPlayback!.PositionSeconds = 0;  // 20s behind Primary
+
+        // Establish offset = -20 via the authorized select round-trip.
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // captures offset = 0 - 20 = -20
+
+        h.Vm.SeekToChapter(120);   // target 120 - 5 = 115; Secondary absolute-pinned to 115 + (-20) = 95
         Assert.That(h.PrimaryPlayback.SeekCalls.Count, Is.EqualTo(1));
         Assert.That(h.PrimaryPlayback.SeekCalls[0], Is.EqualTo(115.0).Within(1e-6));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls.Count, Is.EqualTo(1));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls[0], Is.EqualTo(95.0).Within(1e-6));
+        Assert.That(h.SecondaryPlayback!.SeekCalls.Count, Is.EqualTo(1));
+        Assert.That(h.SecondaryPlayback!.SeekCalls[0], Is.EqualTo(95.0).Within(1e-6));
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.Empty);
     }
 
     [Test]
@@ -588,10 +587,10 @@ public partial class MultiVideoCoordinatorTests
         h.PrimaryPlayback.DurationSeconds = 300;
         h.SecondaryPlayback!.DurationSeconds = 300;
         h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 60), new MediaChapter(2, "c", 180) };
-        h.PrimaryPlayback.PositionSeconds = 30;   // in chapter 0
-        h.Vm.StepChapter(1);   // Primary target chapter 1 (60) - preroll 5 = 55; delta 55 - 30 = 25
+        h.PrimaryPlayback.PositionSeconds = 30;   // in chapter 0 (offset 0 from EnablePip, both aligned)
+        h.Vm.StepChapter(1);   // Primary target chapter 1 (60) - preroll 5 = 55; Secondary absolute-pinned to 55 + 0 = 55
         Assert.That(h.PrimaryPlayback.SeekCalls, Is.EqualTo(new[] { 55.0 }));
-        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 25.0 }));
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 55.0 }));
     }
 
     [Test]
@@ -756,6 +755,75 @@ public partial class MultiVideoCoordinatorTests
         h.Vm.PlayPauseCommand.Execute(null);
         Assert.That(h.PrimaryPlayback.SetPausedCalls, Is.EqualTo(new[] { false }));
         Assert.That(h.SecondaryPlayback!.SetPausedCalls, Is.EqualTo(new[] { false }));
+    }
+
+    [Test]
+    public void PlayPauseConvergingDifferedStreamsSetsSyncPointAndDoesNotResync()
+    {
+        // Repro: user plays one track alone, switches to all-track mode, then hits Space to start all. The already-playing track drifted between the mode switch and the Space press, so the offset captured at deselect is now stale. Bringing the two streams to a common play state via Space only actually STARTS one of them (the other was already playing) — that's a fresh sync point. The fix: capture the offset from the live divergence and run NO corrective seek, so the already-playing track is never yanked.
+        using var h = new Harness();
+        h.EnablePip();
+        h.PrimaryPlayback.DurationSeconds = 60;
+        h.SecondaryPlayback!.DurationSeconds = 60;
+
+        // A stale offset of 0 from an earlier select round-trip (both were at 0 then).
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // offset = 0
+
+        // Streams now in DIFFERENT play states: Secondary has been playing and drifted to 40, Primary is paused at 10.
+        h.PrimaryPlayback.IsPaused = true;
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.IsPaused = false;
+        h.SecondaryPlayback!.PositionSeconds = 40;
+
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+
+        h.Vm.PlayPauseCommand.Execute(null);  // target = !Primary.IsPaused = play; differed states → sync point
+
+        // Both converge to playing...
+        Assert.That(h.PrimaryPlayback.SetPausedCalls, Is.EqualTo(new[] { false }));
+        Assert.That(h.SecondaryPlayback!.SetPausedCalls, Is.EqualTo(new[] { false }));
+        // ...but NO corrective seek is scheduled — the already-playing track must not be yanked.
+        Assert.That(eventCount, Is.EqualTo(0), "converging differed streams sets the sync point; it must not schedule a corrective seek");
+
+        // The sync point is now the live divergence (40 - 10 = 30), not the stale 0. Prove it: a later correction defends 30.
+        h.PrimaryPlayback.PositionSeconds = 20;
+        h.SecondaryPlayback!.PositionSeconds = 50.5;  // divergence 30.5 vs offset 30 → drift 0.5 > threshold
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 50.0 }), "fresh sync point = 30 → correction targets Primary.Pos + 30 = 50");
+    }
+
+    [Test]
+    public void PlayPauseStartingBothFromSameStateDefendsExistingOffset()
+    {
+        // Counterpart to the differed-state test: when both streams start in the SAME play state (both paused) and Space starts them together, that's a genuine both-track action — it must NOT recapture the offset (which would bake in prior drift) and it SHOULD schedule the corrective seek to absorb decoder/dispatcher startup skew against the established offset.
+        using var h = new Harness();
+        h.EnablePip();
+        h.PrimaryPlayback.DurationSeconds = 60;
+        h.SecondaryPlayback!.DurationSeconds = 60;
+
+        // Establish offset = 5 via a select round-trip, both paused.
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 5;
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // offset = 5
+        h.PrimaryPlayback.IsPaused = true;
+        h.SecondaryPlayback!.IsPaused = true;
+
+        int eventCount = 0;
+        h.Vm.PostEdgeCorrectionRequested += () => eventCount++;
+
+        h.Vm.PlayPauseCommand.Execute(null);  // both paused (same state) → play together
+        Assert.That(eventCount, Is.EqualTo(1), "same-state play-together schedules the corrective seek");
+
+        // Offset must still be the established 5 (not recaptured). Drift against it fires a correction to Primary.Pos + 5.
+        h.PrimaryPlayback.IsPaused = false;
+        h.SecondaryPlayback!.IsPaused = false;
+        h.PrimaryPlayback.PositionSeconds = 30;
+        h.SecondaryPlayback!.PositionSeconds = 35.5;  // drift = (35.5 - 30) - 5 = 0.5
+        h.Vm.ApplyPostEdgeCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 35.0 }), "offset unchanged at 5 → correction targets 30 + 5 = 35");
     }
 
     [Test]
