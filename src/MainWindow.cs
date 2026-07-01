@@ -56,6 +56,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private readonly VideoSurface? videoSurface;
     private readonly PipController pipController;
     private readonly DiagnosticOverlay diagnosticOverlay;
+    private readonly DownloadStatusOverlay downloadStatusOverlay;
     // Fullscreen state is a mirror of Gtk.Window.Fullscreened — the notify::fullscreened handler is authoritative. This lets compositor/WM-initiated fullscreen exits (Super-key, window menu, tiling WM shortcut) restore the controls even though our own toggles didn't run.
     private bool isFullscreen;
     private uint controlsHideTimeoutId;
@@ -151,7 +152,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         var urlDownloadCache = new UrlDownloadCache(UserDataPaths.UrlDownloadCacheRoot);
         urlDownloadCache.Cleanup(DateTimeOffset.UtcNow, msg => Console.Error.WriteLine($"[vompl] {msg}"));
         this.urlDownloader = new YtDlpDownloader(urlDownloadCache, YtDlpDownloader.BuildCommand(FlatpakDetect.IsSandboxed()));
-        this.urlPrompt = new UrlPromptGtk(this);
+        // The download-status overlay is created here so it can be handed to UrlPromptGtk, but it's only parented into videoOverlay further down (once that exists). A standalone Gtk.Box can be built before its parent.
+        downloadStatusOverlay = new DownloadStatusOverlay();
+        this.urlPrompt = new UrlPromptGtk(this, downloadStatusOverlay);
         viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         viewModel.ChapterSeekPrerollSeconds = userConfig.Application.ChapterSeekPrerollSeconds;
         // AttachAutosave before InitialFile is consumed (OnRenderContextReady) so the very first user-visible action — even one driven by the CLI arg — is captured.
@@ -259,6 +262,9 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Reads HDR / source-HDR / hwdec from the current target (Selected ?? Primary) — providers re-resolve every refresh so a selection swap propagates within the next 1 Hz tick.
         diagnosticOverlay = new DiagnosticOverlay(() => viewModel.SingleTarget, () => pipController.GetTargetVideoSurfaceForDiagnostic(), () => viewModel.GetSyncDiagnostic());
         videoOverlay.AddOverlay(diagnosticOverlay.Widget);
+
+        // URL download-status card, anchored top-left (see DownloadStatusOverlay) — clears the top-right diagnostic panel and the bottom controls. Hidden until a URL load starts.
+        videoOverlay.AddOverlay(downloadStatusOverlay.Widget);
 
         // Wrap video + playlist in a horizontal row so they share the middle layout slot. videoOverlay still hexpand/vexpand so the video region grows to fill remaining space when the panel is visible.
         var videoAndPlaylistRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 0);
@@ -529,7 +535,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private static void InstallVomplCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; } .vompl-playlist-list row.vompl-drop-before { border-top: 2px solid rgb(53, 132, 228); } .vompl-playlist-list row.vompl-drop-after { border-bottom: 2px solid rgb(53, 132, 228); } .vompl-selected-video { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.9); } .vompl-stream-toolbar { padding: 4px 6px; }");
+        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-download-status { background-color: rgba(0,0,0,0.72); color: #f0f0f0; padding: 12px 14px; margin: 8px; border-radius: 8px; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; } .vompl-playlist-list row.vompl-drop-before { border-top: 2px solid rgb(53, 132, 228); } .vompl-playlist-list row.vompl-drop-after { border-bottom: 2px solid rgb(53, 132, 228); } .vompl-selected-video { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.9); } .vompl-stream-toolbar { padding: 4px 6px; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
@@ -1023,6 +1029,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         //   (2) videoSurface.Dispose calls mpv_render_context_free against the primary mpv handle; the handle is terminated by primary playback.Dispose which runs inside viewModel.Dispose (Primary VideoContext now owns its IPlayback's lifetime). So videoSurface MUST dispose before viewModel — see MpvDispatcher.Dispose comment about render-surface-before-dispatcher ordering.
         // PipController internally observes the same order for the secondary stream (its own surface disposes before viewModel.DisablePip).
         diagnosticOverlay.Dispose();
+        downloadStatusOverlay.Dispose();
         pipController.Dispose();
         seekScaleController.Dispose();
         playlistPanel.Dispose();

@@ -164,11 +164,12 @@ public partial class PlaylistAutosaveTests
     {
         public Task<string?> PromptForUrlAsync(string title) { return Task.FromResult<string?>(null); }
         public void ShowError(string title, string message) { }
-        public UrlProgressHandle ShowDownloadProgress(string title, CancellationTokenSource cts)
+        public IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel) { return new NoopStatus(); }
+        private sealed class NoopStatus : IUrlStatusHandle
         {
-            return new UrlProgressHandle(new NoopDisposable(), new Progress<UrlDownloadProgress>(_ => { }));
+            public IProgress<UrlDownloadProgress> Progress { get; } = new Progress<UrlDownloadProgress>(_ => { });
+            public void Dispose() { }
         }
-        private sealed class NoopDisposable : IDisposable { public void Dispose() { } }
     }
 
     private static VideoContext NewContext()

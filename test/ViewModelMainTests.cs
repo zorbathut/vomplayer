@@ -386,8 +386,8 @@ public partial class ViewModelMainTests
         public string? NextUrl { get; set; }
         public List<(string Title, string Message)> Errors { get; } = new();
         public int PromptCalls { get; private set; }
-        public int ProgressShown { get; private set; }
-        public int ProgressDialogsDisposed { get; private set; }
+        public int StatusShown { get; private set; }
+        public int StatusDisposed { get; private set; }
 
         public Task<string?> PromptForUrlAsync(string title)
         {
@@ -400,23 +400,23 @@ public partial class ViewModelMainTests
             Errors.Add((title, message));
         }
 
-        public Vomplayer.Services.UrlProgressHandle ShowDownloadProgress(string title, CancellationTokenSource cts)
+        public Vomplayer.Services.IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel)
         {
-            ProgressShown++;
-            var progress = new Progress<Vomplayer.Services.UrlDownloadProgress>(_ => { });
-            return new Vomplayer.Services.UrlProgressHandle(new TrackingDisposable(this), progress);
+            StatusShown++;
+            return new TrackingStatus(this);
         }
 
-        private sealed class TrackingDisposable : IDisposable
+        private sealed class TrackingStatus : Vomplayer.Services.IUrlStatusHandle
         {
             private readonly FakeUrlPrompt owner;
             private bool disposed;
-            public TrackingDisposable(FakeUrlPrompt owner) { this.owner = owner; }
+            public TrackingStatus(FakeUrlPrompt owner) { this.owner = owner; }
+            public IProgress<Vomplayer.Services.UrlDownloadProgress> Progress { get; } = new Progress<Vomplayer.Services.UrlDownloadProgress>(_ => { });
             public void Dispose()
             {
                 if (disposed) { return; }
                 disposed = true;
-                owner.ProgressDialogsDisposed++;
+                owner.StatusDisposed++;
             }
         }
     }
@@ -1954,9 +1954,9 @@ public partial class ViewModelMainTests
         Assert.That(pendingA.Task.IsCanceled, Is.True, "previous download CTS should have been cancelled when LoadCurrentItem started B");
         // Only B's local path made it to playback.
         Assert.That(pb.LoadedFiles, Is.EquivalentTo(new[] { "/cache/https://youtu.be/B.mp4" }));
-        // A's progress dialog and B's progress dialog were both opened, and both were disposed (A on cancel, B on success).
-        Assert.That(prompt.ProgressShown, Is.EqualTo(2));
-        Assert.That(prompt.ProgressDialogsDisposed, Is.EqualTo(2), "both progress dialogs (A cancelled, B succeeded) should have been closed");
+        // Every status overlay shown (the interactive probe plus A's and B's load phases) was balanced by a dispose — no overlay is left stuck visible when a load is cancelled or superseded.
+        Assert.That(prompt.StatusShown, Is.GreaterThanOrEqualTo(2), "A and B each showed a load status");
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(prompt.StatusShown), "every status shown was hidden (A cancelled, B succeeded)");
     }
 
     [Test]

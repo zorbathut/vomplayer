@@ -20,6 +20,8 @@ public class UrlLoadCoordinatorTests
         public UrlLoadKind ClassifyResult { get; set; } = UrlLoadKind.YtDlpDownload;
         public Exception? ClassifyException { get; set; }
         public TaskCompletionSource<UrlLoadKind>? PendingClassify { get; set; }
+        // Optional shared ordered log (also fed by FakeUrlPrompt) for the "status shown before probe/classify" ordering tests.
+        public List<string>? EventLog { get; set; }
         public List<string> ProbeCalls { get; } = new();
         public List<string> ClassifyCalls { get; } = new();
         public List<TaskCompletionSource<string>> Downloads { get; } = new();
@@ -32,6 +34,7 @@ public class UrlLoadCoordinatorTests
 
         public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct)
         {
+            EventLog?.Add("probe");
             ProbeCalls.Add(url);
             if (ProbeOverride != null)
             {
@@ -42,6 +45,7 @@ public class UrlLoadCoordinatorTests
 
         public Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct)
         {
+            EventLog?.Add("classify");
             ClassifyCalls.Add(url);
             if (PendingClassify != null)
             {
@@ -72,8 +76,13 @@ public class UrlLoadCoordinatorTests
         public string? NextUrl { get; set; }
         public List<(string Title, string Message)> Errors { get; } = new();
         public int PromptCalls { get; private set; }
-        public int ProgressShown { get; private set; }
-        public int ProgressDisposed { get; private set; }
+        // StatusShown / StatusDisposed count ShowUrlStatus calls and handle disposals — StatusDisposed == StatusShown is the leak invariant (no overlay left stuck visible). LastCancellable / LastOnCancel capture the most recent Show's cancel affordance so tests can prove the Cancel button aborts the load.
+        public int StatusShown { get; private set; }
+        public int StatusDisposed { get; private set; }
+        public bool LastCancellable { get; private set; }
+        public Action? LastOnCancel { get; private set; }
+        // Optional shared ordered log (also fed by FakeUrlDownloader) for the "status shown before probe/classify" ordering tests.
+        public List<string>? EventLog { get; set; }
 
         public Task<string?> PromptForUrlAsync(string title)
         {
@@ -86,22 +95,27 @@ public class UrlLoadCoordinatorTests
             Errors.Add((title, message));
         }
 
-        public UrlProgressHandle ShowDownloadProgress(string title, CancellationTokenSource cts)
+        public IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel)
         {
-            ProgressShown++;
-            return new UrlProgressHandle(new TrackingDisposable(this), new Progress<UrlDownloadProgress>(_ => { }));
+            StatusShown++;
+            LastCancellable = onCancel != null;
+            LastOnCancel = onCancel;
+            EventLog?.Add("show");
+            return new TrackingStatus(this);
         }
 
-        private sealed class TrackingDisposable : IDisposable
+        private sealed class TrackingStatus : IUrlStatusHandle
         {
             private readonly FakeUrlPrompt owner;
             private bool disposed;
-            public TrackingDisposable(FakeUrlPrompt owner) { this.owner = owner; }
+            public TrackingStatus(FakeUrlPrompt owner) { this.owner = owner; }
+            public IProgress<UrlDownloadProgress> Progress { get; } = new Progress<UrlDownloadProgress>(_ => { });
             public void Dispose()
             {
                 if (disposed) { return; }
                 disposed = true;
-                owner.ProgressDisposed++;
+                owner.StatusDisposed++;
+                owner.EventLog?.Add("hide");
             }
         }
     }
@@ -215,6 +229,7 @@ public class UrlLoadCoordinatorTests
         Assert.That(result, Is.Null);
         Assert.That(prompt.Errors, Has.Count.EqualTo(1));
         Assert.That(prompt.Errors[0].Message, Does.Contain("no entries"));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(prompt.StatusShown), "busy overlay hidden even on the empty-result path");
     }
 
     [Test]
@@ -232,6 +247,7 @@ public class UrlLoadCoordinatorTests
         Assert.That(result, Is.Null);
         Assert.That(prompt.Errors, Has.Count.EqualTo(1));
         Assert.That(prompt.Errors[0].Message, Does.Contain("yt-dlp blew up"));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(prompt.StatusShown), "busy overlay hidden even when the probe throws");
     }
 
     [Test]
@@ -248,7 +264,7 @@ public class UrlLoadCoordinatorTests
         Assert.That(fired, Is.False, "no load should fire when yt-dlp is unavailable");
         Assert.That(dl.ClassifyCalls, Is.Empty, "classification must not run without yt-dlp");
         Assert.That(dl.Downloads, Is.Empty);
-        Assert.That(prompt.ProgressShown, Is.EqualTo(0));
+        Assert.That(prompt.StatusShown, Is.EqualTo(0), "the !IsAvailable gate returns before RunAsync, so no status overlay is shown");
         Assert.That(prompt.Errors, Has.Count.EqualTo(1));
         Assert.That(prompt.Errors[0].Title, Does.Contain("yt-dlp"));
         Assert.That(prompt.Errors[0].Message, Does.Contain("Install yt-dlp"));
@@ -297,8 +313,9 @@ public class UrlLoadCoordinatorTests
 
         Assert.That(completedUrl, Is.EqualTo("https://x"));
         Assert.That(completedPath, Is.EqualTo("/cache/x"));
-        Assert.That(prompt.ProgressShown, Is.EqualTo(1));
-        Assert.That(prompt.ProgressDisposed, Is.EqualTo(1));
+        Assert.That(prompt.StatusShown, Is.EqualTo(1));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(1));
+        Assert.That(prompt.LastCancellable, Is.True, "the download phase offers a Cancel affordance");
         Assert.That(prompt.Errors, Is.Empty);
     }
 
@@ -324,7 +341,9 @@ public class UrlLoadCoordinatorTests
         Assert.That(completedUrl, Is.EqualTo("https://example.com/stream.m3u8"));
         Assert.That(completedPath, Is.EqualTo("https://example.com/stream.m3u8"), "mpv-direct branch hands back the URL unchanged");
         Assert.That(dl.Downloads, Is.Empty, "no download spawned for generic-extractor URLs");
-        Assert.That(prompt.ProgressShown, Is.EqualTo(0), "no progress dialog for mpv-direct");
+        // The busy overlay is shown before classification now (immediate feedback), so mpv-direct briefly shows "Preparing…" then hides it — no download progress, but the overlay lifecycle is still balanced.
+        Assert.That(prompt.StatusShown, Is.EqualTo(1));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(1));
         Assert.That(prompt.Errors, Is.Empty);
     }
 
@@ -366,8 +385,9 @@ public class UrlLoadCoordinatorTests
         await Task.Yield();
 
         Assert.That(fired, Is.False);
-        // No progress dialog ever opened — cancellation happened before the YtDlpDownload branch.
-        Assert.That(prompt.ProgressShown, Is.EqualTo(0));
+        // The busy overlay opened before the classify await; cancellation happened during classify, so it was shown once and hidden once (no download reached).
+        Assert.That(prompt.StatusShown, Is.EqualTo(1));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(1));
         Assert.That(prompt.Errors, Is.Empty);
     }
 
@@ -387,7 +407,8 @@ public class UrlLoadCoordinatorTests
         await Task.Yield();
 
         Assert.That(fired, Is.False);
-        Assert.That(prompt.ProgressDisposed, Is.EqualTo(1));
+        Assert.That(prompt.StatusShown, Is.EqualTo(1));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(1));
         Assert.That(prompt.Errors, Is.Empty, "user cancellation is not an error");
     }
 
@@ -410,7 +431,8 @@ public class UrlLoadCoordinatorTests
         await secondDone.Task;
 
         Assert.That(firstFired, Is.False, "first onResolved must not fire after being superseded");
-        Assert.That(prompt.ProgressDisposed, Is.EqualTo(2));
+        Assert.That(prompt.StatusShown, Is.EqualTo(2));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(2));
     }
 
     [Test]
@@ -432,7 +454,8 @@ public class UrlLoadCoordinatorTests
         Assert.That(prompt.Errors, Has.Count.EqualTo(1));
         Assert.That(prompt.Errors[0].Title, Is.EqualTo("Download failed"));
         Assert.That(prompt.Errors[0].Message, Does.Contain("download failed"));
-        Assert.That(prompt.ProgressDisposed, Is.EqualTo(1));
+        Assert.That(prompt.StatusShown, Is.EqualTo(1));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(1));
     }
 
     [Test]
@@ -480,6 +503,90 @@ public class UrlLoadCoordinatorTests
         await Task.Yield();
 
         Assert.That(fired, Is.False);
-        Assert.That(prompt.ProgressDisposed, Is.EqualTo(1));
+        Assert.That(prompt.StatusShown, Is.EqualTo(1));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task OpenUrl_ProbeShowsStatusBeforeProbing_AndHidesAfter()
+    {
+        // Regression guard for the whole point of this change: the busy overlay must be shown BEFORE the (potentially multi-second) probe runs, not after — and torn down once the probe returns.
+        var log = new List<string>();
+        var dl = new FakeUrlDownloader { EventLog = log, NextProbeResult = new[] { "https://a", "https://b" } };
+        var prompt = new FakeUrlPrompt { NextUrl = "https://playlist", EventLog = log };
+        var coord = new UrlLoadCoordinator(dl, prompt);
+
+        await coord.OpenUrlInteractiveAsync();
+
+        Assert.That(log, Is.EqualTo(new[] { "show", "probe", "hide" }));
+        Assert.That(prompt.StatusShown, Is.EqualTo(1));
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void StartUrlLoad_ShowsStatusBeforeClassifying()
+    {
+        // Same immediacy guarantee on the non-interactive load path (playlist row / drag-drop / restore): the "Preparing…" overlay precedes the classify spawn.
+        var log = new List<string>();
+        var dl = new FakeUrlDownloader { EventLog = log };  // ClassifyResult defaults to YtDlpDownload
+        var prompt = new FakeUrlPrompt { EventLog = log };
+        using var coord = new UrlLoadCoordinator(dl, prompt);
+
+        coord.StartUrlLoad("https://x", (_, _) => { });
+
+        Assert.That(log.IndexOf("show"), Is.GreaterThanOrEqualTo(0));
+        Assert.That(log.IndexOf("classify"), Is.GreaterThanOrEqualTo(0));
+        Assert.That(log.IndexOf("show"), Is.LessThan(log.IndexOf("classify")), "status is shown before yt-dlp classification runs");
+    }
+
+    [Test]
+    public async Task OpenUrl_ProbeUserCancel_ReturnsNullSilentlyAndHides()
+    {
+        // Clicking Cancel during the probe (via the overlay's onCancel) aborts the probe and returns null WITHOUT a "timed out" error — the userCancelled flag distinguishes it from the 30s timeout.
+        var probeStarted = new TaskCompletionSource();
+        var releaseProbe = new TaskCompletionSource<IReadOnlyList<string>>();
+        var prompt = new FakeUrlPrompt { NextUrl = "https://x" };
+        var dl = new FakeUrlDownloader
+        {
+            ProbeOverride = (url, ct) =>
+            {
+                probeStarted.TrySetResult();
+                ct.Register(() => releaseProbe.TrySetCanceled(ct));
+                return releaseProbe.Task;
+            },
+        };
+        var coord = new UrlLoadCoordinator(dl, prompt);
+
+        var openTask = coord.OpenUrlInteractiveAsync();
+        await probeStarted.Task;
+        Assert.That(prompt.LastOnCancel, Is.Not.Null, "the probe phase exposes a Cancel affordance");
+        prompt.LastOnCancel!.Invoke();
+
+        var result = await openTask;
+        Assert.That(result, Is.Null);
+        Assert.That(prompt.Errors, Is.Empty, "a user-initiated probe cancel is silent, not a timeout error");
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(prompt.StatusShown), "overlay hidden, not left stuck");
+    }
+
+    [Test]
+    public async Task StartUrlLoad_DownloadCancelViaStatus_SuppressesOnResolved()
+    {
+        // The download-phase Cancel button (the overlay's onCancel) must abort the in-flight download and suppress the load.
+        var dl = new FakeUrlDownloader();  // ClassifyResult defaults to YtDlpDownload
+        var prompt = new FakeUrlPrompt();
+        using var coord = new UrlLoadCoordinator(dl, prompt);
+
+        bool fired = false;
+        coord.StartUrlLoad("https://x", (_, _) => fired = true);
+        // Classify resolved synchronously → download awaiting its TCS; the download-phase status is current.
+        Assert.That(dl.Downloads, Has.Count.EqualTo(1));
+        Assert.That(prompt.LastOnCancel, Is.Not.Null);
+
+        prompt.LastOnCancel!.Invoke();
+        await Task.Yield();
+
+        Assert.That(fired, Is.False, "cancelling via the status overlay must suppress onResolved");
+        Assert.That(prompt.StatusDisposed, Is.EqualTo(prompt.StatusShown));
+        Assert.That(prompt.Errors, Is.Empty);
     }
 }

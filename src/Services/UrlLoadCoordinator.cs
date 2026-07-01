@@ -47,19 +47,29 @@ public sealed class UrlLoadCoordinator : IDisposable
         // Cap the probe at 30 seconds. yt-dlp's --flat-playlist usually returns in well under a second; a hung probe (network outage, extractor regression, mid-download server stall) shouldn't leave the UI stuck with no recovery. Cancellation tears down the spawned yt-dlp via YtDlpDownloader.ProbeAsync's existing kill-on-cancel path.
         using (var probeCts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
         {
+            // Show the in-window busy overlay the instant the user submits the URL — the probe (and the classify that follows) can take several seconds, and the old flow left that whole window with no feedback. userCancelled distinguishes a Cancel-button click from the 30s timeout: both surface as an OperationCanceledException with probeCts.IsCancellationRequested, but only the timeout warrants an error dialog.
+            bool userCancelled = false;
+            var status = prompt.ShowUrlStatus("Fetching video info…", () => { userCancelled = true; TryCancel(probeCts); });
             try
             {
                 entries = await downloader.ProbeAsync(url, probeCts.Token);
             }
             catch (OperationCanceledException) when (probeCts.IsCancellationRequested)
             {
-                prompt.ShowError("Failed to open URL", "Probe timed out after 30 seconds. The URL may be unreachable or the extractor may be hanging.");
+                if (!userCancelled)
+                {
+                    prompt.ShowError("Failed to open URL", "Probe timed out after 30 seconds. The URL may be unreachable or the extractor may be hanging.");
+                }
                 return null;
             }
             catch (Exception ex)
             {
                 prompt.ShowError("Failed to open URL", ex.Message);
                 return null;
+            }
+            finally
+            {
+                status.Dispose();
             }
         }
         if (entries.Count == 0)
@@ -136,9 +146,12 @@ public sealed class UrlLoadCoordinator : IDisposable
 
     private async Task RunAsync(string url, CancellationTokenSource cts, Action<string, string> onResolved)
     {
-        UrlProgressHandle? progressHandle = null;
+        IUrlStatusHandle? status = null;
         try
         {
+            // Show the busy overlay before classification — the classify spawn is a second yt-dlp round-trip that was previously silent. Cancel is wired to this load's CTS so the user can abort through classify and download alike; on the interactive single-video path this replaces the "Fetching…" overlay OpenUrlInteractiveAsync just disposed. The hide/re-show land in separate main-loop turns (across the await in OpenUrlAsync), so there's usually no visible gap, but a one-frame flicker is possible — accepted in exchange for each method owning a self-contained, leak-proof overlay lifecycle.
+            status = prompt.ShowUrlStatus("Preparing…", () => TryCancel(cts));
+
             // Classification step. StartUrlLoad already gated on IsAvailable(), so yt-dlp is present here — a failure is a transient classify glitch (network blip, extractor crash), not an absent binary. We fall back to mpv-direct: a true direct stream plays natively, and an extractor URL that needed yt-dlp simply fails in mpv (our build disables Lua, so there's no ytdl-hook fallback). That's a best-effort for the rare transient case; the common "yt-dlp not installed" case never reaches here. Cancellation must propagate (the user clicked another row mid-probe).
             UrlLoadKind kind;
             try
@@ -163,13 +176,13 @@ public sealed class UrlLoadCoordinator : IDisposable
 
             if (kind == UrlLoadKind.MpvDirect)
             {
+                // Direct stream — mpv plays it natively, no download. The brief "Preparing…" busy flash is fine (and desirable feedback); the finally hides it.
                 onResolved(url, url);
                 return;
             }
 
-            // YtDlpDownload branch. Open the progress dialog only here — direct-stream URLs that finish classification almost immediately shouldn't briefly flash a "Downloading" window.
-            progressHandle = prompt.ShowDownloadProgress("Downloading", cts);
-            string localPath = await downloader.DownloadAsync(url, progressHandle.Progress, cts.Token);
+            // YtDlpDownload branch. The status handle's Progress drives the overlay's bar; ticks marshal to the GTK main thread via the Progress the overlay latched at Show time.
+            string localPath = await downloader.DownloadAsync(url, status.Progress, cts.Token);
 
             // Race guard. The activeCts identity check catches the case where the user advanced to another URL during the download (a newer StartUrlLoad swapped in its own CTS). Token cancellation handles the user-clicked-Cancel path.
             if (cts.Token.IsCancellationRequested || !ReferenceEquals(activeCts, cts))
@@ -192,13 +205,26 @@ public sealed class UrlLoadCoordinator : IDisposable
         }
         finally
         {
-            progressHandle?.Closer.Dispose();
+            // Hide the status overlay on every exit (success, mpv-direct, cancel, supersede, error). Dispose is a no-op if a newer load already took the overlay over (generation guard in DownloadStatusOverlay), so a stale finish can't hide a live sibling's status.
+            status?.Dispose();
             // Only clear the field if we're still its CTS — a newer StartUrlLoad may have already swapped in its own.
             if (ReferenceEquals(activeCts, cts))
             {
                 activeCts = null;
             }
             cts.Dispose();
+        }
+    }
+
+    // Cancel a CTS, tolerating a race where the VM already disposed it.
+    private static void TryCancel(CancellationTokenSource cts)
+    {
+        try
+        {
+            cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
         }
     }
 
