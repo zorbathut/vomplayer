@@ -1,4 +1,5 @@
 using Vomplayer.Controls;
+using Vomplayer.ViewModels;
 using Vomplayer.Wayland;
 
 namespace Vomplayer.Tests;
@@ -22,7 +23,8 @@ public class DiagnosticFormatterTests
             FpsTrustReason: "",
             OutputVrrRange: new VrrRange(48, 60),
             ConnectorName: "HDMI-A-1",
-            LastDecision: new VrrDecision(2, 50.0, "ok"));
+            LastDecision: new VrrDecision(2, 50.0, "ok"),
+            Sync: new PipSyncDiagnostic(false, null, 0, null, 1.0, "off"));
     }
 
     [Test]
@@ -203,7 +205,8 @@ public class DiagnosticFormatterTests
             FpsTrustReason: "",
             OutputVrrRange: new VrrRange(48, 60),
             ConnectorName: "HDMI-A-1",
-            LastDecision: new VrrDecision(2, 50.0, "ok"));
+            LastDecision: new VrrDecision(2, 50.0, "ok"),
+            Sync: new PipSyncDiagnostic(true, 0.5, 0.52, 0.02, 1.05, "catchup"));
         Assert.That(DiagnosticFormatter.FormatLines(s), Is.EqualTo(new[]
         {
             "hwdec:   vaapi",
@@ -213,6 +216,8 @@ public class DiagnosticFormatterTests
             "VRR:     FIXED @ 60.00 Hz",
             "fps:     25.000 src / 25.001 est (trusted)",
             "vrr:     ×2 → 50.000 [48-60 HDMI-A-1] (active)",
+            "sync:    tgt=+0.500 cur=+0.520 need=+0.020 (catchup)",
+            "pipspd:  1.0500",
         }));
     }
 
@@ -309,5 +314,28 @@ public class DiagnosticFormatterTests
             LastDecision = new VrrDecision(1, 25.0, "VRR window unknown"),
         };
         Assert.That(DiagnosticFormatter.FormatLines(s)[6], Is.EqualTo("vrr:     ×1 → 25.000 [?, window unknown] (no filter — VRR window unknown)"));
+    }
+
+    [Test]
+    public void SyncLineRendersOffWhenPipDisabled()
+    {
+        var s = Baseline() with { Sync = new PipSyncDiagnostic(false, null, 0, null, 1.0, "off") };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[7], Is.EqualTo("sync:    off"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[8], Is.EqualTo("pipspd:  —"));
+    }
+
+    [Test]
+    public void SyncLineRendersSignedOffsetsDriftAndMode()
+    {
+        var s = Baseline() with { Sync = new PipSyncDiagnostic(true, -0.2, -0.15, 0.05, 0.95, "approach") };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[7], Is.EqualTo("sync:    tgt=-0.200 cur=-0.150 need=+0.050 (approach)"));
+        Assert.That(DiagnosticFormatter.FormatLines(s)[8], Is.EqualTo("pipspd:  0.9500"));
+    }
+
+    [Test]
+    public void SyncLineRendersPendingTargetWhenNotBaselined()
+    {
+        var s = Baseline() with { Sync = new PipSyncDiagnostic(true, null, 0.3, null, 1.0, "approach") };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[7], Is.EqualTo("sync:    tgt=pending cur=+0.300 need=? (approach)"));
     }
 }

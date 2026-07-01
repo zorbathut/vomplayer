@@ -44,11 +44,14 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     public string? InitialFile { get; set; }
     private bool initialFileLoaded;
 
-    // The stored intended delta between the two streams: Secondary.Position == Primary.Position + targetOffsetSeconds. This is the single source of truth for sync-mode absolute seeks — they re-pin Secondary to primaryTarget + this — and the value the post-edge correction defends. The governing rule: the offset is (re)captured ONLY by actions that establish the sync relationship from the current positions — EnablePip → 0; FileLoaded → null/pending; the selected→sync transition → captured divergence; EnsureTargetOffset's baseline-on-first-use of a pending value; and a sync-mode PlayPause that changes only ONE stream's play state (converging a differed pair "joins" one stream to the other, which sets the sync point). Actions that move BOTH streams together (sync Seek/StepChapter/StepFrame, a same-state play-both) never write it — they read and defend it, so ordinary seeking/playback can't shift the user's sync. Null means "pending" — no PiP, or not yet baselined after a load; reads go through EnsureTargetOffset, which resolves a pending value from the current divergence.
+    // The stored intended delta between the two streams: Secondary.Position == Primary.Position + targetOffsetSeconds. This is the single source of truth for sync-mode absolute seeks — they re-pin Secondary to primaryTarget + this — and the value the continuous drift controller defends. The governing rule: the offset is (re)captured ONLY by actions that establish the sync relationship from the current positions — EnablePip → 0; FileLoaded → null/pending; the selected→sync transition → captured divergence; EnsureTargetOffset's baseline-on-first-use of a pending value; and a sync-mode PlayPause that changes only ONE stream's play state (converging a differed pair "joins" one stream to the other, which sets the sync point). Actions that move BOTH streams together (sync Seek/StepChapter/StepFrame, a same-state play-both) never write it — they read and defend it, so ordinary seeking/playback can't shift the user's sync. Null means "pending" — no PiP, or not yet baselined after a load; reads go through EnsureTargetOffset, which resolves a pending value from the current divergence.
     private double? targetOffsetSeconds;
 
-    // Raised on each sync-mode transport edge (PlayPause-to-playing, SeekTo, SeekRelative, StepChapter) so MainWindow can schedule the deferred post-edge corrective seek. No payload — the handler reads current state when the timer eventually fires.
-    public event Action? PostEdgeCorrectionRequested;
+    // PiP drift-correction controller state, driven by PipController's repeating timer via ApplyDriftCorrection. driftMode latches CatchUp — full ±5% held until the drift overshoots zero — per the three-tier control law. catchUpSign is the drift sign captured on entering CatchUp (the overshoot detector). secondarySpeed mirrors the last speed pushed to mpv so redundant SetSpeed posts are skipped.
+    private enum DriftCorrectionMode { Approach, CatchUp }
+    private DriftCorrectionMode driftMode = DriftCorrectionMode.Approach;
+    private int catchUpSign;
+    private double secondarySpeed = 1.0;
 
     // The context the user has explicitly selected via the toolbar, or null if no selection (broadcast/sync mode). Read-only; mutate via SetSelected.
     public VideoContext? SelectedContext
@@ -330,6 +333,10 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         secondary.Playback.FileLoaded += ClearTargetOffset;
         // Initial offset: both contexts start at content time 0. Secondary is always handed in freshly-constructed with no file loaded, so this 0 is transient — Secondary's first FileLoaded (above) clears it to "pending" (null), and EnsureTargetOffset then baselines from the real post-load divergence. The 0 only ever "sticks" in the degenerate case where no file is loaded into Secondary at all, where it's harmless (sync seeks need both durations > 0).
         targetOffsetSeconds = 0;
+        // Fresh secondary starts at mpv's default speed 1.0; reset the controller so a prior session's latch/speed can't leak in.
+        driftMode = DriftCorrectionMode.Approach;
+        catchUpSign = 0;
+        secondarySpeed = 1.0;
         IsPipEnabled = true;
     }
 
@@ -527,11 +534,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             targetOffsetSeconds = Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds;
             return;
         }
-        // Both streams started in the SAME play state — a genuine both-track action. On a transition to playing, schedule a corrective seek for the post-play settle (independent dispatcher latency + decoder startup time) to absorb that skew against the EXISTING offset. The MainWindow-side timer coalesces multiple edges within its delay window into one correction. Eager re-capture of the offset HERE was rejected for this same-state case: it would overwrite a known-good offset with whatever drift accumulated during the prior play session, baking in the very wall-clock skew the correction is meant to defend against.
-        if (!target)
-        {
-            PostEdgeCorrectionRequested?.Invoke();
-        }
+        // Both streams started in the SAME play state — a genuine both-track action. The offset is deliberately NOT recaptured here (that would bake in prior-session drift); the continuous drift controller (ApplyDriftCorrection) absorbs the post-play startup skew against the EXISTING offset once both streams are advancing.
     }
 
     public void SelectVideo(int? trackId)
@@ -622,8 +625,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         double offset = EnsureTargetOffset();
         Primary.SeekTo(normalizedPosition);
         Secondary.Playback.Seek(primaryTargetSeconds + offset);
-        // Even pinned to the same content-time target, the two `+exact` seeks land at slightly different wall-clock times (codec asymmetry / hr-seek rewind distance). Schedule a deferred corrective seek to absorb that residual skew once both have settled.
-        PostEdgeCorrectionRequested?.Invoke();
+        // Even pinned to the same content-time target, the two `+exact` seeks land at slightly different wall-clock times (codec asymmetry / hr-seek rewind distance). The continuous drift controller absorbs that residual skew once both have settled.
     }
 
     // Returns the stored sync offset (Secondary − Primary), baselining it from the current divergence if it hasn't been established yet (null = "pending" after a file load / EnablePip). Once set it is immutable until the next file load (→ ClearTargetOffset) or the authorized selected→sync capture — no transport command ever writes it, which is what keeps the two streams locked at the user's intended delta. Only call when Secondary != null.
@@ -639,7 +641,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Chapter-seek preroll, in seconds: chapter seeks land this many seconds before the cue (0 = exactly on the cue). Synced from UserConfig by MainWindow at startup and on each preferences save. Applied here (policy, not mpv) via the pure ChapterStep resolver in SeekToChapter and StepChapter.
     public double ChapterSeekPrerollSeconds { get; set; }
 
-    // Chapter-marker click target: a chapter's absolute cue time. Apply the preroll (ChapterStep.LandingForCue floors it at the previous cue / 0), then route through SeekTo so the click reuses the same PiP-sync absolute-pin / post-edge-correction machinery as any other absolute seek. Normalizing by SingleTarget.Duration round-trips exactly: SeekTo denormalizes against the same context's duration (SelectedContext when isolated, Primary in sync), which is the context whose chapters the scrubber is showing.
+    // Chapter-marker click target: a chapter's absolute cue time. Apply the preroll (ChapterStep.LandingForCue floors it at the previous cue / 0), then route through SeekTo so the click reuses the same PiP-sync absolute-pin machinery as any other absolute seek. Normalizing by SingleTarget.Duration round-trips exactly: SeekTo denormalizes against the same context's duration (SelectedContext when isolated, Primary in sync), which is the context whose chapters the scrubber is showing.
     public void SeekToChapter(double cueSeconds)
     {
         double dur = SingleTarget.Duration.TotalSeconds;
@@ -657,40 +659,131 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         targetOffsetSeconds = null;
     }
 
-    // Post-edge corrective seek: pulls Secondary back to Primary.Position + targetOffsetSeconds. Internal so MainWindow's coalescing GLib timer (and tests) can drive it. See plan: PiP Sync — Post-Edge Corrective Seek.
-    internal void ApplyPostEdgeCorrection()
+    // Beyond this drift, a speed nudge would take too long — snap Secondary back with a hard seek instead.
+    private const double HardResyncThresholdSeconds = 1.0;
+    // Above this drift, run the latched full-rate catch-up (Tier 2); below it, the deadband + proportional settle (Tier 3).
+    private const double CoarseCatchupThresholdSeconds = 0.050;
+    // The bang-bang catch-up rate: ±5% off normal speed.
+    private const double CoarseCatchupRate = 0.05;
+    // Within this drift, command exactly 1.0 and idle — stops the proportional tier from chasing measurement jitter, and absorbs Tier 2's intentional overshoot. 20 ms ≈ one frame at 50 fps, below the 40 ms lipsync threshold. Tuned for the audio-clocked case (PiP audio on → mpv's master clock is audio → time-pos is ms-fine); a video-only PiP would want this larger.
+    private const double SyncDeadbandSeconds = 0.020;
+    // Skip redundant SetSpeed dispatcher posts when the newly-computed rate barely moved.
+    private const double SpeedApplyEpsilon = 0.0005;
+
+    // Continuous PiP drift controller, driven by PipController's repeating timer (and tests) once per tick. Replaces the old one-shot post-edge corrective seek: a three-tier control law that defends the stored offset while both streams play. Internal so the timer and the coordinator tests can drive it directly.
+    internal void ApplyDriftCorrection()
     {
-        // Secondary == null is the canonical "PiP is off" check; IsPipEnabled tracks the same invariant by construction (set true after Secondary is assigned in EnablePip, false after Secondary is nulled in DisablePip).
+        // Secondary == null is the canonical "PiP is off" check; SelectedSlot != null is isolated mode (the slave is user-controlled). Either way, release any residual speed and bail.
         if (Secondary == null || SelectedSlot != null)
         {
-            return;
-        }
-        if (Primary.Playback.IsPaused || Secondary.Playback.IsPaused)
-        {
-            return;
-        }
-        if (Primary.Playback.IsSeeking || Secondary.Playback.IsSeeking)
-        {
-            // Slow-codec hr-seek may not have completed by the timer's delay window. Skipping is preferable to firing a corrective seek on top of an in-flight user seek; the next user transport edge will reschedule.
+            ResetSecondarySpeed();
             return;
         }
         if (Primary.Playback.DurationSeconds <= 0 || Secondary.Playback.DurationSeconds <= 0)
         {
+            ResetSecondarySpeed();
             return;
         }
-        // EnsureTargetOffset baselines from the current divergence if the offset is still "pending" (lockstep advance, file-load auto-play, EnablePip with both already playing). On that baseline round drift computes to 0, so we no-op exactly as a deliberate capture-and-skip would; every later round measures against the locked value.
+        if (Primary.Playback.IsSeeking || Secondary.Playback.IsSeeking)
+        {
+            // A user seek is in flight (or the just-issued hard resync hasn't landed). Skip until it settles; the absolute-pin seek already put Secondary at the right target.
+            ResetSecondarySpeed();
+            return;
+        }
+        if (Primary.Playback.IsCoreIdle || Secondary.Playback.IsCoreIdle)
+        {
+            // core-idle covers paused, network/cache stall, and EOF-with-keep-open. Don't correct — or baseline a pending offset — while either stream isn't actually advancing.
+            ResetSecondarySpeed();
+            return;
+        }
+
+        // EnsureTargetOffset baselines from the current divergence if the offset is still "pending"; on that baseline round drift computes to 0 → deadband idle, exactly a capture-and-skip.
         double offset = EnsureTargetOffset();
         double drift = (Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds) - offset;
-        if (Math.Abs(drift) < PostEdgeCorrectionThresholdSeconds)
+
+        // Tier 1 — hard resync: too far out to slew, snap Secondary onto Primary + offset.
+        if (Math.Abs(drift) > HardResyncThresholdSeconds)
+        {
+            ApplySecondarySpeed(1.0);
+            Secondary.Playback.Seek(Primary.Playback.PositionSeconds + offset);
+            driftMode = DriftCorrectionMode.Approach;
+            return;
+        }
+
+        // Tier 2 — latched catch-up: once entered, hold full ±5% until the drift overshoots zero (sign flip). Blow-out past 1 s is caught by Tier 1 above.
+        if (driftMode == DriftCorrectionMode.CatchUp)
+        {
+            if (Math.Sign(drift) == catchUpSign)
+            {
+                ApplySecondarySpeed(1.0 - CoarseCatchupRate * catchUpSign);
+                return;
+            }
+            // Overshot zero → release to the fine approach (fall through).
+            driftMode = DriftCorrectionMode.Approach;
+        }
+
+        if (Math.Abs(drift) > CoarseCatchupThresholdSeconds)
+        {
+            catchUpSign = Math.Sign(drift);
+            driftMode = DriftCorrectionMode.CatchUp;
+            ApplySecondarySpeed(1.0 - CoarseCatchupRate * catchUpSign);
+            return;
+        }
+
+        // Tier 3 — Approach: within the deadband command exactly 1.0; otherwise a proportional nudge that scales toward 0 as drift shrinks (±5% at 50 ms, ~±2% at the 20 ms deadband edge, where the deadband takes over).
+        if (Math.Abs(drift) <= SyncDeadbandSeconds)
+        {
+            ApplySecondarySpeed(1.0);
+            return;
+        }
+        double adjust = (drift / CoarseCatchupThresholdSeconds) * CoarseCatchupRate;
+        ApplySecondarySpeed(1.0 - adjust);
+    }
+
+    // Push a new secondary playback speed, skipping the dispatcher post when it barely changed. Only called when Secondary != null.
+    private void ApplySecondarySpeed(double speed)
+    {
+        if (Math.Abs(speed - secondarySpeed) < SpeedApplyEpsilon)
         {
             return;
         }
-        double targetSeconds = Primary.Playback.PositionSeconds + offset;
-        Secondary.Playback.Seek(targetSeconds);
+        secondarySpeed = speed;
+        Secondary!.Playback.SetSpeed(speed);
     }
 
-    // 20 ms — one frame at 50 fps; well below the 40 ms lipsync detection threshold. Below this, doing nothing is preferable to a corrective snap.
-    private const double PostEdgeCorrectionThresholdSeconds = 0.020;
+    // Release any active speed nudge and drop the latch. Called on every gated-out tick (paused/seeking/idle/isolated/PiP-off).
+    private void ResetSecondarySpeed()
+    {
+        driftMode = DriftCorrectionMode.Approach;
+        // Secondary == null only during the PiP-off gate: nothing to reset on mpv (Disable already disarmed the timer, and a later re-enable mints a fresh Playback at default speed 1.0). Keep our mirror honest.
+        if (Secondary == null)
+        {
+            secondarySpeed = 1.0;
+            return;
+        }
+        ApplySecondarySpeed(1.0);
+    }
+
+    // Diagnostic snapshot of the drift controller for the overlay. Reads live positions; safe on the main thread.
+    public PipSyncDiagnostic GetSyncDiagnostic()
+    {
+        if (Secondary == null)
+        {
+            return new PipSyncDiagnostic(false, targetOffsetSeconds, 0, null, secondarySpeed, "off");
+        }
+        double currentOffset = Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds;
+        double? drift = targetOffsetSeconds.HasValue ? currentOffset - targetOffsetSeconds.Value : (double?)null;
+        string mode;
+        if (SelectedSlot != null)
+        {
+            mode = "isolated";
+        }
+        else
+        {
+            mode = driftMode == DriftCorrectionMode.CatchUp ? "catchup" : "approach";
+        }
+        return new PipSyncDiagnostic(true, targetOffsetSeconds, currentOffset, drift, secondarySpeed, mode);
+    }
 
     // Relative seek stays a uniform fan-out across both contexts — mpv handles per-context edge clamping. Unlike SeekTo it does NOT re-pin to an absolute target: moving both by the same delta is offset-preserving by construction, and it never reads the offset or Primary's position, so it can't shift the locked sync. Same fan-out for both isolated and sync modes; isolated reduces to a one-element loop.
     public void SeekRelative(double seconds)
@@ -698,11 +791,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         foreach (var ctx in RoutingTargets())
         {
             ctx.SeekRelative(seconds);
-        }
-        // Sync-mode fan-out: same wall-clock skew rationale as SeekTo — both seeks land at slightly different real times. Schedule corrective seek. Selected mode bypasses (only one context received the seek; nothing to correct).
-        if (SelectedContext == null && Secondary != null)
-        {
-            PostEdgeCorrectionRequested?.Invoke();
         }
     }
 
@@ -768,8 +856,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         double offset = EnsureTargetOffset();
         Primary.Playback.Seek(target.Value);
         Secondary.Playback.Seek(target.Value + offset);
-        // Same post-edge correction rationale as SeekTo: both seeks finish at independent wall-clock times.
-        PostEdgeCorrectionRequested?.Invoke();
     }
 
     private void StepChapterIsolated(VideoContext context, int delta)
@@ -807,7 +893,15 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         Primary.PropertyChanged -= OnContextPropertyChanged;
         Primary.Playback.FileLoaded -= ClearTargetOffset;
-        PostEdgeCorrectionRequested = null;
         Primary.Dispose();
     }
 }
+
+// Diagnostic snapshot of the PiP drift-sync controller, surfaced by ViewModelMain.GetSyncDiagnostic for the diagnostic overlay. Enabled=false when PiP is off. TargetOffsetSeconds is null while the offset is still pending (not yet baselined); DriftSeconds ("catch-up required") is null in that same pending state. CurrentOffsetSeconds is the live Secondary − Primary divergence. Speed is the last rate pushed to the secondary; Mode is the controller's latch state ("off" / "isolated" / "approach" / "catchup").
+public readonly record struct PipSyncDiagnostic(
+    bool Enabled,
+    double? TargetOffsetSeconds,
+    double CurrentOffsetSeconds,
+    double? DriftSeconds,
+    double Speed,
+    string Mode);

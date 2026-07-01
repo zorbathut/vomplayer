@@ -11,7 +11,7 @@ using Vomplayer.Wayland;
 
 namespace Vomplayer;
 
-// Picture-in-Picture controller. Owns the secondary Playback / VideoSurface / VideoView, the stream-selector toolbar (widget construction only — MainWindow handles its placement in rootBox and fullscreen reparenting), the PiP layout machinery (drag-to-move, aspect-locked corner resize, hover-driven grip visibility), and the post-edge correction timer. Subscribes to the VM's IsPipEnabled / SelectedSlot changes to keep the UI in sync; subscribes to each VideoContext's PropertyChanged for toolbar labels and PiP aspect.
+// Picture-in-Picture controller. Owns the secondary Playback / VideoSurface / VideoView, the stream-selector toolbar (widget construction only — MainWindow handles its placement in rootBox and fullscreen reparenting), the PiP layout machinery (drag-to-move, aspect-locked corner resize, hover-driven grip visibility), and the drift-controller tick timer. Subscribes to the VM's IsPipEnabled / SelectedSlot changes to keep the UI in sync; subscribes to each VideoContext's PropertyChanged for toolbar labels and PiP aspect.
 //
 // The secondary widget is wrapped in a `pipContainer` Gtk.Overlay; the container carries the absolute layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest) and hosts a small bottom-right resize grip. Drag gestures on the secondary move the container; on the grip, aspect-locked resize. Layout math (defaults, clamping, aspect projection) is in PipLayoutCalc — kept pure for unit tests.
 //
@@ -25,8 +25,8 @@ public sealed class PipController : IDisposable
     private const string SelectedVideoCssClass = "vompl-selected-video";
     // App-level commit threshold for drag-to-move. Larger than GTK's gtk-dnd-drag-threshold (default 8 px) because GTK's threshold is empirically crossed by hand tremor / mouse jitter during what the user considers a normal click — under that threshold, GestureDrag fires drag-begin, our handler claims the sequence, and the sibling GestureClick's `released` signal is denied → PlayPause never runs. Bumping this app-side gates the SetState(Claimed) call until motion is unambiguous enough to commit. Picked at 16 px (~1/8" on typical DPI) — comfortably above tremor, comfortably below intentional drag motion.
     private const double PipMoveClaimThresholdPx = 16.0;
-    // 500 ms — empirical 95th-percentile coverage of `+exact` hr-seek completion + IsSeeking property echo round-trip on ordinary content. Raise to 1000 if practice shows the IsSeeking gate inside ApplyPostEdgeCorrection routinely skips slow-codec corrections.
-    private const uint PostEdgeCorrectionDelayMs = 500;
+    // Drift-controller tick period. 5 Hz balances responsiveness (overshoot detection, sudden-jump catch) against SetSpeed churn; the controller gates internally when paused/seeking/idle. See ViewModelMain.ApplyDriftCorrection.
+    private const uint SyncTickIntervalMs = 200;
     private const string StreamSelectorPrimaryFallback = "Video 1";
     private const string StreamSelectorSecondaryFallback = "Video 2";
 
@@ -65,8 +65,8 @@ public sealed class PipController : IDisposable
     // Coalescer for the post-ApplyPipLayout geometry refresh. ApplyPipLayout fires per drag-update event (potentially many times per frame); we only need one refresh per frame.
     private bool pipGeometryRefreshScheduled;
 
-    // Single coalescing GLib timeout for the post-edge corrective seek. Set on each PostEdgeCorrectionRequested fire from the VM; if a previous timeout is still pending, it's removed first so a flurry of edges (e.g. scrubber drag firing many SeekTos) collapses to one correction after the last edge.
-    private uint pendingCorrectionTimeoutId;
+    // Repeating GLib timeout that drives the continuous PiP drift controller (ViewModelMain.ApplyDriftCorrection). Armed in Enable, disarmed in Disable. 0 = not armed.
+    private uint syncTimeoutId;
 
     private bool pipMoveClaimed;
     // True while a corner-resize drag is active. Used alongside pipMoveClaimed to keep the grip visible mid-drag even if the pointer briefly slips outside the wrapper's bounds (which would otherwise fire EventControllerMotion::leave and hide the grip).
@@ -200,8 +200,11 @@ public sealed class PipController : IDisposable
 
         // Track the primary's video aspect: a primary file load/unload changes the letterbox/pillarbox layout, which moves the video display rect the PiP is positioned relative to. ApplyPipLayout reads the current rect on each call, so we just need to re-trigger it when the aspect flips.
         viewModel.Primary.PropertyChanged += OnPrimaryContextPropertyChangedForPip;
-        // Subscribe the post-edge correction scheduler. The VM raises this on every sync-mode transport edge that introduces wall-clock skew; we coalesce via the pending-timeout id so rapid edges produce one correction at the end.
-        viewModel.PostEdgeCorrectionRequested += OnPostEdgeCorrectionRequested;
+        // Arm the repeating drift controller for the PiP-on window. Enable early-returns on IsPipEnabled above, so this can't double-arm.
+        syncTimeoutId = GLib.Functions.TimeoutAdd(
+            (int)GLib.Constants.PRIORITY_DEFAULT,
+            SyncTickIntervalMs,
+            OnSyncTick);
 
         // PiP UI bookkeeping: re-bind the playlist panel to whichever context is active (Primary on first enable). Recompute the active CSS class and re-stack the OSD controlsBox if we're already fullscreen so it stays above the new PiP overlay child.
         RebindPlaylistPanelToTarget();
@@ -229,12 +232,11 @@ public sealed class PipController : IDisposable
             viewModel.Secondary.PropertyChanged -= OnSecondaryContextPropertyChanged;
         }
         viewModel.Primary.PropertyChanged -= OnPrimaryContextPropertyChangedForPip;
-        // Unsubscribe BEFORE viewModel.DisablePip() so any in-flight VM-side state changes during teardown can't ghost-fire a correction request. Cancel the pending timeout so a queued tick can't land on a half-disposed Secondary.
-        viewModel.PostEdgeCorrectionRequested -= OnPostEdgeCorrectionRequested;
-        if (pendingCorrectionTimeoutId != 0)
+        // Disarm the drift controller BEFORE viewModel.DisablePip() disposes Secondary, so a queued tick can't land on a half-disposed context. GLib is single-threaded, so no tick can interleave with this removal.
+        if (syncTimeoutId != 0)
         {
-            GLib.Functions.SourceRemove(pendingCorrectionTimeoutId);
-            pendingCorrectionTimeoutId = 0;
+            GLib.Functions.SourceRemove(syncTimeoutId);
+            syncTimeoutId = 0;
         }
         if (host.PrimaryArea != null)
         {
@@ -501,25 +503,11 @@ public sealed class PipController : IDisposable
         });
     }
 
-    // Coalescing scheduler. SourceRemove on a non-zero pending id is idempotent and cheap; the new TimeoutAdd resets the wall-clock countdown so a rapid burst of edges (e.g. scrubber drag) produces one correction PostEdgeCorrectionDelayMs after the LAST edge, not one per edge.
-    private void OnPostEdgeCorrectionRequested()
+    // Repeating drift-controller tick. Runs on the GLib main thread (same thread that owns the VM and mpv observers), so it touches VM state directly. return true keeps it firing; the VM gates internally each tick.
+    private bool OnSyncTick()
     {
-        if (pendingCorrectionTimeoutId != 0)
-        {
-            GLib.Functions.SourceRemove(pendingCorrectionTimeoutId);
-            pendingCorrectionTimeoutId = 0;
-        }
-        pendingCorrectionTimeoutId = GLib.Functions.TimeoutAdd(
-            (int)GLib.Constants.PRIORITY_DEFAULT,
-            PostEdgeCorrectionDelayMs,
-            OnPostEdgeCorrectionTimeout);
-    }
-
-    private bool OnPostEdgeCorrectionTimeout()
-    {
-        pendingCorrectionTimeoutId = 0;
-        viewModel.ApplyPostEdgeCorrection();
-        return false;
+        viewModel.ApplyDriftCorrection();
+        return true;
     }
 
     private void OnPipMoveDragBegin(Gtk.GestureDrag sender, Gtk.GestureDrag.DragBeginSignalArgs args)

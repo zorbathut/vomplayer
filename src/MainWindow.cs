@@ -257,7 +257,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         pipController = new PipController(this, viewModel, recentFiles, trackPreferences, filePicker, urlDownloader, urlPrompt);
 
         // Diagnostic overlay sits above noVideoBg in stacking order (later AddOverlay = higher). Anchored top-right (Halign=End, Valign=Start) so it never overlaps controlsBox (Valign=End) even when controlsBox is reparented in fullscreen. Reads HDR / source-HDR / hwdec from the current target (Selected ?? Primary) — providers re-resolve every refresh so a selection swap propagates within the next 1 Hz tick.
-        diagnosticOverlay = new DiagnosticOverlay(() => viewModel.SingleTarget, () => pipController.GetTargetVideoSurfaceForDiagnostic());
+        diagnosticOverlay = new DiagnosticOverlay(() => viewModel.SingleTarget, () => pipController.GetTargetVideoSurfaceForDiagnostic(), () => viewModel.GetSyncDiagnostic());
         videoOverlay.AddOverlay(diagnosticOverlay.Widget);
 
         // Wrap video + playlist in a horizontal row so they share the middle layout slot. videoOverlay still hexpand/vexpand so the video region grows to fill remaining space when the panel is visible.

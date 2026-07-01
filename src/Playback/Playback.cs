@@ -452,6 +452,12 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.Post(h => h.SetProperty("volume", value));
     }
 
+    public void SetSpeed(double rate)
+    {
+        var value = rate.ToString("F4", CultureInfo.InvariantCulture);
+        dispatcher.Post(h => h.SetProperty("speed", value));
+    }
+
     // Relative volume change. Routed through mpv's `add volume <delta>` command, not a cached read-modify-write here, so rapid VolumeUp keypresses don't race against mpv's property echo: each `add` is RMW-atomic inside mpv's playback loop and accumulates at full delta. Clamping happens inside mpv against [0, volume-max] (we pin volume-max=100 in Initialize).
     public void AdjustVolume(double deltaPercent)
     {

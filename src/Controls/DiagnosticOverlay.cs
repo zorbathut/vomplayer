@@ -15,6 +15,7 @@ public sealed class DiagnosticOverlay : IDisposable
 
     private readonly Func<VideoContext> activeContextProvider;
     private readonly Func<VideoSurface?> activeVideoSurfaceProvider;
+    private readonly Func<PipSyncDiagnostic> syncDiagnosticProvider;
     private readonly Gtk.Box box;
     private readonly Gtk.Label[] labels;
 
@@ -29,13 +30,7 @@ public sealed class DiagnosticOverlay : IDisposable
         }
     }
 
-    // Convenience overload for callers with a single fixed VideoSurface for the overlay's lifetime. Callers that want SelectedSlot-aware surface routing (PiP) should use the Func overload directly.
-    public DiagnosticOverlay(Func<VideoContext> activeContextProvider, VideoSurface? videoSurface)
-        : this(activeContextProvider, () => videoSurface)
-    {
-    }
-
-    public DiagnosticOverlay(Func<VideoContext> activeContextProvider, Func<VideoSurface?> activeVideoSurfaceProvider)
+    public DiagnosticOverlay(Func<VideoContext> activeContextProvider, Func<VideoSurface?> activeVideoSurfaceProvider, Func<PipSyncDiagnostic> syncDiagnosticProvider)
     {
         if (activeContextProvider == null)
         {
@@ -45,8 +40,13 @@ public sealed class DiagnosticOverlay : IDisposable
         {
             throw new ArgumentNullException(nameof(activeVideoSurfaceProvider));
         }
+        if (syncDiagnosticProvider == null)
+        {
+            throw new ArgumentNullException(nameof(syncDiagnosticProvider));
+        }
         this.activeContextProvider = activeContextProvider;
         this.activeVideoSurfaceProvider = activeVideoSurfaceProvider;
+        this.syncDiagnosticProvider = syncDiagnosticProvider;
 
         box = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         box.SetHalign(Gtk.Align.End);
@@ -57,7 +57,7 @@ public sealed class DiagnosticOverlay : IDisposable
         box.SetCanTarget(false);
         box.AddCssClass("vompl-diagnostic");
 
-        labels = new Gtk.Label[7];
+        labels = new Gtk.Label[9];
         for (int i = 0; i < labels.Length; i++)
         {
             var label = Gtk.Label.New("");
@@ -166,7 +166,8 @@ public sealed class DiagnosticOverlay : IDisposable
             FpsTrustReason: ctx.Playback.FpsTrustReason,
             OutputVrrRange: outputVrrRange,
             ConnectorName: connectorName,
-            LastDecision: ctx.LastVrrDecision);
+            LastDecision: ctx.LastVrrDecision,
+            Sync: syncDiagnosticProvider());
     }
 
     public void Dispose()

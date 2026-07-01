@@ -1,4 +1,5 @@
 using System.Globalization;
+using Vomplayer.ViewModels;
 using Vomplayer.Wayland;
 
 namespace Vomplayer.Controls;
@@ -22,7 +23,8 @@ public readonly record struct DiagnosticSnapshot(
     string? FpsTrustReason,
     VrrRange? OutputVrrRange,
     string? ConnectorName,
-    VrrDecision LastDecision);
+    VrrDecision LastDecision,
+    PipSyncDiagnostic Sync);
 
 public static class DiagnosticFormatter
 {
@@ -37,7 +39,38 @@ public static class DiagnosticFormatter
             "VRR:     " + FormatVrr(s.IsWaylandPath, s.VrrClass, s.VrrMeasuredHzCenti),
             "fps:     " + FormatFpsLine(s),
             "vrr:     " + FormatVrrPolicyLine(s),
+            "sync:    " + FormatSyncLine(s.Sync),
+            "pipspd:  " + FormatSyncSpeed(s.Sync),
         };
+    }
+
+    // PiP drift-sync: stored target offset, live current offset, catch-up required (= current − target), and the controller's latch mode. "off" when PiP is disabled; "pending" target until the offset is baselined.
+    private static string FormatSyncLine(PipSyncDiagnostic sync)
+    {
+        if (!sync.Enabled)
+        {
+            return "off";
+        }
+        string tgt = sync.TargetOffsetSeconds.HasValue ? SignedSeconds(sync.TargetOffsetSeconds.Value) : "pending";
+        string cur = SignedSeconds(sync.CurrentOffsetSeconds);
+        string need = sync.DriftSeconds.HasValue ? SignedSeconds(sync.DriftSeconds.Value) : "?";
+        return "tgt=" + tgt + " cur=" + cur + " need=" + need + " (" + sync.Mode + ")";
+    }
+
+    private static string FormatSyncSpeed(PipSyncDiagnostic sync)
+    {
+        if (!sync.Enabled)
+        {
+            return "—";
+        }
+        return sync.Speed.ToString("F4", CultureInfo.InvariantCulture);
+    }
+
+    private static string SignedSeconds(double seconds)
+    {
+        // ToString already prints a leading '-' for negatives; add an explicit '+' for non-negatives so drift direction reads at a glance.
+        string body = seconds.ToString("F3", CultureInfo.InvariantCulture);
+        return seconds >= 0 ? "+" + body : body;
     }
 
     private static string FormatHwdec(string? hwdec)

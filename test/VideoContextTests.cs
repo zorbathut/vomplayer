@@ -113,6 +113,7 @@ public partial class VideoContextTests
         public void SetAudio(int? trackId) { }
         public void SetSubtitle(int? trackId) { }
         public void SetVolume(double percent) { Volume = percent; }
+        public void SetSpeed(double rate) { }
         public void AdjustVolume(double deltaPercent) { }
         public void ToggleMute() { IsMuted = !IsMuted; }
         public void EnableHdrOutput() { EnableHdrOutputCalls++; }

@@ -97,6 +97,8 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // Relative volume change in percent points (e.g. +5 / -5). Implementations clamp against 0 and the active volume-max.
     void AdjustVolume(double deltaPercent);
     void ToggleMute();
+    // mpv's `speed` property: playback rate multiplier, 1.0 = normal (mpv accepts 0.01–100). Drives the PiP drift controller's ±5% catch-up nudge. With audio-pitch-correction (mpv's default) this stretches tempo while preserving pitch.
+    void SetSpeed(double rate);
 
     // Set mpv's `target-prim`/`target-trc`/`target-peak` to the PQ/BT.2020 viewport so mpv emits PQ pass-through into the FBO. Caller must already have a PQ-tagged surface attached or the compositor will misinterpret the pixels. Inverse pair with DisableHdrOutput.
     void EnableHdrOutput();

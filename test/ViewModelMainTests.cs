@@ -192,6 +192,10 @@ public partial class ViewModelMainTests
             VolumeAdjustments.Add(deltaPercent);
         }
 
+        public void SetSpeed(double rate)
+        {
+        }
+
         public void ToggleMute()
         {
             ToggleMuteCalls++;
