@@ -81,6 +81,18 @@ public class VideoView : Gtk.GLArea
         DisposeRenderContext();
     }
 
+    // Explicit teardown for the owner's disposal path. mpv requires mpv_render_context_free to run BEFORE mpv_terminate_destroy, and the unrealize-driven DisposeRenderContext only fires when the widget leaves the tree — which on the close/disable paths happens after the owning Playback (and its mpv core) is already gone. Call this before disposing the Playback, mirroring VideoSurface.Dispose on the Wayland path. Idempotent; the later unrealize then no-ops.
+    public void TeardownRenderContext()
+    {
+        if (renderContext == null)
+        {
+            return;
+        }
+        // mpv_render_context_free destroys GL objects and needs our GL context current on this thread.
+        MakeCurrent();
+        DisposeRenderContext();
+    }
+
     private void DisposeRenderContext()
     {
         if (renderContext == null)

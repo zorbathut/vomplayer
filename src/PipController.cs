@@ -255,6 +255,8 @@ public sealed class PipController : IDisposable
         {
             secondaryView.RenderContextReady -= OnSecondaryRenderContextReadyGLArea;
             secondaryView.RenderFailed -= OnSecondaryRenderFailed;
+            // Same ordering contract as secondarySurface above: free the render context before viewModel.DisablePip terminates the secondary mpv core. Waiting for the widget's unrealize (RemoveOverlay below) would free it after the core is gone — documented UB in libmpv.
+            secondaryView.TeardownRenderContext();
             secondaryView = null;
         }
         // VM teardown now: disposes Secondary VideoContext (which detaches HDR/VRR sinks, unsubscribes Playback events, and disposes secondary Playback).

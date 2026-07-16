@@ -1029,7 +1029,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         playback.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
         // Disposal order is load-bearing in two ways:
         //   (1) DiagnosticOverlay's 1 Hz timer reads playback + pipController — kill it first.
-        //   (2) videoSurface.Dispose calls mpv_render_context_free against the primary mpv handle; the handle is terminated by primary playback.Dispose which runs inside viewModel.Dispose (Primary VideoContext now owns its IPlayback's lifetime). So videoSurface MUST dispose before viewModel — see MpvDispatcher.Dispose comment about render-surface-before-dispatcher ordering.
+        //   (2) videoSurface.Dispose (Wayland) / videoView.TeardownRenderContext (GLArea) calls mpv_render_context_free against the primary mpv handle; the handle is terminated by primary playback.Dispose which runs inside viewModel.Dispose (Primary VideoContext now owns its IPlayback's lifetime). So the render surface MUST dispose before viewModel — see MpvDispatcher.Dispose comment about render-surface-before-dispatcher ordering. The GLArea's unrealize-driven free would otherwise run at window destruction, after the core is gone.
         // PipController internally observes the same order for the secondary stream (its own surface disposes before viewModel.DisablePip).
         diagnosticOverlay.Dispose();
         downloadStatusOverlay.Dispose();
@@ -1037,6 +1037,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         seekScaleController.Dispose();
         playlistPanel.Dispose();
         videoSurface?.Dispose();
+        videoView?.TeardownRenderContext();
         viewModel.Dispose();
         return false;
     }
