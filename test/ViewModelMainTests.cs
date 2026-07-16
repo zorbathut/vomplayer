@@ -283,11 +283,6 @@ public partial class ViewModelMainTests
             RecordedPaths.Add(pathOrUri);
         }
 
-        public IReadOnlyList<RecentFileEntry> GetMostRecent(int limit)
-        {
-            return Array.Empty<RecentFileEntry>();
-        }
-
         public void RecordPosition(string pathOrUri, double positionSeconds)
         {
             RecordedPositions.Add((pathOrUri, positionSeconds));

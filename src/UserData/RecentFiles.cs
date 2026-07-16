@@ -38,7 +38,8 @@ public sealed class RecentFiles : IRecentFiles
         cmd.ExecuteNonQuery();
     }
 
-    public IReadOnlyList<RecentFileEntry> GetMostRecent(int limit)
+    // Internal (not on IRecentFiles): production's Recent menu reads SavedPlaylists since v4 — this query survives purely as the test-observation seam for Record/RecordPosition against real SQLite.
+    internal IReadOnlyList<RecentFileEntry> GetMostRecent(int limit)
     {
         if (limit < 0)
         {
@@ -105,3 +106,5 @@ public sealed class RecentFiles : IRecentFiles
         return Convert.ToDouble(raw);
     }
 }
+
+public sealed record RecentFileEntry(string PathOrUri, DateTimeOffset LastOpened, long OpenCount);

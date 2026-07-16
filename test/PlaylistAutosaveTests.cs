@@ -140,7 +140,6 @@ public partial class PlaylistAutosaveTests
     private sealed class StubRecentFiles : IRecentFiles
     {
         public void Record(string pathOrUri) { }
-        public IReadOnlyList<RecentFileEntry> GetMostRecent(int limit) { return Array.Empty<RecentFileEntry>(); }
         public void RecordPosition(string pathOrUri, double positionSeconds) { }
         public double? GetPosition(string pathOrUri) { return null; }
     }
@@ -663,7 +662,6 @@ public partial class PlaylistAutosaveTests
     {
         public List<string> RecordedPaths { get; } = new();
         public void Record(string pathOrUri) { RecordedPaths.Add(pathOrUri); }
-        public IReadOnlyList<RecentFileEntry> GetMostRecent(int limit) { return Array.Empty<RecentFileEntry>(); }
         public void RecordPosition(string pathOrUri, double positionSeconds) { }
         public double? GetPosition(string pathOrUri) { return null; }
     }
