@@ -158,7 +158,9 @@ internal sealed class MpvDispatcher : IDisposable
         // Bounded join: if the worker is stuck inside a blocking mpv_set_property_string waiting for a render-context ACK, and the render context has already been destroyed (normal Dispose ordering — render surface disposes before Playback), mpv unblocks quickly. But if Dispose is called while the render context is still alive AND a blocking set is in flight, we'd wait forever — main thread is us, and mpv's render ACK needs main. The timeout makes that failure mode loud instead of a silent process hang. Callers should dispose the render surface before the dispatcher to avoid this path.
         if (!worker.Join(TimeSpan.FromSeconds(3)))
         {
-            Console.Error.WriteLine("[vomplayer] MpvDispatcher worker did not exit within 3s — probably blocked on mpv waiting for a render ACK that will never come. Check Dispose ordering: the render surface must be disposed before the dispatcher.");
+            // Deliberately LEAK the client and queue rather than destroy them under the worker's feet: mpv_terminate_destroy while another thread is inside an mpv_* call on the same handle is use-after-free, and the wedged worker means exactly that call is still in flight (likewise queue.Dispose under an active GetConsumingEnumerable). Every current Dispose path runs at process exit, so the leak is reclaimed by the OS moments later.
+            Console.Error.WriteLine("[vomplayer] MpvDispatcher worker did not exit within 3s — probably blocked on mpv waiting for a render ACK that will never come. Check Dispose ordering: the render surface must be disposed before the dispatcher. Leaking the mpv client to avoid use-after-free.");
+            return;
         }
         client.Dispose();
         queue.Dispose();
