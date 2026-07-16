@@ -434,10 +434,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
     }
 
+    // mpv's `cycle` command, not a cached read-modify-write against the mirrored IsPaused: rapid toggles (or a toggle racing an external write) would double-apply against a stale echo. Same rationale as AdjustVolume — the cycle is RMW-atomic inside mpv's playback loop.
     public void TogglePause()
     {
-        bool pausedNow = IsPaused;
-        dispatcher.Post(h => h.SetProperty("pause", pausedNow ? "no" : "yes"));
+        dispatcher.Post(h => h.Command("cycle", "pause"));
     }
 
     public void SetPaused(bool paused)
@@ -464,10 +464,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
         dispatcher.Post(h => h.Command("add", "volume", delta));
     }
 
+    // See TogglePause — mpv-side cycle instead of a cached read-modify-write.
     public void ToggleMute()
     {
-        bool mutedNow = IsMuted;
-        dispatcher.Post(h => h.SetProperty("mute", mutedNow ? "no" : "yes"));
+        dispatcher.Post(h => h.Command("cycle", "mute"));
     }
 
     public void LoadAudio(string path)
