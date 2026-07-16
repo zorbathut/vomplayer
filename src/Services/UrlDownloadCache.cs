@@ -67,7 +67,7 @@ public sealed class UrlDownloadCache
         {
             relative = File.ReadAllText(manifest).Trim();
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Console.Error.WriteLine($"[vompl] url-cache: read manifest {manifest} failed: {ex.Message}; treating as cache miss");
             return null;
@@ -116,7 +116,7 @@ public sealed class UrlDownloadCache
         {
             subdirs = Directory.EnumerateDirectories(root);
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             onError?.Invoke($"cache cleanup: enumerate failed for {root}: {ex.Message}");
             return;
@@ -128,7 +128,7 @@ public sealed class UrlDownloadCache
             {
                 mtime = Directory.GetLastWriteTimeUtc(dir);
             }
-            catch (IOException ex)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 onError?.Invoke($"cache cleanup: stat failed for {dir}: {ex.Message}");
                 continue;
