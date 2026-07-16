@@ -623,14 +623,45 @@ public class PlaybackTests
     [Test]
     public void ClearAfterSetIssuesRemoveOnlyOnce()
     {
-        // Regression: Set then Clear should leave frameMultiplierApplied=false so a subsequent Clear is a no-op (no spurious mpv command). Tests the same-thread state machine without depending on the dispatcher worker.
+        // Regression: Set then Clear must leave frameMultiplierApplied=false so a subsequent Clear early-returns (no spurious mpv `vf remove`). The posted commands aren't observable in-process, but the guard that gates them is — pin the state machine through the internal seam.
         using var pb = NewWithFakeClock(() => 0.0);
-        // Drive the LoadFile preempt scenario indirectly: Set, then Clear (twice).
+        Assert.That(pb.FrameMultiplierAppliedForTest, Is.False);
         pb.SetFrameMultiplier(48.0);
+        Assert.That(pb.FrameMultiplierAppliedForTest, Is.True);
         pb.ClearFrameMultiplier();
+        Assert.That(pb.FrameMultiplierAppliedForTest, Is.False, "first Clear must flip the guard, issuing the one remove");
         pb.ClearFrameMultiplier();
-        // Can't observe dispatcher.Post counts in-process; the assertion is "no exception throws and state is internally consistent". Real-mpv coverage lives in manual smoke + the VideoContext-level regression test.
-        Assert.Pass();
+        Assert.That(pb.FrameMultiplierAppliedForTest, Is.False, "second Clear early-returns on the guard");
+    }
+
+    [Test]
+    public void LoadFileSynchronouslyResetsAllPerFileMirrors()
+    {
+        // LoadFile's preemptive reset block is the most race-rationale-dense code in this file: every per-file mirror must clear synchronously, before the new file's property events land, so nothing stale (HDR tag, chapters, eof edge, aspect, fps, title) can leak into the gap. Pin every reset so a refactor that reorders or drops one fails here instead of as an intermittent UI glitch.
+        using var pb = NewWithFakeClock(() => 0.0);
+        pb.IngestPropertyChangeForTest(new PropertyChange("dwidth", new MpvPropertyValue(1920L), 0));
+        pb.IngestPropertyChangeForTest(new PropertyChange("dheight", new MpvPropertyValue(1080L), 0));
+        pb.IngestPropertyChangeForTest(new PropertyChange("container-fps", new MpvPropertyValue(25.0), 0));
+        pb.IngestPropertyChangeForTest(new PropertyChange("estimated-vf-fps", new MpvPropertyValue(25.1), 0));
+        pb.IngestPropertyChangeForTest(new PropertyChange("media-title", new MpvPropertyValue("Old Title"), 0));
+        pb.IngestPropertyChangeForTest(new PropertyChange("eof-reached", new MpvPropertyValue(1), 0));
+        pb.IngestPropertyChangeForTest(new PropertyChange("video-params/gamma", new MpvPropertyValue("pq"), 0));
+        pb.UpdateChapters(new[] { new MediaChapter(0, "One", 0.0) });
+        pb.SetFrameMultiplier(50.0);
+        Assert.That(pb.VideoAspect, Is.Not.Null);
+        Assert.That(pb.IsSourceHdr, Is.True);
+        Assert.That(pb.IsEofReached, Is.True);
+
+        pb.LoadFile("/next.mp4", startPaused: false);
+
+        Assert.That(pb.IsSourceHdr, Is.False, "HDR must snap back to SDR before the new file's params land");
+        Assert.That(pb.Chapters, Is.Empty, "stale chapter markers must not survive into the load gap");
+        Assert.That(pb.IsEofReached, Is.False, "a stale eof edge would trip auto-advance against the new file");
+        Assert.That(pb.VideoAspect, Is.Null);
+        Assert.That(pb.VideoFps, Is.Null);
+        Assert.That(pb.EstimatedVfFps, Is.Null);
+        Assert.That(pb.MediaTitle, Is.Null);
+        Assert.That(pb.FrameMultiplierAppliedForTest, Is.False, "the previous file's fps filter must clear until ApplyVrrPolicy re-decides");
     }
 
     [Test]

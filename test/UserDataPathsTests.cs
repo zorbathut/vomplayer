@@ -15,6 +15,7 @@ public class UserDataPathsTests
     {
         savedConfigDir = Environment.GetEnvironmentVariable("VOMPL_CONFIG_DIR");
         savedStateDir = Environment.GetEnvironmentVariable("VOMPL_STATE_DIR");
+        savedCacheDir = Environment.GetEnvironmentVariable("VOMPL_CACHE_DIR");
     }
 
     [TearDown]
@@ -22,6 +23,18 @@ public class UserDataPathsTests
     {
         Environment.SetEnvironmentVariable("VOMPL_CONFIG_DIR", savedConfigDir);
         Environment.SetEnvironmentVariable("VOMPL_STATE_DIR", savedStateDir);
+        Environment.SetEnvironmentVariable("VOMPL_CACHE_DIR", savedCacheDir);
+    }
+
+    private string? savedCacheDir;
+
+    [Test]
+    public void CacheDirOverrideHonoursEnvVarAndRootsTheUrlCache()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-test-cache-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("VOMPL_CACHE_DIR", dir);
+        Assert.That(UserDataPaths.CacheDir, Is.EqualTo(dir));
+        Assert.That(UserDataPaths.UrlDownloadCacheRoot, Is.EqualTo(Path.Combine(dir, "url-downloads")));
     }
 
     [Test]

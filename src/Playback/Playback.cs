@@ -386,6 +386,15 @@ public sealed partial class Playback : ObservableObject, IPlayback
     // Tracks whether we currently have a labelled entry in mpv's chain. Read+written on the main thread only (Set/Clear are called from there). Used to skip a redundant `vf remove` when no entry exists, which mpv would otherwise log as an error. The actual mpv chain state may briefly diverge from this flag in flight (a posted Set hasn't been processed yet) but every Set/Clear posts a self-consistent sequence so the chain converges to match the flag's value.
     private bool frameMultiplierApplied;
 
+    // Test observation seam for the Set/Clear state machine — the posted mpv commands aren't observable in-process, but the guard driving them is.
+    internal bool FrameMultiplierAppliedForTest
+    {
+        get
+        {
+            return frameMultiplierApplied;
+        }
+    }
+
     // Apply (or replace) our labelled fps entry so mpv emits frames at outputFps. The dispatcher post is a remove-then-add pair when a previous entry exists; the remove is wrapped in try/catch because mpv returns a (non-fatal) error when the named filter isn't present. Format the rate with three decimals so 47.952 (NTSC ×2) round-trips cleanly through mpv's expression parser.
     public void SetFrameMultiplier(double outputFps)
     {
