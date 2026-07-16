@@ -49,19 +49,13 @@ static vompl_output_name_fn g_output_name_cb;
 // Process-global Wayland globals, resolved lazily on first use.
 //---------------------------------------------------------------
 
-// Per-output record. The cached mode+image-info fields exist purely for replay: if vompl_set_output_callbacks is called after the initial wl_output enumeration has already fired, we re-deliver the cached values so the consumer doesn't miss them. Under steady-state, the consumer (C#) is the authoritative store.
+// Per-output record. The consumer (C#) is the authoritative store for everything the listeners forward — vompl_set_output_callbacks must be registered BEFORE the first ensure_globals (VideoSurface guarantees this by calling EnsureRegistered ahead of the first surface creation); events fired before registration would be dropped, not replayed.
 //
 // HDR probe state (cm_output, pending_desc, pending_info, pending_tf_*) drives a single-shot ready→get_information→tf_named→done handshake per probe. A fresh probe starts on initial output bind and on every wp_color_management_output_v1.image_description_changed event; any in-flight proxies are destroyed before restarting so at most one chain is live per output at a time.
 struct output_info
 {
     struct wl_output *output;
     uint32_t registry_name;
-    int32_t cached_mode_mhz;
-    // Connector name from wl_output v4 .name (e.g. "HDMI-A-1"). NULL until either the .name event lands or the compositor doesn't advertise v ≥ 4. Owned heap copy; freed in globals_reg_global_remove.
-    char *cached_name;
-    int cached_image_info_valid;
-    int cached_has_tf_named;
-    uint32_t cached_tf_named;
     struct wp_color_management_output_v1 *cm_output;
     struct wp_image_description_v1 *pending_desc;
     struct wp_image_description_info_v1 *pending_info;
@@ -94,28 +88,13 @@ static uint32_t lookup_output_registry_name(struct wl_output *o)
     return 0;
 }
 
-// Callbacks may be registered either before ensure_globals fires (no events yet, nothing to replay) or after (initial enumeration complete, replay cached modes + image info + names so consumer state catches up). The replay decouples ordering between vompl_set_output_callbacks and whatever triggers ensure_globals.
+// Must be called BEFORE the first ensure_globals (i.e. before the first vompl_video_surface_create): the initial wl_output enumeration fires during ensure_globals' roundtrips, and events delivered before registration are dropped. VideoSurface guarantees the ordering by calling VomplOutputCallbacks.EnsureRegistered ahead of surface creation; a replay-on-late-registration mechanism existed here once but was dead in production and got removed.
 void vompl_set_output_callbacks(vompl_output_mode_fn mode, vompl_output_removed_fn removed, vompl_output_image_info_fn image_info, vompl_output_name_fn name)
 {
     g_output_mode_cb = mode;
     g_output_removed_cb = removed;
     g_output_image_info_cb = image_info;
     g_output_name_cb = name;
-    for (struct output_info *it = g_outputs; it; it = it->next)
-    {
-        if (it->cached_mode_mhz != 0 && g_output_mode_cb)
-        {
-            g_output_mode_cb(it->registry_name, it->cached_mode_mhz);
-        }
-        if (it->cached_image_info_valid && g_output_image_info_cb)
-        {
-            g_output_image_info_cb(it->registry_name, it->cached_has_tf_named, it->cached_tf_named);
-        }
-        if (it->cached_name && g_output_name_cb)
-        {
-            g_output_name_cb(it->registry_name, it->cached_name);
-        }
-    }
 }
 
 static void output_handle_geometry(void *data, struct wl_output *o,
@@ -136,7 +115,6 @@ static void output_handle_mode(void *data, struct wl_output *o,
     {
         return;
     }
-    info->cached_mode_mhz = refresh;
     if (g_output_mode_cb)
     {
         g_output_mode_cb(info->registry_name, refresh);
@@ -145,16 +123,14 @@ static void output_handle_mode(void *data, struct wl_output *o,
 
 static void output_handle_done(void *data, struct wl_output *o) { (void)data; (void)o; }
 static void output_handle_scale(void *data, struct wl_output *o, int32_t scale) { (void)data; (void)o; (void)scale; }
-// wl_output v4 connector name. Cached as an owned heap string so the consumer can re-read after the listener returns; replay path in vompl_set_output_callbacks delivers it on late callback registration. Per spec, .name is sent at most once before the first .done; we still tolerate repeats by freeing+reallocating.
+// wl_output v4 connector name (e.g. "HDMI-A-1"), forwarded straight through — the consumer (C# WaylandOutputRegistry) copies the string during the callback, so no shim-side ownership is needed.
 static void output_handle_name(void *data, struct wl_output *o, const char *name)
 {
     (void)o;
     struct output_info *info = data;
-    free(info->cached_name);
-    info->cached_name = name ? strdup(name) : NULL;
     if (g_output_name_cb)
     {
-        g_output_name_cb(info->registry_name, info->cached_name ? info->cached_name : "");
+        g_output_name_cb(info->registry_name, name ? name : "");
     }
 }
 static void output_handle_description(void *data, struct wl_output *o, const char *d) { (void)data; (void)o; (void)d; }
@@ -272,9 +248,6 @@ static void oi_info_done(void *data, struct wp_image_description_info_v1 *i)
 {
     (void)i;
     struct output_info *info = data;
-    info->cached_has_tf_named = info->pending_tf_named_seen;
-    info->cached_tf_named = info->pending_tf_named;
-    info->cached_image_info_valid = 1;
     if (g_output_image_info_cb)
     {
         g_output_image_info_cb(info->registry_name, info->pending_tf_named_seen, info->pending_tf_named);
@@ -400,7 +373,6 @@ static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t nam
         if (!info) { return; }
         info->output = wl_registry_bind(reg, name, &wl_output_interface, v);
         info->registry_name = name;
-        info->cached_mode_mhz = 0;
         info->next = g_outputs;
         g_outputs = info;
         wl_output_add_listener(info->output, &output_listener_impl, info);
@@ -428,7 +400,6 @@ static void globals_reg_global_remove(void *data, struct wl_registry *reg, uint3
                 dead->cm_output = NULL;
             }
             wl_output_destroy(dead->output);
-            free(dead->cached_name);
             free(dead);
             return;
         }
@@ -480,7 +451,7 @@ static int ensure_globals(struct wl_display *display)
         return -4;
     }
 
-    // Pump additional roundtrips so the per-output HDR-capability probe (get_image_description → ready → get_information → tf_named/done) completes before returning. Each full probe needs ~2 roundtrips. Capped so a misbehaving compositor can't wedge init; if the cap is hit the still-pending outputs keep cached_image_info_valid == 0 (consumer treats unknown as SDR), but we log so a surprise "everything probed as SDR" is diagnosable.
+    // Pump additional roundtrips so the per-output HDR-capability probe (get_image_description → ready → get_information → tf_named/done) completes before returning. Each full probe needs ~2 roundtrips. Capped so a misbehaving compositor can't wedge init; if the cap is hit the still-pending outputs never deliver an image-info callback (consumer treats unknown as SDR), but we log so a surprise "everything probed as SDR" is diagnosable.
     for (int i = 0; i < 6 && g_hdr_probes_inflight > 0; i++)
     {
         if (wl_display_roundtrip(display) < 0)

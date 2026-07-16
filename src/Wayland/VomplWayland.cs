@@ -258,7 +258,7 @@ internal sealed partial class VomplVideoSurface : IDisposable
     private static partial void DestroyNative(IntPtr vs);
 }
 
-// Process-global output-event trampolines. Forwards straight into WaylandOutputRegistry. Delegates are static-rooted so they're pinned for the process lifetime. The native shim buffers cached mode + HDR bits and replays them when callbacks register, so ordering vs. ensure_globals is not load-bearing.
+// Process-global output-event trampolines. Forwards straight into WaylandOutputRegistry. Delegates are static-rooted so they're pinned for the process lifetime. Ordering IS load-bearing: registration must precede the first surface creation (whose ensure_globals roundtrips deliver the initial wl_output enumeration) — events fired before registration are dropped. VideoSurface.OnWindowRealize calls EnsureRegistered immediately before constructing the surface.
 internal static partial class VomplOutputCallbacks
 {
     private const string Lib = "hdr_helper";
