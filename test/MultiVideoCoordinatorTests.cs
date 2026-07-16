@@ -1474,4 +1474,38 @@ public partial class MultiVideoCoordinatorTests
         Assert.That(d.Speed, Is.EqualTo(0.95).Within(1e-9));
         Assert.That(d.Mode, Is.EqualTo("catchup"));
     }
+
+    [Test]
+    public void SyncPlayPauseWithFilelessPrimaryDrivesFromLoadedSecondary()
+    {
+        // Files dropped only onto the PiP secondary is a supported flow. In sync mode, Space must be able to both start AND pause the loaded stream: the flip target must derive from a stream whose play state can actually change. A fileless Primary's IsPaused never flips (SetPaused's Duration gate is a no-op), so deriving the target blindly from Primary computes the same value forever — Space could start the Secondary but never pause it.
+        using var h = new Harness();
+        h.EnablePip();
+        h.PrimaryPlayback.IsPaused = true;   // fileless: Duration stays 0, so this can never change
+        h.SecondaryPlayback!.DurationSeconds = 60;
+        h.SecondaryPlayback!.IsPaused = true;
+
+        h.Vm.PlayPauseCommand.Execute(null);
+        Assert.That(h.SecondaryPlayback!.IsPaused, Is.False, "first Space starts the loaded secondary");
+
+        h.Vm.PlayPauseCommand.Execute(null);
+        Assert.That(h.SecondaryPlayback!.IsPaused, Is.True, "second Space pauses it again");
+    }
+
+    [Test]
+    public void SyncPlayPauseDoesNotCaptureOffsetAgainstFilelessStream()
+    {
+        // The differed-pre-state "join" capture assumes exactly one stream actually changed state. A fileless stream's SetPaused is a gated no-op — it can't join anything, and capturing Secondary.Position − Primary.Position against a stream with no position would store garbage. The EnablePip-established offset must survive.
+        using var h = new Harness();
+        h.EnablePip();  // offset = 0
+        h.PrimaryPlayback.IsPaused = true;  // fileless
+        h.SecondaryPlayback!.DurationSeconds = 100;
+        h.SecondaryPlayback!.PositionSeconds = 30;
+        h.SecondaryPlayback!.IsPaused = false;  // playing → pre-states differ
+
+        h.Vm.PlayPauseCommand.Execute(null);
+
+        var d = h.Vm.GetSyncDiagnostic();
+        Assert.That(d.TargetOffsetSeconds!.Value, Is.EqualTo(0.0).Within(1e-9), "join capture must not fire against a fileless stream");
+    }
 }

@@ -518,9 +518,16 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             SelectedContext.PlayPause();
             return;
         }
-        // No selection ⇒ sync-broadcast. The streams may have drifted (because earlier the user had Secondary selected and toggled it independently); a naive per-context toggle would keep them divergent. Compute a single target from Primary's flip and apply that to every stream so the chrome's Space gesture always returns to a unified state. Tiebreaker: Primary drives. SetPaused on each context applies the same Duration > 0 gate as PlayPause, so a stream with no file loaded is a no-op rather than echoing a spurious paused state.
+        // No selection ⇒ sync-broadcast. The streams may have drifted (because earlier the user had Secondary selected and toggled it independently); a naive per-context toggle would keep them divergent. Compute a single flip target and apply that to every stream so the chrome's Space gesture always returns to a unified state. The flip derives from the first stream that actually has a file loaded (Primary preferred): a fileless stream's IsPaused can never change (SetPaused's Duration gate no-ops), so deriving from a fileless Primary would recompute the same stuck target forever — Space could start a loaded Secondary but never pause it. SetPaused on each context applies the same Duration > 0 gate as PlayPause, so a stream with no file loaded stays a no-op rather than echoing a spurious paused state.
+        bool primaryHasFile = Primary.Duration > TimeSpan.Zero;
+        bool secondaryHasFile = Secondary != null && Secondary.Duration > TimeSpan.Zero;
+        VideoContext? driver = primaryHasFile ? Primary : (secondaryHasFile ? Secondary : null);
+        if (driver == null)
+        {
+            return;
+        }
+        bool target = !driver.Playback.IsPaused;
         bool primaryWasPaused = Primary.Playback.IsPaused;
-        bool target = !primaryWasPaused;
         Primary.SetPaused(target);
         if (Secondary == null)
         {
@@ -528,9 +535,9 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         bool secondaryWasPaused = Secondary.Playback.IsPaused;
         Secondary.SetPaused(target);
-        if (primaryWasPaused != secondaryWasPaused)
+        if (primaryHasFile && secondaryHasFile && primaryWasPaused != secondaryWasPaused)
         {
-            // The two streams started in DIFFERENT play states, so converging them to a common state actually changed only ONE of them — the other was already there. That stream just "joined" the other at the live positions, which (like a single-track adjustment) defines a fresh sync point: capture the offset from the current divergence. We deliberately do NOT schedule a corrective seek — the offset we just captured already matches the positions, and a deferred correction would only yank the stream that was ALREADY playing to absorb the joining stream's decoder-startup lag, which is exactly the spurious resync this fixes.
+            // The two streams started in DIFFERENT play states, so converging them to a common state actually changed only ONE of them — the other was already there. That stream just "joined" the other at the live positions, which (like a single-track adjustment) defines a fresh sync point: capture the offset from the current divergence. Both streams must actually have files — a fileless stream's differed pre-state is vacuous (its SetPaused was gated to a no-op, so nothing "joined") and capturing against its zero position would store garbage. We deliberately do NOT schedule a corrective seek — the offset we just captured already matches the positions, and a deferred correction would only yank the stream that was ALREADY playing to absorb the joining stream's decoder-startup lag, which is exactly the spurious resync this fixes.
             targetOffsetSeconds = Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds;
             return;
         }
