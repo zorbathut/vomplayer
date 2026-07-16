@@ -21,3 +21,13 @@ lcov.*.info
 # Flatpak
 /repo
 /vomplayer.flatpak
+
+# Stray runtime/diagnostic output
+nohup.out
+/*.csv
+/*.mp4
+
+# flatpak-builder work/output trees (each drops a self-ignoring .gitignore, but be explicit)
+/build-flatpak
+/build-flatpak-bundle
+/.flatpak-builder

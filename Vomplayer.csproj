@@ -12,6 +12,8 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="GirCore.Gtk-4.0" Version="0.7.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+    <!-- Direct pin overriding Microsoft.Data.Sqlite's transitive SQLitePCLRaw 2.1.11, which has a known high-severity vulnerability (GHSA-2m69-gcr7-jv3q). Drop when Microsoft.Data.Sqlite bumps its own dependency. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
     <PackageReference Include="Tomlyn" Version="2.3.2" />
   </ItemGroup>
 
