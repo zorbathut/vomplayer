@@ -116,7 +116,7 @@ public sealed class FpsTrustMonitor
         }
         if (nowSeconds - lastResetSeconds < WarmupSeconds)
         {
-            lastSampleSeconds = nowSeconds;
+            // Discard entirely — including as a dt baseline. Priming lastSampleSeconds here would make the first judged post-warmup sample accumulate an interval that partially predates warmup end, letting a single sparse reading flip Untrusted early.
             return;
         }
         // Compare against expectedFps (post-any-filter rate), not declaredFps. With our vf=fps filter active, estimated-vf-fps reads the post-filter output rate; comparing against declaredFps would mistake our own filter's rate-doubling for source-side VFR and unwind the filter that's working correctly.

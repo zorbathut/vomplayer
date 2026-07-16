@@ -207,4 +207,20 @@ public class FpsTrustMonitorTests
         m.OnFileLoaded(50.0, 100.0);
         Assert.That(m.State, Is.EqualTo(FpsTrust.Trusted));
     }
+
+    [Test]
+    public void WarmupTimeDoesNotCountTowardSustainedDisagreement()
+    {
+        // A warmup sample must be discarded entirely — including as a dt baseline. If it primed lastSampleSeconds, the first judged post-warmup sample would accumulate an interval that partially predates warmup end (here 4.5 − 1.9 = 2.6s), and with sparse samples a single judged reading could flip Untrusted before SustainedDisagreementSeconds of actual judged divergence.
+        var m = new FpsTrustMonitor();
+        m.OnFileLoaded(25.0, 0.0);
+        m.OnEstimatedFps(30.0, 1.9);   // inside warmup
+        m.OnEstimatedFps(30.0, 4.5);   // first judged sample: baseline only, no accumulation
+        Assert.That(m.DisagreementSecondsAccumulated, Is.EqualTo(0.0));
+        Assert.That(m.State, Is.EqualTo(FpsTrust.Trusted));
+        m.OnEstimatedFps(30.0, 6.0);   // 1.5s of judged divergence
+        Assert.That(m.DisagreementSecondsAccumulated, Is.EqualTo(1.5).Within(1e-9));
+        m.OnEstimatedFps(30.0, 8.0);   // 3.5s total → flips
+        Assert.That(m.State, Is.EqualTo(FpsTrust.Untrusted));
+    }
 }
