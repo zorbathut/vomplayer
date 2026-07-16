@@ -352,6 +352,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private void ApplyScreensaverInhibit()
     {
         bool wantInhibit = !playback.IsCoreIdle || playback.IsSeeking;
+        // Either stream playing keeps the inhibit — see UpdateSecondaryScreensaverSubscription.
+        if (secondaryPlaybackForScreensaver != null)
+        {
+            wantInhibit = wantInhibit || !secondaryPlaybackForScreensaver.IsCoreIdle || secondaryPlaybackForScreensaver.IsSeeking;
+        }
         // The local `cookie != 0` guard is what makes calls safe to repeat — Gtk.Application.Inhibit itself is NOT idempotent (each call registers a new inhibitor and returns a fresh cookie). Without the guard, every property change while playing would leak a cookie.
         if (wantInhibit && screensaverInhibitCookie == 0)
         {
@@ -438,7 +443,28 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
             case nameof(ViewModelMain.MediaTitle):
                 Title = string.IsNullOrEmpty(viewModel.MediaTitle) ? brand : $"{viewModel.MediaTitle} — {brand}";
                 break;
+            case nameof(ViewModelMain.IsPipEnabled):
+                UpdateSecondaryScreensaverSubscription();
+                break;
         }
+    }
+
+    // PiP adds a second stream the screensaver-inhibit predicate must see: "primary paused/parked at EOF while the PiP plays" would otherwise release the inhibit mid-playback. The subscription is retained in its own field because by the time IsPipEnabled flips false, viewModel.Secondary is already null. Unsubscribe-then-resubscribe keeps this idempotent, and the trailing re-evaluation covers disable (the stream that may have been holding the inhibit is gone); on enable it's a no-op since a fresh Playback reports IsCoreIdle=true.
+    private IPlayback? secondaryPlaybackForScreensaver;
+
+    private void UpdateSecondaryScreensaverSubscription()
+    {
+        if (secondaryPlaybackForScreensaver != null)
+        {
+            secondaryPlaybackForScreensaver.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
+            secondaryPlaybackForScreensaver = null;
+        }
+        if (viewModel.IsPipEnabled && viewModel.Secondary != null)
+        {
+            secondaryPlaybackForScreensaver = viewModel.Secondary.Playback;
+            secondaryPlaybackForScreensaver.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
+        }
+        ApplyScreensaverInhibit();
     }
 
     // Pick the freedesktop volume icon. The button is purely a mute toggle, so the icon reflects mute state alone — at vol=0-but-not-muted the unmuted-low icon stays so a user clicking the button gets a Mute/Unmute toggle (not a confusing "icon says muted but click toggles to muted"). Three non-mute steps follow the GNOME / Plasma icon-theme convention: <34 = low, 34–66 = medium, 67+ = high.
@@ -1027,6 +1053,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
             screensaverInhibitCookie = 0;
         }
         playback.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
+        if (secondaryPlaybackForScreensaver != null)
+        {
+            secondaryPlaybackForScreensaver.PropertyChanged -= OnPlaybackPropertyChangedForScreensaver;
+            secondaryPlaybackForScreensaver = null;
+        }
         // Disposal order is load-bearing in two ways:
         //   (1) DiagnosticOverlay's 1 Hz timer reads playback + pipController — kill it first.
         //   (2) videoSurface.Dispose (Wayland) / videoView.TeardownRenderContext (GLArea) calls mpv_render_context_free against the primary mpv handle; the handle is terminated by primary playback.Dispose which runs inside viewModel.Dispose (Primary VideoContext now owns its IPlayback's lifetime). So the render surface MUST dispose before viewModel — see MpvDispatcher.Dispose comment about render-surface-before-dispatcher ordering. The GLArea's unrealize-driven free would otherwise run at window destruction, after the core is gone.
