@@ -17,7 +17,7 @@ public sealed class DiagnosticOverlay : IDisposable
     private readonly Func<VideoSurface?> activeVideoSurfaceProvider;
     private readonly Func<PipSyncDiagnostic> syncDiagnosticProvider;
     private readonly Gtk.Box box;
-    private readonly Gtk.Label[] labels;
+    private readonly System.Collections.Generic.List<Gtk.Label> labels = new();
 
     private uint timeoutId;
     private bool disposed;
@@ -57,15 +57,7 @@ public sealed class DiagnosticOverlay : IDisposable
         box.SetCanTarget(false);
         box.AddCssClass("vompl-diagnostic");
 
-        labels = new Gtk.Label[9];
-        for (int i = 0; i < labels.Length; i++)
-        {
-            var label = Gtk.Label.New("");
-            label.SetXalign(0);
-            labels[i] = label;
-            box.Append(label);
-        }
-
+        // Labels are created on demand in Refresh to match DiagnosticFormatter's line count — a hand-synced fixed array here silently truncated any diagnostic line added to the formatter (the formatter is tested standalone, so nothing caught it).
         box.SetVisible(false);
     }
 
@@ -131,9 +123,21 @@ public sealed class DiagnosticOverlay : IDisposable
     {
         var snapshot = Snapshot();
         var lines = DiagnosticFormatter.FormatLines(snapshot);
-        for (int i = 0; i < labels.Length && i < lines.Length; i++)
+        while (labels.Count < lines.Length)
+        {
+            var label = Gtk.Label.New("");
+            label.SetXalign(0);
+            labels.Add(label);
+            box.Append(label);
+        }
+        for (int i = 0; i < lines.Length; i++)
         {
             labels[i].SetLabel(lines[i]);
+        }
+        // The formatter's line count is fixed per build, but clear any leftovers defensively rather than showing a stale line.
+        for (int i = lines.Length; i < labels.Count; i++)
+        {
+            labels[i].SetLabel("");
         }
     }
 
