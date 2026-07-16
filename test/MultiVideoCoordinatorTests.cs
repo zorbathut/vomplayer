@@ -1317,6 +1317,57 @@ public class MultiVideoCoordinatorTests
     }
 
     [Test]
+    public void EnteringIsolatedModeReleasesALatchedCatchupSpeed()
+    {
+        // The isolated-mode gate must not just stop correcting — it must release an in-flight ±5% speed nudge, or the user-controlled stream keeps drifting at 0.95x forever.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.SetSelected(null);  // offset captured = 0
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 10.2;  // drift 0.2 → latched catch-up
+        h.Vm.ApplyDriftCorrection();
+        Assert.That(h.SecondaryPlayback!.SetSpeedCalls, Is.EqualTo(new[] { 0.95 }).Within(1e-9));
+
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.Vm.ApplyDriftCorrection();  // isolated gate → ResetSecondarySpeed
+        Assert.That(h.SecondaryPlayback!.SetSpeedCalls, Is.EqualTo(new[] { 0.95, 1.0 }).Within(1e-9), "the latched nudge must be released on entering isolated mode");
+    }
+
+    [Test]
+    public void GetSyncDiagnosticReportsPendingOffsetAndIsolatedMode()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        // A Secondary FileLoaded clears the offset to pending — the snapshot must express that as null offset AND null drift (not a bogus zero).
+        h.SecondaryPlayback!.RaiseFileLoaded();
+        var pending = h.Vm.GetSyncDiagnostic();
+        Assert.That(pending.Enabled, Is.True);
+        Assert.That(pending.TargetOffsetSeconds, Is.Null);
+        Assert.That(pending.DriftSeconds, Is.Null);
+        Assert.That(pending.Mode, Is.EqualTo("approach"));
+
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        Assert.That(h.Vm.GetSyncDiagnostic().Mode, Is.EqualTo("isolated"));
+    }
+
+    [Test]
+    public void DisablePipUnsubscribesTheOldSecondaryFileLoadedHandler()
+    {
+        // The coordinator subscribes Secondary.Playback.FileLoaded → ClearTargetOffset at EnablePip. If DisablePip left that handler attached, a stale event from the old session's playback would silently null a FRESH session's offset.
+        using var h = new Harness();
+        h.EnablePip();
+        var oldSecondary = h.SecondaryPlayback!;
+        h.Vm.DisablePip();
+        h.EnablePip();  // fresh session; offset = 0 (non-null)
+
+        oldSecondary.RaiseFileLoaded();
+
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Not.Null, "a stale FileLoaded from the disabled session must not clear the fresh session's offset");
+    }
+
+    [Test]
     public void SyncPlayPauseWithFilelessPrimaryDrivesFromLoadedSecondary()
     {
         // Files dropped only onto the PiP secondary is a supported flow. In sync mode, Space must be able to both start AND pause the loaded stream: the flip target must derive from a stream whose play state can actually change. A fileless Primary's IsPaused never flips (SetPaused's Duration gate is a no-op), so deriving the target blindly from Primary computes the same value forever — Space could start the Secondary but never pause it.
