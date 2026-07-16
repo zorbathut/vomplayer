@@ -423,6 +423,9 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
         }
         surface?.Dispose();
         surface = null;
+        // Reset the render gates for a potential re-realize (GTK can unrealize on hide). A fresh subsurface must not render before mpv signals new content — an early geometry-driven render would commit an undefined-alpha buffer, the exact punch-through the mpvUpdateSignaled gate exists for — and FirstFrameRendered must be able to fire again for the new surface.
+        Interlocked.Exchange(ref mpvUpdateSignaled, 0);
+        firstFrameRendered = false;
     }
 
     public void Dispose()
