@@ -61,6 +61,8 @@ public sealed class PipController : IDisposable
     private int pipResizeStartWidth;
     private double pipGestureOverlayStartX;
     private double pipGestureOverlayStartY;
+    // False when the drag-begin origin capture failed (widget unparented / TranslateCoordinates false); update handlers bail so deltas are never computed against a previous gesture's stale origin.
+    private bool pipGestureOriginValid;
 
     // Coalescer for the post-ApplyPipLayout geometry refresh. ApplyPipLayout fires per drag-update event (potentially many times per frame); we only need one refresh per frame.
     private bool pipGeometryRefreshScheduled;
@@ -553,7 +555,7 @@ public sealed class PipController : IDisposable
             pipMoveClaimed = true;
             sender.SetState(Gtk.EventSequenceState.Claimed);
         }
-        if (!TryGetGesturePointerInOverlay(sender, args.OffsetX, args.OffsetY, out double overlayX, out double overlayY))
+        if (!pipGestureOriginValid || !TryGetGesturePointerInOverlay(sender, args.OffsetX, args.OffsetY, out double overlayX, out double overlayY))
         {
             return;
         }
@@ -591,7 +593,7 @@ public sealed class PipController : IDisposable
         {
             return;
         }
-        if (!TryGetGesturePointerInOverlay(sender, args.OffsetX, args.OffsetY, out double overlayX, out double overlayY))
+        if (!pipGestureOriginValid || !TryGetGesturePointerInOverlay(sender, args.OffsetX, args.OffsetY, out double overlayX, out double overlayY))
         {
             return;
         }
@@ -646,6 +648,7 @@ public sealed class PipController : IDisposable
     // Capture the gesture's press point translated into videoOverlay-local coordinates. videoOverlay is a stationary common ancestor of every widget the PiP gestures attach to, so its coordinate space is invariant under the moves we apply during the drag.
     private void TryCaptureGestureStartInOverlay(Gtk.GestureDrag sender)
     {
+        pipGestureOriginValid = false;
         sender.GetStartPoint(out double localX, out double localY);
         var widget = sender.GetWidget();
         if (widget == null)
@@ -656,6 +659,11 @@ public sealed class PipController : IDisposable
         {
             pipGestureOverlayStartX = overlayX;
             pipGestureOverlayStartY = overlayY;
+            pipGestureOriginValid = true;
+        }
+        else
+        {
+            Console.Error.WriteLine("[vompl] pip: drag-origin capture failed (widget unparented mid-gesture?); ignoring this drag");
         }
     }
 
