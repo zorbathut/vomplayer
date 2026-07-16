@@ -28,7 +28,7 @@ public sealed partial class MainWindow
                 var file = await dialog.OpenAsync(this);
                 path = file?.GetPath();
             }
-            catch (GLib.GException ex) when (IsDialogDismissed(ex))
+            catch (GLib.GException ex) when (Util.GtkDialogError.IsDismissed(ex))
             {
                 return;
             }
@@ -97,7 +97,7 @@ public sealed partial class MainWindow
                 var file = await dialog.SaveAsync(this);
                 path = file?.GetPath();
             }
-            catch (GLib.GException ex) when (IsDialogDismissed(ex))
+            catch (GLib.GException ex) when (Util.GtkDialogError.IsDismissed(ex))
             {
                 return;
             }
@@ -149,11 +149,4 @@ public sealed partial class MainWindow
         return dialog;
     }
 
-    // Gtk.FileDialog.OpenAsync/SaveAsync throw a GException (domain "gtk-dialog-error", code DISMISSED)
-    // when the user closes without choosing — the one quiet "no selection" case. Mirrors
-    // FilePickerGtk.IsDismissed; any other GException is a real failure and falls through to report.
-    private static bool IsDialogDismissed(GLib.GException ex)
-    {
-        return ex.Message != null && ex.Message.Contains("Dismissed", StringComparison.OrdinalIgnoreCase);
-    }
 }

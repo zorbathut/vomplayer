@@ -61,15 +61,10 @@ public sealed class FilePickerGtk : IFilePicker
             var file = await dialog.OpenAsync(parent);
             return file?.GetPath();
         }
-        catch (GLib.GException ex) when (IsDismissed(ex))
+        catch (GLib.GException ex) when (Util.GtkDialogError.IsDismissed(ex))
         {
+            // User closed without selecting (gtk-dialog-error / DISMISSED) — the one quiet "no file" case; any other GException is a real failure and propagates.
             return null;
         }
-    }
-
-    // Gtk.FileDialog.OpenAsync throws a GException with domain="gtk-dialog-error" and code=2 (GTK_DIALOG_ERROR_DISMISSED) when the user closes without selecting. Only this specific cause maps to a "no file" return; any other GException is a real failure and propagates.
-    private static bool IsDismissed(GLib.GException ex)
-    {
-        return ex.Message != null && ex.Message.Contains("Dismissed", StringComparison.OrdinalIgnoreCase);
     }
 }
