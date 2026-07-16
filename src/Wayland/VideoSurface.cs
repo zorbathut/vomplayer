@@ -42,11 +42,11 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
     private VrrRange? lastPublishedOutputVrrRange;
     private bool hasPublishedOutputVrrRange;
 
-    // wp_color_management_v1 wire values for the two descriptions we stage. This is the policy home the ABI rule demands: the shim receives finished numbers and only runs the protocol handshake.
+    // wp_color_management_v1 wire values for the two descriptions we stage. This is the policy home the ABI rule demands: the shim receives finished numbers and only runs the protocol handshake. PQ reuses HdrClassifier's constant so each wire value has one authority.
     private const uint PrimariesSrgb = 1;
     private const uint PrimariesBt2020 = 6;
     private const uint TfGamma22 = 2;
-    private const uint TfSt2084Pq = 11;
+    private const uint TfSt2084Pq = HdrClassifier.TransferFunctionSt2084Pq;
     private const uint RenderIntentPerceptual = 0;
 
     // Stages an explicit image description on the subsurface: PQ/BT.2020 for enable=true, GAMMA22/BT.709 SDR for enable=false. The shim does NOT commit — the next mpv-driven Swap flushes it alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor. Returns 0 on success; -1 if the compositor does not advertise wp_color_manager_v1 or the subsurface is not yet realized. Caller must only enable mpv PQ targeting when this returns 0 with enable=true, else PQ-encoded output would hit an SDR-tagged surface. For enable=false, an SDR tag is preferable to untagged because per wp_color_management_v1 spec untagged surface handling is compositor-defined; on KWin with an HDR output present that compositor-defined handling blows out gamma22-encoded SDR output catastrophically (see hdr_helper.c). On compositors without wp_color_manager_v1 the surface stays untagged and -1 is returned — most compositors handle untagged-as-sRGB sensibly, so this is logged but tolerated.

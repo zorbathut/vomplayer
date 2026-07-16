@@ -470,7 +470,7 @@ static int ensure_globals(struct wl_display *display)
 }
 
 //---------------------------------------------------------------
-// Parametric PQ/BT.2020 image description builder (shared).
+// Parametric image description builder (params supplied by C#).
 //---------------------------------------------------------------
 
 struct desc_state
@@ -566,13 +566,25 @@ static struct wp_image_description_v1 *build_description(struct wl_display *disp
     return desc;
 }
 
-// Cache of built descriptions keyed by exact params, per surface. Two slots because the C# policy currently sends exactly two kinds (one HDR, one SDR); a hit skips re-running the ready/failed handshake on every toggle. Eviction is deliberately refused rather than implemented: destroying an evicted proxy that is still attached to cm_surface is untested territory, and with two slots and two kinds it can never be needed. If C# ever sends a third distinct params set (per-source mastering metadata is the tracked candidate), grow the cache alongside that change.
+// Cache of built descriptions keyed by description-defining params, per surface. Two slots because the C# policy currently sends two kinds (one HDR, one SDR); a hit skips re-running the ready/failed handshake on every toggle. On a third distinct params set (per-source HDR mastering metadata is the tracked candidate) a slot is evicted round-robin and its proxy destroyed — explicitly spec-blessed: "Destroying a wp_image_description_v1 object has no side-effects, not even if a wp_color_management_surface_v1.set_image_description has not yet been followed by a wl_surface.commit."
 struct desc_cache_entry
 {
     int valid;
     struct vompl_image_description_params params;
     struct wp_image_description_v1 *desc;
 };
+
+// render_intent is deliberately excluded from the key: it's an argument to set_image_description (applied at set time), not a property of the built description. Field-wise compare also sidesteps any memcmp-vs-padding question.
+static int desc_params_equal(const struct vompl_image_description_params *a, const struct vompl_image_description_params *b)
+{
+    return a->primaries_named == b->primaries_named
+        && a->tf_named == b->tf_named
+        && a->with_mastering_primaries == b->with_mastering_primaries
+        && a->m_rx == b->m_rx && a->m_ry == b->m_ry
+        && a->m_gx == b->m_gx && a->m_gy == b->m_gy
+        && a->m_bx == b->m_bx && a->m_by == b->m_by
+        && a->m_wx == b->m_wx && a->m_wy == b->m_wy;
+}
 
 //---------------------------------------------------------------
 // Entry point 1: subsurface + EGL surface + HDR (used by the Wayland path).
@@ -599,6 +611,7 @@ struct vompl_video_surface
     EGLSurface egl_surface;
     struct wp_color_management_surface_v1 *cm_surface;
     struct desc_cache_entry desc_cache[2];
+    int desc_cache_next_evict;
     int buffer_w;
     int buffer_h;
 
@@ -944,7 +957,7 @@ int vompl_video_surface_set_image_description(struct vompl_video_surface *vs, co
     struct desc_cache_entry *slot = NULL;
     for (int i = 0; i < 2; i++)
     {
-        if (vs->desc_cache[i].valid && memcmp(&vs->desc_cache[i].params, p, sizeof(*p)) == 0)
+        if (vs->desc_cache[i].valid && desc_params_equal(&vs->desc_cache[i].params, p))
         {
             slot = &vs->desc_cache[i];
             break;
@@ -962,14 +975,19 @@ int vompl_video_surface_set_image_description(struct vompl_video_surface *vs, co
         }
         if (!slot)
         {
-            fprintf(stderr, "[vompl] set_image_description: both cache slots hold different params; refusing to evict a possibly-attached description (see desc_cache_entry comment)\n");
-            return -1;
+            // Round-robin eviction; destroying the evicted proxy is safe even if it's the surface's currently-set description (see desc_cache_entry comment for the spec citation). Build the replacement FIRST so a build failure leaves the cache intact.
+            slot = &vs->desc_cache[vs->desc_cache_next_evict];
+            vs->desc_cache_next_evict = (vs->desc_cache_next_evict + 1) % 2;
         }
         struct wp_image_description_v1 *desc = build_description(vs->display, p);
         if (!desc)
         {
             fprintf(stderr, "[vompl] set_image_description: build failed (primaries=%u tf=%u)\n", p->primaries_named, p->tf_named);
             return -1;
+        }
+        if (slot->valid)
+        {
+            wp_image_description_v1_destroy(slot->desc);
         }
         slot->params = *p;
         slot->desc = desc;
