@@ -30,14 +30,8 @@ public class UserConfigTests
         var path = Path.Combine(tempDir!, "config.toml");
         var cfg = UserConfig.LoadOrDefault(path);
 
-        // Hotkey defaults reproduce the pre-customization built-in keymap.
-        Assert.That(cfg.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
-        Assert.That(cfg.Hotkeys.Quit, Is.EqualTo(new[] { "<Primary>Q" }));
-        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
-        Assert.That(cfg.Hotkeys.ToggleFullscreen, Is.EqualTo(new[] { "f", "<Shift>F", "F11", "MouseDoubleClick1" }));
-        Assert.That(cfg.Hotkeys.ExitFullscreen, Is.EqualTo(new[] { "Escape" }));
-        Assert.That(cfg.Hotkeys.ToggleDiagnosticOverlay, Is.Empty);
-        Assert.That(cfg.Hotkeys.ShowPreferences, Is.Empty);
+        // No file → no overrides. The effective keymap defaults live solely in HotkeyMap.Default(), applied when FromTomlForm sees no key — see FreshConfigYieldsFullDefaultKeymapIncludingSecondaryBindings.
+        Assert.That(cfg.Hotkeys, Is.Empty);
         // Steady state for a fresh install: no file is written. The user creates one by hand or the preferences dialog writes one explicitly.
         Assert.That(File.Exists(path), Is.False);
     }
@@ -53,10 +47,10 @@ public class UserConfigTests
             "toggle_fullscreen = [\"<Primary>F\"]\n");
 
         var cfg = UserConfig.LoadOrDefault(path);
-        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "p" }));
-        Assert.That(cfg.Hotkeys.ToggleFullscreen, Is.EqualTo(new[] { "<Primary>F" }));
-        // Keys not mentioned in the file fall back to the POCO default — touching one binding shouldn't reset the rest.
-        Assert.That(cfg.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
+        Assert.That(cfg.Hotkeys["play_pause"], Is.EqualTo(new[] { "p" }));
+        Assert.That(cfg.Hotkeys["toggle_fullscreen"], Is.EqualTo(new[] { "<Primary>F" }));
+        // Keys not mentioned in the file are simply absent here; falling back to defaults for them is HotkeyMap.FromTomlForm's job, so touching one binding doesn't reset the rest.
+        Assert.That(cfg.Hotkeys.ContainsKey("open"), Is.False);
     }
 
     [Test]
@@ -69,7 +63,7 @@ public class UserConfigTests
 
         var cfg = UserConfig.LoadOrDefault(path);
         Assert.That(cfg.Hotkeys, Is.Not.Null);
-        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
+        Assert.That(cfg.Hotkeys, Is.Empty);
     }
 
     [Test]
@@ -81,7 +75,7 @@ public class UserConfigTests
         File.WriteAllText(path, "[hotkeys]\nplay_pause = []\n");
 
         var cfg = UserConfig.LoadOrDefault(path);
-        Assert.That(cfg.Hotkeys.PlayPause, Is.Empty);
+        Assert.That(cfg.Hotkeys["play_pause"], Is.Empty);
     }
 
     [Test]
@@ -94,8 +88,8 @@ public class UserConfigTests
 
         var cfg = UserConfig.LoadOrDefault(path);
 
-        // Defaults apply, app doesn't crash.
-        Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
+        // Defaults apply (no overrides survive the rotation), app doesn't crash.
+        Assert.That(cfg.Hotkeys, Is.Empty);
         // Original path is gone — the broken file was rotated.
         Assert.That(File.Exists(path), Is.False);
         // Exactly one .bak was produced, and its contents are the original broken text (preserved verbatim for the user to recover).
@@ -123,7 +117,7 @@ public class UserConfigTests
 
                 var cfg = UserConfig.LoadOrDefault(path);
 
-                Assert.That(cfg.Hotkeys.PlayPause, Is.EqualTo(new[] { "space" }));
+                Assert.That(cfg.Hotkeys, Is.Empty);
             }
             finally
             {
@@ -174,8 +168,8 @@ public class UserConfigTests
 
         var reloaded = UserConfig.LoadOrDefault(path);
         Assert.That(reloaded.Application.OpenInNewWindow, Is.True);
-        // Hotkey defaults survive a setting-only save.
-        Assert.That(reloaded.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
+        // A settings-only save leaves the hotkeys section untouched (empty → HotkeyMap defaults apply downstream).
+        Assert.That(reloaded.Hotkeys, Is.Empty);
     }
 
     [Test]
@@ -261,16 +255,57 @@ public class UserConfigTests
         Directory.CreateDirectory(tempDir!);
 
         var cfg = new UserConfig();
-        cfg.Hotkeys.PlayPause = new() { "p", "<Primary>space" };
-        cfg.Hotkeys.ToggleDiagnosticOverlay = new() { "<Primary>D" };
+        cfg.Hotkeys["play_pause"] = new() { "p", "<Primary>space" };
+        cfg.Hotkeys["toggle_diagnostic_overlay"] = new() { "<Primary>D" };
         cfg.Save(path);
 
         Assert.That(File.Exists(path), Is.True);
 
         var reloaded = UserConfig.LoadOrDefault(path);
-        Assert.That(reloaded.Hotkeys.PlayPause, Is.EqualTo(new[] { "p", "<Primary>space" }));
-        Assert.That(reloaded.Hotkeys.ToggleDiagnosticOverlay, Is.EqualTo(new[] { "<Primary>D" }));
-        // Untouched keys round-trip from their defaults.
-        Assert.That(reloaded.Hotkeys.Open, Is.EqualTo(new[] { "<Primary>O" }));
+        Assert.That(reloaded.Hotkeys["play_pause"], Is.EqualTo(new[] { "p", "<Primary>space" }));
+        Assert.That(reloaded.Hotkeys["toggle_diagnostic_overlay"], Is.EqualTo(new[] { "<Primary>D" }));
+        // Keys never written stay absent through the round-trip.
+        Assert.That(reloaded.Hotkeys.ContainsKey("open"), Is.False);
+    }
+
+    [Test]
+    public void ProductionHotkeysRoundTripPreservesEveryAction()
+    {
+        // The full production save→load path: HotkeyMap → ToTomlForm → UserConfig.Save → LoadOrDefault → FromTomlForm. This is the layer a fixed-property [hotkeys] POCO used to silently truncate to its seven known actions — customized bindings for every action must survive a restart.
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+
+        var map = HotkeyMap.Default();
+        map.Set(HotkeyAction.VolumeUp, new Trigger[] { Trigger.MakeKey((uint)Gdk.Constants.KEY_plus, 0) });
+        map.Set(HotkeyAction.ToggleMute, new Trigger[] { Trigger.MakeKey((uint)Gdk.Constants.KEY_m, Gdk.ModifierType.ControlMask) });
+        map.Set(HotkeyAction.SeekForward10, Array.Empty<Trigger>());
+
+        var cfg = new UserConfig();
+        cfg.Hotkeys = map.ToTomlForm();
+        cfg.Save(path);
+
+        var reloaded = UserConfig.LoadOrDefault(path);
+        var warnings = new List<string>();
+        var roundTripped = HotkeyMap.FromTomlForm(reloaded.Hotkeys, warnings.Add);
+        Assert.That(warnings, Is.Empty);
+        foreach (var action in HotkeyMap.AllActions)
+        {
+            Assert.That(roundTripped.Get(action), Is.EqualTo(map.Get(action)), $"bindings for {action} did not survive the production round-trip");
+        }
+    }
+
+    [Test]
+    public void FreshConfigYieldsFullDefaultKeymapIncludingSecondaryBindings()
+    {
+        // A missing config file must produce HotkeyMap.Default() verbatim. Regression guard for the POCO-defaults drift where a stale ["space"] copy of the play_pause default shadowed the real space+k pair on every load.
+        var path = Path.Combine(tempDir!, "config.toml");
+        var cfg = UserConfig.LoadOrDefault(path);
+        var map = HotkeyMap.FromTomlForm(cfg.Hotkeys, _ => { });
+        var expected = HotkeyMap.Default();
+        foreach (var action in HotkeyMap.AllActions)
+        {
+            Assert.That(map.Get(action), Is.EqualTo(expected.Get(action)), $"default bindings for {action} diverged");
+        }
+        Assert.That(map.Get(HotkeyAction.PlayPause), Has.Count.EqualTo(2));
     }
 }

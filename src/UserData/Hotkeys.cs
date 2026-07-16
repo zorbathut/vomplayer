@@ -341,8 +341,8 @@ public sealed class HotkeyMap
         return m;
     }
 
-    // Round-trip representation for TOML: action name (snake_case) → list of trigger strings. Unknown trigger strings are dropped during load (logged by UserConfig); unknown action names are ignored. Action keys not present in the file fall back to the default — so a partial config doesn't reset unrelated keys.
-    public IReadOnlyDictionary<string, List<string>> ToTomlForm()
+    // Round-trip representation for TOML: action name (snake_case) → list of trigger strings. Unknown trigger strings are dropped during load (logged by UserConfig); unknown action names are ignored. Action keys not present in the file fall back to the default — so a partial config doesn't reset unrelated keys. Returns the concrete Dictionary so it can be assigned to UserConfig.Hotkeys directly.
+    public Dictionary<string, List<string>> ToTomlForm()
     {
         var dict = new Dictionary<string, List<string>>();
         foreach (var action in AllActions)

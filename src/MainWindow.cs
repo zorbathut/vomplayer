@@ -133,7 +133,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         this.userConfig = userConfig;
         this.configPath = configPath;
         // Derive the runtime keymap from the config now that we're past gtk_init. Trigger parsing logs and skips bad entries rather than aborting load — a single typo in config.toml shouldn't lock the user out of every other binding.
-        this.hotkeys = HotkeyMap.FromTomlForm(userConfig.Hotkeys.ToDictionary(), m => Console.Error.WriteLine($"[vompl] {m}"));
+        this.hotkeys = HotkeyMap.FromTomlForm(userConfig.Hotkeys, m => Console.Error.WriteLine($"[vompl] {m}"));
 
         SetApplication(app);
         brand = Random.Shared.NextDouble() < 0.01 ? "VomplAyer" : "Vomplayer";
@@ -759,7 +759,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     internal void ApplyPreferences(HotkeyMap map, bool openInNewWindow, ThemeMode theme, double chapterSeekPreroll)
     {
         hotkeys = map;
-        userConfig.Hotkeys = UserConfig.HotkeysSection.FromDictionary(map.ToTomlForm());
+        userConfig.Hotkeys = map.ToTomlForm();
         userConfig.Application.OpenInNewWindow = openInNewWindow;
         userConfig.Application.Theme = ThemeModeParser.ToConfigString(theme);
         userConfig.Application.ChapterSeekPrerollSeconds = chapterSeekPreroll;
