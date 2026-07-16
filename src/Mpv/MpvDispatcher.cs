@@ -24,7 +24,7 @@ internal sealed class MpvDispatcher : IDisposable
     private int disposed;
 
     public event Action? FileLoaded;
-    public event Action<int>? FileEnded;
+    public event Action? FileEnded;
     public event Action<PropertyChange>? PropertyChanged;
     public event Action<LogMessage>? LogMessageReceived;
     public event Action? Shutdown;
@@ -101,9 +101,9 @@ internal sealed class MpvDispatcher : IDisposable
         FileLoaded?.Invoke();
     }
 
-    private void OnClientFileEnded(int reason)
+    private void OnClientFileEnded()
     {
-        FileEnded?.Invoke(reason);
+        FileEnded?.Invoke();
     }
 
     private void OnClientPropertyChanged(PropertyChange change)

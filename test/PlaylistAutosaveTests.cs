@@ -87,7 +87,6 @@ public partial class PlaylistAutosaveTests
 
 #pragma warning disable CS0067 // events declared to satisfy IPlayback; tests don't fire them
         public event Action? FileLoaded;
-        public event Action<int>? FileEnded;
         public event Action? TracksReloaded;
         public event Action<bool>? SourceHdrChanged;
         public event Action<bool>? IsSourceFpsTrustedChanged;

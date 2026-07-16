@@ -65,7 +65,6 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     string? MediaTitle { get; }
 
     event Action? FileLoaded;
-    event Action<int>? FileEnded;
     // Fires once per dispatcher-level track-list re-walk, AFTER the three per-kind properties (VideoTracks / AudioTracks / SubtitleTracks) have been updated on the main thread. Distinct from PropertyChanged on the lists individually because consumers (like the directory-preferences applier) need an "all three are settled" signal — relying on PropertyChanged for one specific kind misses files where that kind is empty (no notification fires for an empty→empty update due to the dedup gate). FileLoaded alone isn't enough either: FileLoaded fires before the dispatcher has finished re-walking and pushing the new lists.
     event Action? TracksReloaded;
     // Fires on transitions of IsSourceHdr (PQ/HLG ↔ neither). VideoContext subscribes to drive its ApplyHdrPolicy.

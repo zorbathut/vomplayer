@@ -77,7 +77,7 @@ internal sealed class MpvClient : IDisposable
 
     public event Action? EventAvailable;
     public event Action? FileLoaded;
-    public event Action<int>? FileEnded;
+    public event Action? FileEnded;
     public event Action<PropertyChange>? PropertyChanged;
     public event Action<LogMessage>? LogMessageReceived;
     public event Action? Shutdown;
@@ -225,7 +225,8 @@ internal sealed class MpvClient : IDisposable
                 FileLoaded?.Invoke();
                 break;
             case MpvEventId.EndFile:
-                FileEnded?.Invoke(evt.Error);
+                // No payload: the end-file reason lives in the mpv_event_end_file struct behind evt.Data (NOT evt.Error), and nothing consumes it — with keep-open=yes natural EOF doesn't even fire this event, so eof-reached is the signal consumers actually use. Marshal the struct here if a consumer for the reason ever appears.
+                FileEnded?.Invoke();
                 break;
             case MpvEventId.Shutdown:
                 Shutdown?.Invoke();

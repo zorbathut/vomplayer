@@ -186,7 +186,6 @@ public sealed partial class Playback : ObservableObject, IPlayback
     }
 
     public event Action? FileLoaded;
-    public event Action<int>? FileEnded;
     public event Action? TracksReloaded;
     // Fires on the main thread (via the same postToMainThread pump as other mpv property changes) whenever the source's HDR status flips. Reset to false on LoadFile and FileEnded so every file starts in a known SDR-safe state; the observer upgrades to true once mpv reports a `pq` or `hlg` gamma.
     public event Action<bool>? SourceHdrChanged;
@@ -215,7 +214,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         // Events fire on the dispatcher thread (post-DrainEvents). Marshal onto the UI main thread before touching ObservableObject properties.
         dispatcher.PropertyChanged += c => postToMainThread(() => OnMpvPropertyChanged(c));
         dispatcher.FileLoaded += () => postToMainThread(OnMpvFileLoaded);
-        dispatcher.FileEnded += e => postToMainThread(() => OnMpvFileEnded(e));
+        dispatcher.FileEnded += () => postToMainThread(OnMpvFileEnded);
         dispatcher.LogMessageReceived += OnDispatcherLogMessage;
         dispatcher.Shutdown += () => postToMainThread(OnMpvShutdown);
     }
@@ -1012,7 +1011,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         FileLoaded?.Invoke();
     }
 
-    private void OnMpvFileEnded(int reason)
+    private void OnMpvFileEnded()
     {
         // Reset HDR state back to SDR on every file-end, including error-path ends where no new file will follow. Keeps the subsurface from lingering in a PQ-tagged state after playback stops.
         UpdateSourceHdr(null);
@@ -1020,7 +1019,6 @@ public sealed partial class Playback : ObservableObject, IPlayback
         UpdateChapters(Array.Empty<MediaChapter>());
         // Symmetry with the LoadFile reset — see comment there. Stale eof-reached carry-over could otherwise survive past a file-end into whatever loads next.
         UpdateIsEofReached(false);
-        FileEnded?.Invoke(reason);
     }
 
     private void OnMpvShutdown()
@@ -1036,7 +1034,6 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
         // The `disposed` flag above gates OnMpvPropertyChanged, the one main-thread handler that itself calls dispatcher.Post (via ReloadTracks/ReloadChapters). Every OTHER main-thread handler the dispatcher feeds (FileLoaded, FileEnded, Shutdown, LogMessageReceived) only reaches dispatcher.Post indirectly via downstream subscribers — VideoContext.OnPlaybackFileLoaded → SetVideo → dispatcher.Post, etc. Nulling our event fields here BEFORE dispatcher.Dispose is what makes those paths safe: a forwarded handler that lands on the main thread post-Dispose finds the event field null, the invoke is a no-op, and the subscriber that would have called dispatcher.Post never runs. If a future event field gets added without being nulled here, the race resurfaces in that new path.
         FileLoaded = null;
-        FileEnded = null;
         TracksReloaded = null;
         SourceHdrChanged = null;
         IsSourceFpsTrustedChanged = null;

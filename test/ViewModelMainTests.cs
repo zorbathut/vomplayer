@@ -74,7 +74,6 @@ public partial class ViewModelMainTests
         private string? mediaTitle;
 
         public event Action? FileLoaded;
-        public event Action<int>? FileEnded;
         public event Action? TracksReloaded;
         public event Action<bool>? SourceHdrChanged;
         public event Action<bool>? IsSourceFpsTrustedChanged;
@@ -232,10 +231,6 @@ public partial class ViewModelMainTests
             FileLoaded?.Invoke();
         }
 
-        public void RaiseFileEnded(int reason)
-        {
-            FileEnded?.Invoke(reason);
-        }
 
         public void RaiseTracksReloaded()
         {

@@ -76,7 +76,6 @@ public partial class VideoContextTests
         private double? estimatedVfFps;
 
         public event Action? FileLoaded;
-        public event Action<int>? FileEnded;
         public event Action? TracksReloaded;
         public event Action<bool>? SourceHdrChanged;
         public event Action<bool>? IsSourceFpsTrustedChanged;
@@ -122,7 +121,6 @@ public partial class VideoContextTests
         public void ClearFrameMultiplier() { ClearFrameMultiplierCalls++; }
 
         public void RaiseFileLoaded() { FileLoaded?.Invoke(); }
-        public void RaiseFileEnded(int reason) { FileEnded?.Invoke(reason); }
         public void RaiseTracksReloaded() { TracksReloaded?.Invoke(); }
         public void RaiseSourceHdrChanged(bool isHdr) { IsSourceHdr = isHdr; SourceHdrChanged?.Invoke(isHdr); }
         public void RaiseIsSourceFpsTrustedChanged(bool trusted) { IsSourceFpsTrusted = trusted; IsSourceFpsTrustedChanged?.Invoke(trusted); }
