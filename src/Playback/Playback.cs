@@ -768,7 +768,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
     // Internal so PlaybackTests can drive snapshot replacement without spinning up mpv's event pump. Sequence-equality dedup keeps PropertyChanged from firing for spurious track-list/count notifications that don't actually change the per-kind subset (e.g., a sub track add/remove also fires count, which would otherwise re-notify Video and Audio consumers for nothing).
     internal void UpdateVideoTracks(IReadOnlyList<MediaTrack> snapshot)
     {
-        if (TracksEqual(VideoTracks, snapshot))
+        if (ListsEqual(VideoTracks, snapshot))
         {
             return;
         }
@@ -777,7 +777,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     internal void UpdateAudioTracks(IReadOnlyList<MediaTrack> snapshot)
     {
-        if (TracksEqual(AudioTracks, snapshot))
+        if (ListsEqual(AudioTracks, snapshot))
         {
             return;
         }
@@ -786,14 +786,15 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     internal void UpdateSubtitleTracks(IReadOnlyList<MediaTrack> snapshot)
     {
-        if (TracksEqual(SubtitleTracks, snapshot))
+        if (ListsEqual(SubtitleTracks, snapshot))
         {
             return;
         }
         SubtitleTracks = snapshot;
     }
 
-    private static bool TracksEqual(IReadOnlyList<MediaTrack> a, IReadOnlyList<MediaTrack> b)
+    // Element-wise equality over record lists (MediaTrack / MediaChapter both have value semantics). Shared by the Update* dedup gates.
+    private static bool ListsEqual<T>(IReadOnlyList<T> a, IReadOnlyList<T> b) where T : IEquatable<T>
     {
         if (a.Count != b.Count)
         {
@@ -801,7 +802,7 @@ public sealed partial class Playback : ObservableObject, IPlayback
         }
         for (int i = 0; i < a.Count; i++)
         {
-            if (a[i] != b[i])
+            if (!a[i].Equals(b[i]))
             {
                 return false;
             }
@@ -861,27 +862,11 @@ public sealed partial class Playback : ObservableObject, IPlayback
     // Internal so PlaybackTests can drive snapshot replacement without spinning up mpv. Same sequence-equality dedup pattern as UpdateVideoTracks et al — empty→empty and identical-list re-fires are suppressed so PropertyChanged consumers don't redraw for nothing.
     internal void UpdateChapters(IReadOnlyList<MediaChapter> snapshot)
     {
-        if (ChaptersEqual(Chapters, snapshot))
+        if (ListsEqual(Chapters, snapshot))
         {
             return;
         }
         Chapters = snapshot;
-    }
-
-    private static bool ChaptersEqual(IReadOnlyList<MediaChapter> a, IReadOnlyList<MediaChapter> b)
-    {
-        if (a.Count != b.Count)
-        {
-            return false;
-        }
-        for (int i = 0; i < a.Count; i++)
-        {
-            if (a[i] != b[i])
-            {
-                return false;
-            }
-        }
-        return true;
     }
 
     // Internal so PlaybackTests can drive the property without spinning up mpv. The ObservableProperty setter already dedups same-value writes, so the gate here is purely for documentation symmetry with the Update*Tracks methods / UpdateHwdecCurrent.
