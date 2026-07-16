@@ -201,10 +201,14 @@ public sealed class UrlLoadCoordinator : IDisposable
         }
         catch (Exception ex)
         {
-            // Show only if we're still the active load — a stale download's failure shouldn't pop up after the user has moved on.
+            // Show the dialog only if we're still the active load — a stale download's failure shouldn't pop up after the user has moved on. But never drop the record entirely: a superseded load's non-cancel failure still goes to stderr for diagnosability.
             if (ReferenceEquals(activeCts, cts))
             {
                 prompt.ShowError("Download failed", ex.Message);
+            }
+            else
+            {
+                Console.Error.WriteLine($"[vompl] superseded URL load for {url} failed: {ex.Message}");
             }
         }
         finally
