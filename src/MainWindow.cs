@@ -304,8 +304,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         motionController.OnMotion += OnWindowPointerMotion;
         AddController(motionController);
 
-        // Click on the video widget routes through the HotkeyMap (default: MouseDoubleClick1 → ToggleFullscreen) AND, on single-press (NPress=1), snaps the active slot to this widget — so when PiP is on, clicking either video focuses it. Button=0 means the gesture fires for any button; OnPressed reads the actual button via GetCurrentButton(). GestureClick delivers `pressed` for each press in a sequence with NPress incrementing — so a single-click action also fires once on the first press of a double-click, an inherent property the user has to live with.
-        AttachClickToFocus(videoWidget, ViewModelMain.VideoSlot.Primary);
+        // Click on the video widget routes through the HotkeyMap (default: MouseDoubleClick1 → ToggleFullscreen). Button=0 means the gesture fires for any button; OnPressed reads the actual button via GetCurrentButton(). GestureClick delivers `pressed` for each press in a sequence with NPress incrementing — so a single-click action also fires once on the first press of a double-click, an inherent property the user has to live with. Clicking a video deliberately does NOT select it as the active slot — selection goes through the stream-selector toolbar only.
+        AttachVideoClickGesture(videoWidget);
 
         // Per-widget drop target on the primary video region. Always routes to Primary regardless of active slot — so a drop on the main video area can't accidentally land in Secondary just because Secondary is currently active. Window-level drop (registered below) is the active-aware fallback for chrome / margin drops.
         var primaryDrop = UriListDropTarget.Create(paths => HandlePrimaryDrop(paths));
@@ -510,15 +510,15 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     }
 
     // Click on the primary video widget. Pure HotkeyMap dispatch — single-click → PlayPause, double-click → ToggleFullscreen. Fires on press for immediate response; the primary has no drag-to-move so there's no conflict with sub-threshold motion (PipController's body click fires on release to defer to its drag gesture).
-    private void AttachClickToFocus(Gtk.Widget widget, ViewModelMain.VideoSlot slot)
+    private void AttachVideoClickGesture(Gtk.Widget widget)
     {
         var clickGesture = Gtk.GestureClick.New();
         clickGesture.Button = 0;
-        clickGesture.OnPressed += (sender, args) => HandleVideoClick(slot, sender, args);
+        clickGesture.OnPressed += (sender, args) => HandleVideoClick(sender, args);
         widget.AddController(clickGesture);
     }
 
-    private void HandleVideoClick(ViewModelMain.VideoSlot slot, Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
+    private void HandleVideoClick(Gtk.GestureClick sender, Gtk.GestureClick.PressedSignalArgs args)
     {
         uint button = sender.GetCurrentButton();
         if (button == 0)
