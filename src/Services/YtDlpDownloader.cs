@@ -257,6 +257,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
 
         var targetDir = cache.DirectoryFor(url);
         // Wipe any prior debris (orphan .part files, half-merged .f137.mp4 / .f140.m4a streams from a yt-dlp crash, manifest-less .ytdl resume state). Without this, FindMediaFileIn could pick up a half-product if the after_move print is missed. The TryGetExistingFile call above already verified there's no completed download to preserve.
+        // Known, accepted race: the per-URL directory has no cross-process lock, so two concurrent downloads of the SAME URL (two open_in_new_window processes, or Primary + PiP rows) can wipe each other's in-progress work here. The loser fails visibly and a retry hits the winner's cache; adding a lock-file protocol was judged not worth it for degradation-not-corruption on a same-URL-twice edge.
         if (Directory.Exists(targetDir))
         {
             try
