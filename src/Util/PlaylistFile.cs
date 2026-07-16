@@ -70,13 +70,9 @@ public static class PlaylistFile
         return items;
     }
 
-    // "scheme://" sniff, mirroring TrackPreferences.IsLocalFilesystemPath's rule: a "://" starting
-    // after position 0 and within the first 10 chars marks a URI scheme (http, https, file, smb, …).
-    // Checked BEFORE Path.IsPathRooted because a "file:///x" URI is not a rooted path and would
-    // otherwise be (wrongly) joined onto baseDirectory.
+    // Checked BEFORE Path.IsPathRooted because a "file:///x" URI is not a rooted path and would otherwise be (wrongly) joined onto baseDirectory.
     private static bool LooksLikeUri(string line)
     {
-        int idx = line.IndexOf("://", StringComparison.Ordinal);
-        return idx > 0 && idx <= 10;
+        return UriShape.LooksLikeUri(line);
     }
 }

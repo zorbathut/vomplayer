@@ -50,12 +50,10 @@ internal static class StartupHelpers
         return result;
     }
 
-    // Resolves a positional arg to an absolute path or URI. Local paths get rooted against the caller's cwd; URIs (scheme://...) are returned unchanged so OpenFile can route them through the URL load path. The scheme check matches TrackPreferences.IsLocalFilesystemPath's shape so the two stay consistent.
+    // Resolves a positional arg to an absolute path or URI. Local paths get rooted against the caller's cwd; URIs are returned unchanged so OpenFile can route them through the URL load path.
     private static string RootRelativePath(string arg, string? cwd)
     {
-        int colonSlashIdx = arg.IndexOf("://", StringComparison.Ordinal);
-        bool looksLikeUri = colonSlashIdx > 0 && colonSlashIdx <= 10;
-        if (looksLikeUri)
+        if (Util.UriShape.LooksLikeUri(arg))
         {
             return arg;
         }

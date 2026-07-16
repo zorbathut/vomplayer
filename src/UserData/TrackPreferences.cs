@@ -101,14 +101,13 @@ public sealed class TrackPreferences : ITrackPreferences
         }
     }
 
-    // Cheap scheme detection — anything that looks like `scheme://...` with the scheme up to ~10 chars is treated as a URI. Catches http://, https://, smb://, ftp://, sftp://, dvd://, bd://, etc. without needing a full URI parser. Bare Windows drive paths (`C:\foo`) survive because the colon isn't followed by `//`. Shared with the per-file resume-position layer in ViewModelMain, which has the same "is this a persistable local path" question.
+    // Inverse of the shared URI sniff (see Util.UriShape). Also used by the per-file resume-position layer in ViewModelMain, which has the same "is this a persistable local path" question.
     public static bool IsLocalFilesystemPath(string? pathOrUri)
     {
         if (string.IsNullOrEmpty(pathOrUri))
         {
             return false;
         }
-        int colonSlashIdx = pathOrUri.IndexOf("://", StringComparison.Ordinal);
-        return colonSlashIdx <= 0 || colonSlashIdx > 10;
+        return !Util.UriShape.LooksLikeUri(pathOrUri);
     }
 }
