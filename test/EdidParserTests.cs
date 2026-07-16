@@ -99,25 +99,33 @@ public class EdidParserTests
     }
 
     [Test]
-    public void Byte4FlagBit0_AddsTo255MaxOnly()
+    public void Byte4FlagBit1_AddsTo255MaxOnly()
     {
-        // flags = 0b01: max +255. Stored max = 0, actual max = 255. (Imagine a 48-255 Hz panel — exotic but valid.)
-        var edid = BuildEdid(2, 0x01, 48, 0);
+        // flags = 0b10: max +255, min untouched (VESA E-EDID 1.4 Table 3.28; kernel drm_edid.h DRM_EDID_RANGE_OFFSET_MAX_VFREQ = bit 1). This is the encoding every real >255 Hz panel emits — modeled here on a 48-360 Hz gaming panel: stored (48, 105) → [48, 360].
+        var edid = BuildEdid(2, 0x02, 48, 105);
         var r = EdidParser.TryGetVrrRange(edid);
         Assert.That(r, Is.Not.Null);
         Assert.That(r!.Value.MinHz, Is.EqualTo(48));
-        Assert.That(r.Value.MaxHz, Is.EqualTo(255));
+        Assert.That(r.Value.MaxHz, Is.EqualTo(360));
     }
 
     [Test]
-    public void Byte4FlagBit1_AddsTo255BothMinAndMax()
+    public void Byte4FlagBits11_AddsTo255BothMinAndMax()
     {
-        // flags = 0b10: both +255. Stored 0/0, actual 255/255 (degenerate; should be rejected for min ≥ max). Test a more realistic 240 Hz panel: stored 30/-15? Actually for a 285 Hz panel that's min 30, max 30, and offset puts both at 285 — also degenerate. Let's use 30/100, both +255 ⇒ 285/355: rejects on > 480? No, 355 < 480, accept. Better realistic: stored (30, 0) with bit 0 only is the simplest. Test bit 1 with 240 Hz: stored (-15, -15) impossible since byte. So: stored (45, -15) with both → 300/240 (min > max, reject). Bit 1 alone realistically appears for panels with min above 255 Hz which essentially don't exist; document the path with a 280-360 Hz synthetic case.
-        var edid = BuildEdid(0, 0x02, 25, 105);
+        // flags = 0b11: both min and max +255 (bit 0 = min offset, bit 1 = max offset, applied independently). Synthetic 280-360 Hz panel: stored (25, 105) → [280, 360].
+        var edid = BuildEdid(0, 0x03, 25, 105);
         var r = EdidParser.TryGetVrrRange(edid);
         Assert.That(r, Is.Not.Null);
         Assert.That(r!.Value.MinHz, Is.EqualTo(280));
         Assert.That(r.Value.MaxHz, Is.EqualTo(360));
+    }
+
+    [Test]
+    public void Byte4FlagBit0Alone_MinOffsetWithoutMaxIsDegenerate()
+    {
+        // flags = 0b01: min +255 only (kernel DRM_EDID_RANGE_OFFSET_MIN_VFREQ = bit 0). With max stored ≤ 255 and un-offset, min ends up above max in every representable case, so this encoding always falls out via the min ≥ max rejection: stored (25, 105) → 280/105 → null.
+        var edid = BuildEdid(0, 0x01, 25, 105);
+        Assert.That(EdidParser.TryGetVrrRange(edid), Is.Null);
     }
 
     [Test]
@@ -144,7 +152,7 @@ public class EdidParserTests
     [Test]
     public void MaxAbove480Rejected()
     {
-        // Stored 25/200 with both +255: 280/455 OK. Stored 25/230 with both +255: 280/485 → rejected.
+        // Stored 25/230 with max +255 (flags 0b10): 25/485 → rejected by the 480 Hz plausibility cap.
         var edid = BuildEdid(0, 0x02, 25, 230);
         Assert.That(EdidParser.TryGetVrrRange(edid), Is.Null);
     }

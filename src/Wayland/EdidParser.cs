@@ -52,18 +52,14 @@ public static class EdidParser
         return null;
     }
 
-    // EDID 1.4 byte-4 vertical-rate offset flag encoding (bits 1:0):
-    //   00 = no offsets, byte 5 = min Hz, byte 6 = max Hz.
-    //   01 = max only +255 (max stored value + 255).
-    //   10 = both min and max +255.
-    //   11 = same as 10 (reserved by the spec but several implementations emit it).
+    // EDID 1.4 byte-4 vertical-rate offset flags (bits 1:0), per VESA E-EDID 1.4 Table 3.28 and the kernel's drm_edid.h (DRM_EDID_RANGE_OFFSET_MIN_VFREQ = bit 0, DRM_EDID_RANGE_OFFSET_MAX_VFREQ = bit 1): bit 1 set ⇒ stored max + 255, bit 0 set ⇒ stored min + 255, applied independently. 0b10 (max only) is what every real >255 Hz panel emits; 0b01 (min only) is degenerate in practice and falls out via the min ≥ max rejection below.
     // Pre-1.4 EDIDs always had byte 4 = 0; if bytes 5 or 6 read 0xFF in that case, the panel was inexpressible — we treat it as malformed and return null rather than silently capping at 255 Hz.
     private static VrrRange? ParseRangeLimits(byte[] edid, int off)
     {
         byte flags = edid[off + 4];
         int verticalFlags = flags & 0b11;
-        int minOffset = verticalFlags >= 0b10 ? 255 : 0;
-        int maxOffset = verticalFlags >= 0b01 ? 255 : 0;
+        int minOffset = (verticalFlags & 0b01) != 0 ? 255 : 0;
+        int maxOffset = (verticalFlags & 0b10) != 0 ? 255 : 0;
         int rawMin = edid[off + 5];
         int rawMax = edid[off + 6];
         if (verticalFlags == 0 && (rawMin == 0xFF || rawMax == 0xFF))
