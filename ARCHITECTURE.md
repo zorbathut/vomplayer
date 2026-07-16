@@ -17,18 +17,25 @@ App code is MIT. libmpv is LGPLv2.1+ (dynamic linking keeps us permissive). This
 ```
 src/
   Program.cs             # entry, arg parsing, Gtk.Application wiring, primary Playback construction, StateDatabase open
+  StartupHelpers.cs      # pure: GApplication flag computation + command-line path/URI resolution
   GLibLogDiag.cs         # g_log_set_writer_func — adds C# stack traces to GLib ERROR/CRITICAL
   Epoxy.cs               # eglGetProcAddress + glGetIntegerv for FBO binding
   LibC.cs                # setlocale(LC_NUMERIC,"C") — mpv refuses non-C LC_NUMERIC
   MainWindow.cs          # code-only GTK4 window: widgets, input controllers, fullscreen / autohide / screensaver, VM <-> view glue
   MainWindow.Menu.cs     # menubar + Gio.SimpleAction registration + per-kind track menus + accel refresh + File→Recent
+  MainWindow.PlaylistIo.cs # File → Open/Save Playlist handlers (file dialogs + clipboard, PlaylistFile format glue)
   PipController.cs       # picture-in-picture controller: secondary widget set, drag/resize, layout, drift-controller tick timer, stream-selector toolbar. MainWindow implements IPipHost to expose the GTK widget tree the controller needs.
-  HotkeysDialog.cs       # preferences UI for binding HotkeyAction → Trigger
+  PreferencesDialog.cs   # preferences UI: HotkeyAction → Trigger bindings plus application settings (theme, open-in-new-window, chapter preroll)
 
   Controls/
+    IVideoHost.cs          # seam over the two render paths; consumers hold one IVideoHost instead of per-path fields
+    VideoHostWayland.cs    # IVideoHost impl: VideoArea placeholder + VideoSurface subsurface
+    VideoHostGlArea.cs     # IVideoHost impl: VideoView (GLArea)
     VideoView.cs           # Gtk.GLArea path: GLArea-owned FBO, mpv renders into it
     VideoArea.cs           # Wayland path: DrawingArea that paints nothing, emits GeometryChanged
     ChapterScrubber.cs     # seek-scale + chapter-mark overlay with click-to-seek
+    SeekScaleController.cs # the seek Gtk.Scale + its press/settle state machine (see "MVVM" below)
+    DownloadStatusOverlay.cs # top-left URL-download progress card, generation-token guarded
     PlaylistPanel.cs       # rebindable list view bound to a VideoContext's Playlist
     DiagnosticOverlay.cs   # 1 Hz read-out of HDR/VRR/hwdec/sync state, gated by Help → Diagnostic Overlay
     DiagnosticFormatter.cs # pure: readout fields → string lines (testable)
@@ -42,14 +49,16 @@ src/
   Playback/
     IPlayback.cs         # interface VideoContext depends on
     Playback.cs          # owns MpvDispatcher; maps mpv events → ObservableObject properties; hwdec transcript ring; HDR transition tracking; frame-multiplier filter; FpsTrustMonitor wiring
-    FpsTrustMonitor.cs   # pure: declared-vs-estimated divergence accumulator with sticky-untrusted state
+    FpsTrustMonitor.cs   # pure: expected-vs-estimated divergence accumulator with sticky-untrusted state (expected = declared × any active fps-filter multiplier, so our own VRR filter never reads as divergence)
 
   Services/
     IFilePicker.cs / FilePickerGtk.cs   # Gtk.FileDialog
     IUrlPrompt.cs / UrlPromptGtk.cs     # Gtk dialog for URL entry + download progress
-    IUrlDownloader.cs                   # interface: probe (--flat-playlist) + download (with progress + cancel)
+    IUrlDownloader.cs                   # interface: availability probe + playlist probe (--flat-playlist) + classify (extractor vs direct) + download (with progress + cancel)
     YtDlpDownloader.cs                  # IUrlDownloader spawning yt-dlp
+    UrlLoadCoordinator.cs               # per-VideoContext yt-dlp lifecycle: prompt/probe flow + race-guarded probe-then-route loads
     UrlDownloadCache.cs                 # XDG-cache-dir-rooted, mtime-based stale sweep
+    FlatpakDetect.cs                    # sandbox sniff (drives the flatpak-spawn yt-dlp invocation)
 
   UserData/
     UserDataPaths.cs       # XDG-aware paths; VOMPL_CONFIG_DIR / VOMPL_STATE_DIR overrides for tests / portable installs
@@ -57,6 +66,7 @@ src/
     Hotkeys.cs             # HotkeyAction enum, Trigger discriminated record (Key | MouseClick), HotkeyMap, defaults
     StateDatabase.cs       # owns the SQLite connection + append-only Migrations[] registry walked vs PRAGMA user_version
     IRecentFiles.cs / RecentFiles.cs              # SQLite-backed; recents + per-file resume position
+    ThemeMode.cs           # theme preference enum + parser (auto/light/dark)
     ISavedPlaylists.cs / SavedPlaylists.cs        # SQLite-backed; autosaved playlist history (single + multi-stream PiP)
     ITrackPreferences.cs / TrackPreferences.cs    # SQLite-backed; per-directory remembered video/audio/subtitle choice
     TrackPreference.cs / TrackMatcher.cs / MediaKind.cs   # pure record + matcher used by both save and apply paths
@@ -67,6 +77,13 @@ src/
     UriListDropTarget.cs    # async text/uri-list drop target; bypasses GTK's FileList portal-mediation (fails in Flatpak sandbox)
     PipLayoutCalc.cs        # pure: PiP region rect + clamp + aspect-locked resize projection
     ChapterHitTest.cs       # pure: scrubber pointer-x → chapter index
+    ChapterStep.cs          # pure: next/prev chapter cue resolution incl. preroll
+    ChapterLabel.cs         # pure: chapter tooltip/label formatting
+    CursorRevealPolicy.cs   # pure: fullscreen cursor-reveal displacement rule
+    ScaleHelpers.cs         # Gtk.Scale gesture tweaks (long-press removal)
+    PlaylistFile.cs         # pure: newline-delimited playlist parse/serialize
+    UriShape.cs             # pure: the one URI-vs-local-path sniffer
+    GtkDialogError.cs       # GException → "user dismissed the dialog?" via GError domain/code
     PlaylistMenuSelector.cs # pure: Recent menu's "10 entries with directory coverage" selection rule
     MediaExtensions.cs      # known video extension set (folder-drop expansion)
 
@@ -84,9 +101,9 @@ src/
     FrameTimingBridge.cs            # per-surface presentation-feedback accumulator, VRR ring, stats log
     VrrClassifier.cs                # pure: residual-against-T-grid classifier
     HdrClassifier.cs                # pure: wp_color_management_output_v1 tf_named → HDR y/n
-    VrrPolicy.cs                    # pure: (sourceFps, vrrRange, fpsTrusted) → frame-multiplier decision
+    VrrPolicy.cs                    # pure: (sourceFps, vrrRange, currentRefreshHz, fpsTrusted) → frame-multiplier decision
     WaylandOutputRegistry.cs        # process-global wl_output mode/HDR/VRR table (keyed by registry name)
-    EdidParser.cs / EdidLookup.cs   # pure: parse Range Limits descriptor for VRR window from compositor-supplied EDID blob
+    EdidParser.cs / EdidLookup.cs   # pure: parse Range Limits descriptor for VRR window from the sysfs EDID blob
 
   Native/
     hdr_helper.c                                # Wayland ABI shim, see "ABI boundary" below
@@ -100,7 +117,7 @@ The native shim is compiled by an MSBuild `BuildHdrHelper` target in `Vomplayer.
 
 ## Rendering paths
 
-Two runtime-selected paths, chosen by `WaylandDetect.IsWaylandBackend` in `MainWindow` construction.
+Two runtime-selected paths, chosen once by `WaylandDetect.IsWaylandBackend` in `MainWindow.CreateVideoHost` (PiP secondaries mint through the same factory via `IPipHost`). Consumers hold the `IVideoHost` seam — widget, playback attach, render events, geometry signal, teardown ordering — and reach the genuinely Wayland-only capabilities (subsurface stacking, HDR/VRR sinks) through its single nullable `WaylandSurface`.
 
 **Wayland subsurface path (preferred on Linux/Wayland).**
 `VideoArea` (paints nothing) reserves layout space. `VideoSurface` creates a `wl_subsurface` of the GTK main `wl_surface` via `libhdr_helper.so` and places it *below* the parent. GTK's main window is CSS-transparent (`.vompl-main-window { background: transparent; }`) so the subsurface shows through in the video region; opaque chrome widgets (`.vompl-chrome`) sit on top. This means:
@@ -149,9 +166,9 @@ Cross-thread coupling per `Playback` is isolated in three places: the `Action<Ac
 
 - VM is `ViewModelMain`, a coordinator over one or two `VideoContext`s. Constructed with the primary `Playback` plus the service set (file picker, recents, track prefs, URL prompt, URL downloader). PiP adds a secondary `Playback` lazily via `PipController.Enable`.
 - Each `VideoContext` (CommunityToolkit.Mvvm `ObservableObject`) wraps one `IPlayback`, mirrors its properties as observables, owns one `Playlist`, and runs that stream's HDR / VRR / track-preference / resume-position / auto-advance state machines. See the comments at the top of `VideoContext.cs` for the per-subsystem rationale; this doc deliberately doesn't restate them.
-- View is `MainWindow` (with `.Menu.cs` and `.Pip.cs` partials), code-only GTK4. It subscribes to VM `PropertyChanged` and switches on property name to push widget updates. User actions go to VM commands (`[RelayCommand]`) or imperative methods.
+- View is `MainWindow` (with `.Menu.cs` and `.PlaylistIo.cs` partials; PiP lives in the non-partial `PipController`), code-only GTK4. It subscribes to VM `PropertyChanged` and switches on property name to push widget updates. User actions go to VM commands (`[RelayCommand]`) or imperative methods.
 - Read-only proxy properties on `ViewModelMain` reflect `SingleTarget` (= SelectedContext if set, else Primary). PropertyChanged is forwarded only when the source context matches SingleTarget; SelectedSlot transitions re-fire every proxy so the view re-reads from the new target.
-- Seek is the nontrivial single-video interaction: a state machine (idle / holding / settling) in `MainWindow.cs` around the `Gtk.Scale`. See comments there.
+- Seek is the nontrivial single-video interaction: a state machine (idle / holding / settling) in `Controls/SeekScaleController.cs` around the `Gtk.Scale`. See comments there.
 
 **PiP routing.** `ViewModelMain.SelectedSlot` governs every transport command:
 - `null` ⇒ broadcast/sync. Transport (Seek*, StepFrame*, StepChapter) fans out to both contexts; PlayPause converges any drifted pair to a single target. Per-video commands (Volume, Mute, Tracks, Open*, Load*) target Primary.
@@ -167,11 +184,11 @@ Cross-thread coupling per `Playback` is isolated in three places: the `Action<Ac
 
 Keyboard input goes through a window-level capture-phase `Gtk.EventControllerKey` so focused children never see bound keys (no double-fire on focused buttons). Mouse input on the video widgets goes through `Gtk.GestureClick`. Both routes canonicalize the trigger via `Trigger.MakeKey` (lowercases keyvals via `gdk_keyval_to_lower`, masks modifiers to GTK's default-mod-mask) so CapsLock and `<Shift>F`-style author forms compare correctly against live events.
 
-`HotkeysDialog` edits the runtime map; saving persists to `config.toml` and refreshes the menu accel labels via `MainWindow.RefreshMenuAccels` (Gio.MenuItem isn't live-bound to its parent — accel labels update via remove-and-reinsert at the same slot).
+`PreferencesDialog` edits the runtime map (alongside the application settings); saving persists to `config.toml` via `MainWindow.ApplyPreferences` and refreshes the menu accel labels via `MainWindow.RefreshMenuAccels` (Gio.MenuItem isn't live-bound to its parent — accel labels update via remove-and-reinsert at the same slot).
 
 ## Persistence
 
-- **`config.toml`** (TOML, Tomlyn-backed). Today only `[hotkeys]`. Loaded eagerly at startup; saved on hotkey edits.
+- **`config.toml`** (TOML, Tomlyn-backed). `[hotkeys]` (a plain action → trigger-strings table; HotkeyMap owns schema and defaults) and `[application]` (open_in_new_window, theme, chapter_seek_preroll_seconds). Loaded eagerly at startup; saved on preferences edits.
 - **`state.db`** (SQLite, `Microsoft.Data.Sqlite`, WAL). Owned by `StateDatabase`; per-feature persistence classes (`RecentFiles`, `TrackPreferences`, `SavedPlaylists`) take the `SqliteConnection` in their ctor. Append-only `Migrations[]` registry walked against `PRAGMA user_version`. Schema today:
   - v1: `recent_files(path_or_uri UNIQUE, last_opened, open_count)`
   - v2: `track_preferences(directory, kind, …)` PK `(directory, kind)`
@@ -186,11 +203,11 @@ Keyboard input goes through a window-level capture-phase `Gtk.EventControllerKey
 
 `wp_presentation_feedback.presented` fires per composited frame; the native shim forwards `(tv_ns, refresh_ns)` to `FrameTimingBridge` via a GCHandle trampoline. The bridge keeps a 60-sample ring of inter-frame deltas. `VrrClassifier` is pure: it compares the residual of each delta against the panel's nominal period `T = 1e9 / mode_mHz`. `T` comes from `wl_output.mode` (authoritative panel mode — KWin's `refresh_ns` field is unreliable on VRR-capable outputs).
 
-The panel's VRR window (min/max refresh) is parsed from EDID by `EdidParser` (Range Limits descriptor). KWin exposes EDID per-output via `kde_output_device_v2`, and `EdidLookup` resolves a registry name → EDID blob → VrrRange so the policy layer can ask "does this mode lie inside the panel's VRR window?".
+The panel's VRR window (min/max refresh) is parsed from EDID by `EdidParser` (Range Limits descriptor). The blob comes from sysfs: `wl_output` v4's `.name` event supplies the DRM connector name ("HDMI-A-1"), and `EdidLookup` reads `/sys/class/drm/card*-<connector>/edid`, resolving registry name → EDID blob → VrrRange so the policy layer can ask "does this mode lie inside the panel's VRR window?". (Note: sysfs is unreadable inside a Flatpak sandbox, so the VRR window stays unknown there.)
 
-`VrrPolicy` is a pure function `(sourceFps, vrrRange, fpsTrusted) → multiplier decision`. For low-fps sources (24/25 fps) it produces an integer multiplier N ≥ 2 such that `N * sourceFps` lies inside the VRR window — `VideoContext.ApplyVrrPolicy` installs that as an mpv `vf=fps=…` filter.
+`VrrPolicy` is a pure function `(sourceFps, vrrRange, currentRefreshHz, fpsTrusted) → multiplier decision` — the current mode's refresh is a hard ceiling on the multiplied rate. For low-fps sources (24/25 fps) it produces an integer multiplier N ≥ 2 such that `N * sourceFps` lies inside the VRR window — `VideoContext.ApplyVrrPolicy` installs that as an mpv `vf=fps=…` filter.
 
-`FpsTrustMonitor` (consumed by `Playback`) compares mpv's declared `container-fps` against the rolling `estimated-vf-fps`. Sustained divergence within a file load flips the trust state; sticky-untrusted means `ApplyVrrPolicy` will clear the multiplier on VFR / mistagged-CFR sources rather than running them at the wrong rate.
+`FpsTrustMonitor` (consumed by `Playback`) compares the rolling `estimated-vf-fps` against the rate it is currently *expected* to converge to — the declared `container-fps`, times the multiplier while our own fps filter is active (without that distinction the filter would read as divergence and unwind itself). Sustained divergence within a file load flips the trust state; sticky-untrusted means `ApplyVrrPolicy` will clear the multiplier on VFR / mistagged-CFR sources rather than running them at the wrong rate.
 
 Identifiers across the ABI are `wl_output` registry names (uint32, stable for the session), not pointers — this keeps consumer lifetime decoupled from proxy lifetime.
 
@@ -221,4 +238,4 @@ NUnit in `test/`, biased toward code that's testable without a GTK/mpv runtime: 
 - **In-widget overlays over video work via `Gtk.Overlay`.** The video subsurface stacks *below* the transparent parent surface (see "Rendering paths"), so `videoOverlay.AddOverlay` children painted on the parent composite over the video with correct alpha — the compositor blends them onto the subsurface. `DiagnosticOverlay` (top-right), the fullscreen `controlsBox` / stream-toolbar OSD, and `DownloadStatusOverlay` (top-left) all rely on this. The one thing that isn't achievable this way is sampling the video's own pixels from GTK (they live on a separate compositor surface GTK never sees), so effects that need frame content — a tint derived from the picture, say — would still need another path; text / progress / marker overlays don't. (This bullet previously claimed overlays were impossible, describing an earlier, rejected stacking order where the subsurface sat above the parent.)
 - **No `ReportSwap` on the GLArea path.** mpv's display-sync accounting wants a post-swap hook and `Gtk.GLArea`'s render cycle doesn't expose one. Wayland path reports correctly via `eglSwapBuffers`.
 - **8-bit FBO + PQ encoding may band.** The subsurface's EGL config is RGBA8 (`hdr_helper.c:choose_egl_config`). For HDR sources, mpv now emits PQ pass-through into that 8-bit FBO before the compositor tonemaps; PQ in 8 bits can show visible banding in dark/midtone regions. SDR sources are unaffected (8 bits across [0,1] sRGB-like range is fine). Fix: bind `EGL_RED_SIZE=10` etc. in `choose_egl_config` and verify driver/compositor honor the 10-bit window-surface format. Pre-fix the population hitting this was small (HDR-display-only); post-fix every HDR source on every display goes the PQ path so the affected population grew.
-- **mpv source-mastering metadata not propagated.** The shim's PQ image description hard-codes mastering-display primaries (and the values look wrong by ~2 orders of magnitude — `0.034, 0.016, …` instead of BT.2020's `0.708, 0.292, …`); we never call `wp_image_description_creator_params_v1_set_mastering_luminance`, `set_max_cll`, or `set_max_fall`. KWin appears to tolerate the bogus primaries silently and use defaults for the missing fields, but a stricter compositor could refuse the description build, and even on KWin the tonemap quality could improve if we passed real per-source mastering metadata. Fix: read `video-params/sig-peak`, `mastering-display-meta-*`, `content-light-*` from mpv's properties on file load, plumb them through to the shim, and rebuild the PQ description per-source.
+- **mpv source-mastering metadata not propagated.** The PQ image description's mastering-display primaries are hard-coded placeholders (and the values look wrong by ~2 orders of magnitude — `0.034, 0.016, …` instead of BT.2020's `0.708, 0.292, …`); we never set `mastering_luminance`, `max_cll`, or `max_fall`. KWin appears to tolerate the bogus primaries silently and use defaults for the missing fields, but a stricter compositor could refuse the description build, and even on KWin the tonemap quality could improve with real per-source metadata. The parameters now live in C# (`VideoSurface.SetHdr` builds an `ImageDescriptionParams` the shim transports verbatim), so the fix is C#-only: read `video-params/sig-peak`, `mastering-display-meta-*`, `content-light-*` from mpv's properties on file load and stage a per-source description (the shim's two-slot description cache needs growing alongside).

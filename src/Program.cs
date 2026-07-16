@@ -73,7 +73,7 @@ public static class Program
             return app.Run(runArgs);
         }
 
-        // Primary path. Owned by Main so the SQLite connection is closed cleanly after the GTK main loop exits — including on abnormal exit, since the using block fires on any control-flow path.
+        // Primary path. Owned by Main so the SQLite connection is closed cleanly after the GTK main loop exits. (Not literally every exit: GirCore's GLib.UnhandledException handler calls Environment.Exit, which skips using-disposal — harmless, WAL recovers on next open.)
         using var stateDb = StateDatabase.Open(UserDataPaths.StateDb);
         var recentFiles = new RecentFiles(stateDb.Connection);
         var savedPlaylists = new SavedPlaylists(stateDb.Connection);

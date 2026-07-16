@@ -6,7 +6,7 @@ using Tomlyn;
 
 namespace Vomplayer.UserData;
 
-// User-editable configuration backed by a TOML file. Loaded once at startup; defaults apply when the file is missing or when a key isn't set. Save() writes the current state back; today only the hotkeys preferences dialog calls it, but the file format is human-edit-friendly so users can also touch it directly.
+// User-editable configuration backed by a TOML file. Loaded once at startup; defaults apply when the file is missing or when a key isn't set. Save() writes the current state back; today only the preferences dialog (hotkeys + application settings) calls it, but the file format is human-edit-friendly so users can also touch it directly.
 //
 // Malformed TOML doesn't crash the app: the broken file is rotated to <path>.malformed-<timestamp>.bak, a stderr line names both the parse error and the rotation target, and load proceeds with defaults. The user keeps their text (in the .bak) and the player keeps starting. A rotation that itself fails (read-only filesystem, etc.) logs both errors and continues with defaults but leaves the broken file in place — so next launch will warn again until the user resolves it.
 public sealed class UserConfig

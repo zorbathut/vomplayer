@@ -16,9 +16,9 @@ public enum PlaylistChangeKind
     Advance,
 }
 
-// Plain-class playlist model. NOT an ObservableObject — Move(from,to) mutates two pieces of observable state (Items + CurrentIndex) and a single PropertyChanged-per-property would fire twice and make consumers redraw twice (with the highlight class briefly on the wrong row between the two notifications). One Changed event per composite mutation matches the "redraw the whole panel" semantics consumers actually need (cf. the ChapterScrubber rebuild on every viewModel.Chapters change).
+// Plain-class playlist model. NOT an ObservableObject — a composite mutation like MoveMany touches two pieces of observable state (Items + CurrentIndex) and a PropertyChanged-per-property would fire twice, making consumers redraw twice (with the highlight class briefly on the wrong row between the two notifications). One Changed event per composite mutation matches the "redraw the whole panel" semantics consumers actually need (cf. the ChapterScrubber rebuild on every viewModel.Chapters change).
 //
-// All mutation paths funnel through Notify(): a sequence-equality check + reference assignment, so no-op mutations (Move(i,i), SetCurrent to same value) skip the event. Replace's choice to RESET CurrentIndex to 0 (or -1 if the new playlist is empty) — even when the new playlist contains the previously-playing file at a different index — is deliberate and matches the user-spec ("drop replaces playlist"); see PlaylistTests.ReplaceDeliberatelyResetsCurrentEvenWhenItemPersists.
+// Mutations dedup inline, so no-op calls (SetCurrent to the same value, a move that lands where it started) skip the event. Replace's choice to RESET CurrentIndex to 0 (or -1 if the new playlist is empty) — even when the new playlist contains the previously-playing file at a different index — is deliberate and matches the user-spec ("drop replaces playlist"); see PlaylistTests.ReplaceDeliberatelyResetsCurrentEvenWhenItemPersists.
 public sealed class Playlist
 {
     public IReadOnlyList<string> Items { get; private set; } = Array.Empty<string>();

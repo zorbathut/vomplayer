@@ -58,7 +58,7 @@ public interface IPlayback : INotifyPropertyChanged, IDisposable
     // True iff the FPS trust monitor still believes the declared container-fps. False only after sustained estimated-vs-declared divergence within a file. Reset to true on every LoadFile. Drives VideoContext.ApplyVrrPolicy to clear the multiplier on VFR / mistagged-CFR sources.
     bool IsSourceFpsTrusted { get; }
 
-    // Diagnostic-only string explaining the most recent trust transition (e.g. "divergence sustained 4.2s (declared=25.000, est=15.100)"). Empty until the monitor first flips; carries through subsequent in-state observations until the next transition.
+    // Diagnostic-only string explaining the most recent trust transition (e.g. "divergence sustained 4.2s (expected=25.000, est=15.100)"). Empty until the monitor first flips; carries through subsequent in-state observations until the next transition.
     string FpsTrustReason { get; }
 
     // Mirror of mpv's `media-title` property: the source's metadata title (container/stream tag) when present, falling back to the filename without path/extension. Null when no file is loaded. For yt-dlp-downloaded URLs the cached file is named `%(title)s.%(ext)s`, so the fallback still surfaces the upstream video title rather than a hash. Drives the main-window title display.

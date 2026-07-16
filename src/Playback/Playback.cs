@@ -149,10 +149,10 @@ public sealed partial class Playback : ObservableObject, IPlayback
     private long? lastDwidth;
     private long? lastDheight;
 
-    // Latest decision derived from `video-params/gamma`. Drives the Wayland subsurface's PQ image-description toggle and mpv's target-* targeting. Kept here as a plain field (no ObservableProperty) because the only consumer is MainWindow, which subscribes to SourceHdrChanged directly — a full ObservableObject property would add IPlayback surface area for a concern that's purely internal to the render path.
+    // Latest decision derived from `video-params/gamma`. Drives the Wayland subsurface's PQ image-description toggle and mpv's target-* targeting. Kept as a plain field (no ObservableProperty) because transition notification goes exclusively through SourceHdrChanged — VideoContext's per-instance HDR policy subscribes to that event, and a PropertyChanged would be a second, redundant signal path for the same transition.
     private bool isSourceHdr;
 
-    // Public read-only view of isSourceHdr. Used by DiagnosticOverlay's 1 Hz poller; transition notification still goes through SourceHdrChanged. Not promoted to IPlayback because the VM has no consumer and the overlay reads the concrete Playback directly.
+    // Public read-only view of isSourceHdr. On IPlayback so the per-video HDR policy lives behind the seam; DiagnosticOverlay's 1 Hz poller also reads it. Transition notification still goes through SourceHdrChanged — see the field comment for why this never raises PropertyChanged.
     public bool IsSourceHdr
     {
         get

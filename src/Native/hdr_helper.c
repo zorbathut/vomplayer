@@ -367,7 +367,7 @@ static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t nam
     }
     else if (strcmp(iface, "wl_output") == 0)
     {
-        // v2 suffices for geometry/mode/done/scale; bump to 4 where available to also receive name/description (diagnostic only).
+        // v2 suffices for geometry/mode/done/scale; bump to 4 where available to also receive .name — load-bearing, not diagnostic: the connector name drives the EDID lookup that resolves the VRR window (see vompl_output_name_fn).
         uint32_t v = version < 4 ? version : 4;
         struct output_info *info = calloc(1, sizeof(*info));
         if (!info) { return; }
