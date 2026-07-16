@@ -242,6 +242,10 @@ public sealed class PipController : IDisposable
         {
             host.PrimaryArea.GeometryChanged -= OnPrimaryAreaGeometryChangedForPip;
         }
+        if (host.PrimaryView != null)
+        {
+            host.PrimaryView.OnResize -= OnPrimaryViewResizeForPip;
+        }
         // Dispose the secondary render surface BEFORE viewModel.DisablePip — the surface's Dispose calls mpv_render_context_free against the secondary mpv handle, and viewModel.DisablePip → Secondary VideoContext.Dispose → secondary playback.Dispose terminates that handle. See MpvDispatcher.Dispose's "render surface must be disposed before the dispatcher" comment.
         if (secondarySurface != null)
         {
@@ -349,6 +353,8 @@ public sealed class PipController : IDisposable
         {
             viewModel.Secondary.PropertyChanged += OnSecondaryContextPropertyChanged;
         }
+        // Track primary geometry so PiP rescales when the window resizes — GLArea-path counterpart of the PrimaryArea.GeometryChanged hook above.
+        host.PrimaryView!.OnResize += OnPrimaryViewResizeForPip;
     }
 
     // Wrap the secondary video widget in a Gtk.Overlay (`pipContainer`) and add the wrapper as the videoOverlay's PiP overlay child. The wrapper carries the layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest). A small DrawingArea is layered as the wrapper's overlay child in the bottom-right corner to act as the resize grip.
@@ -452,6 +458,12 @@ public sealed class PipController : IDisposable
     private void OnPrimaryAreaGeometryChangedForPip(int x, int y, int w, int h, int scale)
     {
         // VideoArea fires this whenever its allocation changes. Recompute PiP layout against the primary's new bounds (also re-clamps user-set margins so a window shrink can't strand the PiP off-screen).
+        ApplyPipLayout();
+    }
+
+    private void OnPrimaryViewResizeForPip(Gtk.GLArea sender, Gtk.GLArea.ResizeSignalArgs args)
+    {
+        // GLArea-path counterpart of OnPrimaryAreaGeometryChangedForPip.
         ApplyPipLayout();
     }
 
