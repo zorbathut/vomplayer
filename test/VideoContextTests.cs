@@ -151,7 +151,7 @@ public partial class VideoContextTests
 
     private sealed class StubUrlDownloader : IUrlDownloader
     {
-        public bool IsAvailable() { return false; }
+        public Task<bool> IsAvailableAsync(CancellationToken ct) { return Task.FromResult(false); }
         public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct) { return Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()); }
         public Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct) { return Task.FromResult(UrlLoadKind.MpvDirect); }
         public Task<string> DownloadAsync(string url, IProgress<UrlDownloadProgress>? progress, CancellationToken ct) { return Task.FromResult(url); }

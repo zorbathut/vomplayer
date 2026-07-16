@@ -27,9 +27,9 @@ public class UrlLoadCoordinatorTests
         public List<TaskCompletionSource<string>> Downloads { get; } = new();
         public List<string> DownloadUrls { get; } = new();
 
-        public bool IsAvailable()
+        public Task<bool> IsAvailableAsync(CancellationToken ct)
         {
-            return Available;
+            return Task.FromResult(Available);
         }
 
         public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct)
@@ -264,7 +264,7 @@ public class UrlLoadCoordinatorTests
         Assert.That(fired, Is.False, "no load should fire when yt-dlp is unavailable");
         Assert.That(dl.ClassifyCalls, Is.Empty, "classification must not run without yt-dlp");
         Assert.That(dl.Downloads, Is.Empty);
-        Assert.That(prompt.StatusShown, Is.EqualTo(0), "the !IsAvailable gate returns before RunAsync, so no status overlay is shown");
+        Assert.That(prompt.StatusShown, Is.EqualTo(0), "the availability gate runs before the status overlay is shown, so a missing yt-dlp never flashes it");
         Assert.That(prompt.Errors, Has.Count.EqualTo(1));
         Assert.That(prompt.Errors[0].Title, Does.Contain("yt-dlp"));
         Assert.That(prompt.Errors[0].Message, Does.Contain("Install yt-dlp"));

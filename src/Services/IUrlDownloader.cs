@@ -15,10 +15,10 @@ public enum UrlLoadKind
     YtDlpDownload,
 }
 
-// Interface so the VM can be unit-tested without a real yt-dlp binary on PATH. IsAvailable is synchronous because it's used as a gate before opening the URL dialog (no point asking the user for a URL if we can't fulfill it). ProbeAsync returns the list of contained URLs — for a single video, one entry; for a playlist, all entries. ClassifyAsync asks yt-dlp which extractor matches the URL so we can decide whether to download or stream-via-mpv. DownloadAsync downloads one URL and returns the local file path.
+// Interface so the VM can be unit-tested without a real yt-dlp binary on PATH. IsAvailableAsync gates every URL flow before the user is asked for anything (no point prompting for a URL we can't fulfill); it's async because the probe spawns a process, and its worst case — yt-dlp missing, re-probed on every call — used to block the GTK main thread for the full 2s timeout. ProbeAsync returns the list of contained URLs — for a single video, one entry; for a playlist, all entries. ClassifyAsync asks yt-dlp which extractor matches the URL so we can decide whether to download or stream-via-mpv. DownloadAsync downloads one URL and returns the local file path.
 public interface IUrlDownloader
 {
-    bool IsAvailable();
+    Task<bool> IsAvailableAsync(CancellationToken ct);
 
     Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct);
 

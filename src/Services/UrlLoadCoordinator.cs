@@ -33,7 +33,7 @@ public sealed class UrlLoadCoordinator : IDisposable
     public async Task<IReadOnlyList<string>?> OpenUrlInteractiveAsync()
     {
         // Gate before prompting. yt-dlp not available is a hard stop for this flow — there's no sensible fallback (mpv-direct doesn't handle YouTube), so the right UX is a clear "install yt-dlp" message rather than letting the user type a URL and *then* failing.
-        if (!downloader.IsAvailable())
+        if (!await downloader.IsAvailableAsync(CancellationToken.None))
         {
             ShowYtDlpMissingError();
             return null;
@@ -124,12 +124,6 @@ public sealed class UrlLoadCoordinator : IDisposable
         }
         // Defense-in-depth: the host's load-current path also calls CancelActive at its top to cover the local-file case (no StartUrlLoad follows). On the URL branch, both calls run; CancelActive is idempotent so the second one is a no-op. Removing this internal call would mean a caller that forgets to cancel first would leak the prior yt-dlp process until its natural completion.
         CancelActive();
-        // Same hard gate as the interactive OpenUrlInteractiveAsync flow. Without yt-dlp, ClassifyAsync would throw and RunAsync would fall back to mpv-direct, which then can't resolve an extractor URL and fails silently — the user sees nothing happen. Gating here surfaces the identical "install yt-dlp" dialog for every non-interactive load (playlist row, drag-drop, command line, autosave restore). We can't tell a direct stream from an extractor URL without yt-dlp, so any http(s) URL that reaches here (ShouldProbe already filtered) is treated as needing it.
-        if (!downloader.IsAvailable())
-        {
-            ShowYtDlpMissingError();
-            return;
-        }
         var cts = new CancellationTokenSource();
         activeCts = cts;
         // Fire-and-forget — exceptions are caught inside RunAsync and surfaced via the prompt's ShowError. Keeping the public entry-point synchronous matches the host's load-current path, which can't await.
@@ -149,6 +143,16 @@ public sealed class UrlLoadCoordinator : IDisposable
         IUrlStatusHandle? status = null;
         try
         {
+            // Same hard gate as the interactive OpenUrlInteractiveAsync flow. Without yt-dlp, ClassifyAsync would throw and we'd fall back to mpv-direct, which then can't resolve an extractor URL and fails silently — the user sees nothing happen. Gating here surfaces the identical "install yt-dlp" dialog for every non-interactive load (playlist row, drag-drop, command line, autosave restore). We can't tell a direct stream from an extractor URL without yt-dlp, so any http(s) URL that reaches here (ShouldProbe already filtered) is treated as needing it. Awaited before the status overlay (a missing binary shows the error dialog with no overlay flash) — and async at all so the probe's 2s worst case can't freeze the GTK main thread the way the old synchronous gate in StartUrlLoad did.
+            if (!await downloader.IsAvailableAsync(cts.Token))
+            {
+                if (ReferenceEquals(activeCts, cts))
+                {
+                    ShowYtDlpMissingError();
+                }
+                return;
+            }
+
             // Show the busy overlay before classification — the classify spawn is a second yt-dlp round-trip that was previously silent. Cancel is wired to this load's CTS so the user can abort through classify and download alike; on the interactive single-video path this replaces the "Fetching…" overlay OpenUrlInteractiveAsync just disposed. The hide/re-show land in separate main-loop turns (across the await in OpenUrlAsync), so there's usually no visible gap, but a one-frame flicker is possible — accepted in exchange for each method owning a self-contained, leak-proof overlay lifecycle.
             status = prompt.ShowUrlStatus("Preparing…", () => TryCancel(cts));
 

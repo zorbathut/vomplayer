@@ -336,9 +336,9 @@ public partial class ViewModelMainTests
         public List<string> DownloadCalls { get; } = new();
         public List<CancellationToken> ObservedTokens { get; } = new();
 
-        public bool IsAvailable()
+        public Task<bool> IsAvailableAsync(CancellationToken ct)
         {
-            return Available;
+            return Task.FromResult(Available);
         }
 
         public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct)
@@ -2081,7 +2081,7 @@ public partial class ViewModelMainTests
             this.message = message;
         }
 
-        public bool IsAvailable() { return true; }
+        public Task<bool> IsAvailableAsync(CancellationToken ct) { return Task.FromResult(true); }
 
         public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct)
         {

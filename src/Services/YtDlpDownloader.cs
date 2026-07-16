@@ -12,7 +12,7 @@ namespace Vomplayer.Services;
 //
 // The binary is supplied as a command list (see BuildCommand): bare ["yt-dlp"] on a normal host, or ["flatpak-spawn", "--host", "--watch-bus", "yt-dlp"] inside a flatpak sandbox, where the host's yt-dlp is reached through the Flatpak portal because the sandbox PATH doesn't see it. Every invocation goes through NewStartInfo so the executable + arg prefix are applied in exactly one place.
 //
-// IsAvailable() shells `<command> --version`. Cached after the first call because subsequent UI gates would otherwise spawn the process repeatedly per click. The cache stays valid for the process lifetime; if the user installs yt-dlp mid-session they'll need to restart, but that's an extreme edge case.
+// IsAvailableAsync() shells `<command> --version`. Cached after the first call because subsequent UI gates would otherwise spawn the process repeatedly per click. The cache stays valid for the process lifetime; if the user installs yt-dlp mid-session they'll need to restart, but that's an extreme edge case.
 public sealed class YtDlpDownloader : IUrlDownloader
 {
     private const string ProgressPrefix = "VOMPLPROG";
@@ -74,7 +74,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         return psi;
     }
 
-    public bool IsAvailable()
+    public async Task<bool> IsAvailableAsync(CancellationToken ct)
     {
         if (isAvailableCachedTrue)
         {
@@ -85,10 +85,23 @@ public sealed class YtDlpDownloader : IUrlDownloader
             var psi = NewStartInfo();
             psi.ArgumentList.Add("--version");
             using var probe = Process.Start(psi) ?? throw new InvalidOperationException("yt-dlp failed to start");
-            // 2s is generous — `yt-dlp --version` reads no network and just prints a string.
-            if (!probe.WaitForExit(2000))
+            // 2s is generous — `yt-dlp --version` reads no network and just prints a string. Awaited (not WaitForExit-blocked) because this runs on the GTK main thread.
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(2000);
+            try
             {
-                probe.Kill(entireProcessTree: true);
+                await probe.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!probe.HasExited)
+                {
+                    probe.Kill(entireProcessTree: true);
+                }
+                if (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
                 return false;
             }
             if (probe.ExitCode == 0)
@@ -97,6 +110,10 @@ public sealed class YtDlpDownloader : IUrlDownloader
                 return true;
             }
             return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
