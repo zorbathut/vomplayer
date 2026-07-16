@@ -366,6 +366,12 @@ static void globals_reg_global(void *data, struct wl_registry *reg, uint32_t nam
     (void)data;
     if (strcmp(iface, "wl_compositor") == 0 && !g_compositor)
     {
+        // wl_surface.set_buffer_scale needs wl_compositor >= 3; binding lower would die later with an opaque protocol error at the set_buffer_scale call. Every real compositor is >= 4 — skip-and-complain beats crashing if one ever isn't.
+        if (version < 3)
+        {
+            fprintf(stderr, "[hdr_helper] wl_compositor v%u advertised but >= 3 required (set_buffer_scale); ignoring\n", version);
+            return;
+        }
         uint32_t bind_v = version < 4 ? version : 4;
         g_compositor = wl_registry_bind(reg, name, &wl_compositor_interface, bind_v);
     }
@@ -556,13 +562,20 @@ static struct wp_image_description_v1 *build_named_description(struct wl_display
 
     struct desc_state st = {0};
     wp_image_description_v1_add_listener(desc, &desc_listener, &st);
-    while (st.ready_status == 0)
+    // Capped like ensure_globals' probe pump: a compositor that never answers ready/failed must not wedge the main thread. One roundtrip normally suffices; hitting the cap falls through to the NULL path the callers already handle (staying SDR / untagged).
+    for (int i = 0; i < 6 && st.ready_status == 0; i++)
     {
         if (wl_display_roundtrip(display) < 0)
         {
             wp_image_description_v1_destroy(desc);
             return NULL;
         }
+    }
+    if (st.ready_status == 0)
+    {
+        fprintf(stderr, "[hdr_helper] image description ready/failed never arrived within roundtrip cap; treating as failed\n");
+        wp_image_description_v1_destroy(desc);
+        return NULL;
     }
     if (st.ready_status < 0)
     {
