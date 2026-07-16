@@ -6,6 +6,17 @@ namespace Vomplayer.Wayland;
 // P/Invoke bindings to the native/hdr_helper.c subsurface API. Opaque IntPtr handle. Disposing the wrapper calls vompl_video_surface_destroy.
 //
 // Delegate lifetime: per-surface trampoline delegates are held on instance fields so their thunks remain rooted until Dispose. A GCHandle routes callbacks back to the C# FrameTimingBridge via the native `data` parameter. Matches the Mpv/MpvRenderContext.cs:15 pattern.
+// ABI mirror of hdr_helper.c's vompl_image_description_params. All fields are wp_color_management_v1 wire units: PrimariesNamed / TfNamed / RenderIntent are the protocol enum values, mastering primaries are protocol-unit CIE xy. Sequential layout with only 4-byte fields — no padding on either side.
+[StructLayout(LayoutKind.Sequential)]
+internal struct ImageDescriptionParams
+{
+    public uint PrimariesNamed;
+    public uint TfNamed;
+    public uint RenderIntent;
+    public int WithMasteringPrimaries;
+    public int MRx, MRy, MGx, MGy, MBx, MBy, MWx, MWy;
+}
+
 internal sealed partial class VomplVideoSurface : IDisposable
 {
     private const string Lib = "hdr_helper";
@@ -100,14 +111,14 @@ internal sealed partial class VomplVideoSurface : IDisposable
         return (w, h);
     }
 
-    // Stages an explicit image description on the subsurface's wp_color_management_v1 surface: PQ/BT.2020 for enable=true, GAMMA22/BT.709 SDR for enable=false. Does NOT issue a wl_surface_commit — the next Swap flushes it atomically with the first new-content buffer, avoiding a one-frame flash of mis-tagged content. Returns 0 on success, -1 if the compositor does not advertise wp_color_manager_v1 or the description build failed; caller must only advance mpv to PQ targets when this returns 0 with enable=true.
-    public int SetHdr(bool enable)
+    // Stages an explicit image description on the subsurface's wp_color_management_v1 surface, built from caller-chosen protocol parameters (the HDR-vs-SDR selection and all values are policy and live in VideoSurface). Does NOT issue a wl_surface_commit — the next Swap flushes it atomically with the first new-content buffer, avoiding a one-frame flash of mis-tagged content. Returns 0 on success, -1 if the compositor does not advertise wp_color_manager_v1 or the description build failed; caller must only advance mpv to PQ targets when this returns 0 for an HDR description.
+    public int SetImageDescription(in ImageDescriptionParams p)
     {
         if (handle == IntPtr.Zero)
         {
             return -1;
         }
-        return SetHdrNative(handle, enable ? 1 : 0);
+        return SetImageDescriptionNative(handle, in p);
     }
 
     // Classifies the compositor's recent refresh-period stream. Unknown means the sample window hasn't filled yet; wait a second and re-poll.
@@ -240,8 +251,8 @@ internal sealed partial class VomplVideoSurface : IDisposable
     [LibraryImport(Lib, EntryPoint = "vompl_video_surface_get_buffer_size")]
     private static partial void GetBufferSizeNative(IntPtr vs, out int w, out int h);
 
-    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_set_hdr")]
-    private static partial int SetHdrNative(IntPtr vs, int enable);
+    [LibraryImport(Lib, EntryPoint = "vompl_video_surface_set_image_description")]
+    private static partial int SetImageDescriptionNative(IntPtr vs, in ImageDescriptionParams p);
 
     [LibraryImport(Lib, EntryPoint = "vompl_video_surface_destroy")]
     private static partial void DestroyNative(IntPtr vs);

@@ -45,6 +45,13 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
     private VrrRange? lastPublishedOutputVrrRange;
     private bool hasPublishedOutputVrrRange;
 
+    // wp_color_management_v1 wire values for the two descriptions we stage. This is the policy home the ABI rule demands: the shim receives finished numbers and only runs the protocol handshake.
+    private const uint PrimariesSrgb = 1;
+    private const uint PrimariesBt2020 = 6;
+    private const uint TfGamma22 = 2;
+    private const uint TfSt2084Pq = 11;
+    private const uint RenderIntentPerceptual = 0;
+
     // Stages an explicit image description on the subsurface: PQ/BT.2020 for enable=true, GAMMA22/BT.709 SDR for enable=false. The shim does NOT commit — the next mpv-driven Swap flushes it alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor. Returns 0 on success; -1 if the compositor does not advertise wp_color_manager_v1 or the subsurface is not yet realized. Caller must only enable mpv PQ targeting when this returns 0 with enable=true, else PQ-encoded output would hit an SDR-tagged surface. For enable=false, an SDR tag is preferable to untagged because per wp_color_management_v1 spec untagged surface handling is compositor-defined; on KWin with an HDR output present that compositor-defined handling blows out gamma22-encoded SDR output catastrophically (see hdr_helper.c). On compositors without wp_color_manager_v1 the surface stays untagged and -1 is returned — most compositors handle untagged-as-sRGB sensibly, so this is logged but tolerated.
     public int SetHdr(bool enable)
     {
@@ -52,7 +59,38 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
         {
             return -1;
         }
-        return surface.SetHdr(enable);
+        ImageDescriptionParams p;
+        if (enable)
+        {
+            // The mastering-display primaries are the long-standing placeholder values carried over verbatim from the shim — ARCHITECTURE.md's known-issues section flags them as looking wrong by ~2 orders of magnitude, with KWin tolerating them silently. Preserved byte-for-byte in the policy-to-C# move; replacing them with real per-source metadata from mpv (sig-peak, mastering-display-meta-*, content-light-*) is the tracked follow-up, and set_max_cll / set_max_fall / set_mastering_luminance land with it.
+            p = new ImageDescriptionParams
+            {
+                PrimariesNamed = PrimariesBt2020,
+                TfNamed = TfSt2084Pq,
+                RenderIntent = RenderIntentPerceptual,
+                WithMasteringPrimaries = 1,
+                MRx = 34000,
+                MRy = 16000,
+                MGx = 13250,
+                MGy = 34500,
+                MBx = 7500,
+                MBy = 3000,
+                MWx = 15635,
+                MWy = 16450,
+            };
+        }
+        else
+        {
+            // GAMMA22/BT.709 SDR. Pairs with Playback.DisableHdrOutput's `target-*=auto` defaults: mpv's gl_video resolves auto target-trc to gamma22 for HDR sources tone-mapped to SDR, and to bt.1886 (close-but-not-identical to gamma22) for native SDR sources. The slight gamma-curve mismatch on bt.1886 sources is small enough to be invisible in practice; the alternative (pinning mpv to gamma2.2 to match the tag) was tried and empirically broke the HDR-on-SDR case for unclear reasons.
+            p = new ImageDescriptionParams
+            {
+                PrimariesNamed = PrimariesSrgb,
+                TfNamed = TfGamma22,
+                RenderIntent = RenderIntentPerceptual,
+                WithMasteringPrimaries = 0,
+            };
+        }
+        return surface.SetImageDescription(in p);
     }
 
     // Read the current VRR classification from the shim's refresh-sample ring. Returns Unknown if the subsurface isn't ready yet.

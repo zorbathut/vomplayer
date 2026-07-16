@@ -3,7 +3,7 @@
 // Entry points:
 //
 // 1. vompl_video_surface_* API
-//    Creates a wl_subsurface child of a given parent wl_surface, places it BELOW the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window. Subsurface starts untagged (compositor treats as sRGB); vompl_video_surface_set_hdr toggles a PQ/BT.2020 image description at runtime, staged for flush on the next eglSwapBuffers. The caller drives rendering: make_current → (caller's render) → swap.
+//    Creates a wl_subsurface child of a given parent wl_surface, places it BELOW the parent, builds a dedicated EGL context + EGL surface on top via wl_egl_window. Subsurface starts untagged (compositor treats as sRGB); vompl_video_surface_set_image_description stages a caller-described (C#-policy) image description at runtime, flushed on the next eglSwapBuffers. The caller drives rendering: make_current → (caller's render) → swap.
 //
 // 2. Output + presentation-feedback trampolines
 //    Process-global output events (added / mode / removed) forward to callbacks registered via vompl_set_output_callbacks. Per-surface wl_surface.enter/leave and wp_presentation_feedback.presented/discarded events forward to callbacks registered via vompl_video_surface_set_callbacks. The consumer (C# FrameTimingBridge + WaylandOutputRegistry) owns all state derived from these events.
@@ -528,8 +528,18 @@ static const struct wp_image_description_v1_listener desc_listener = {
     .ready = desc_ready,
 };
 
-// Builds a parametric image description with the given named primaries + tf and waits for ready. Returns NULL on failure. The ready/failed roundtrip is a one-shot protocol handshake (not ongoing logic), so it stays here rather than getting split across the ABI. Only the HDR caller passes mastering-display primaries; SDR descriptions don't carry HDR metadata.
-static struct wp_image_description_v1 *build_named_description(struct wl_display *display, uint32_t primaries, uint32_t tf, int with_mastering_primaries)
+// Image-description parameters chosen by C# (ABI mirror of VomplWayland's ImageDescriptionParams). All values are wp_color_management_v1 wire units: primaries_named / tf_named / render_intent are the protocol enums; mastering primaries are protocol-unit CIE xy. Which values to send (HDR vs SDR selection, render intent, and eventually per-source mastering metadata) is policy and lives entirely in C# per the ABI-boundary rule — this struct is transport, and the builder below is protocol completion only.
+struct vompl_image_description_params
+{
+    uint32_t primaries_named;
+    uint32_t tf_named;
+    uint32_t render_intent;
+    int32_t with_mastering_primaries;
+    int32_t m_rx, m_ry, m_gx, m_gy, m_bx, m_by, m_wx, m_wy;
+};
+
+// Builds a parametric image description from caller-supplied parameters and waits for ready. Returns NULL on failure. The ready/failed roundtrip is a one-shot protocol handshake (not ongoing logic), so it stays here rather than getting split across the ABI.
+static struct wp_image_description_v1 *build_description(struct wl_display *display, const struct vompl_image_description_params *p)
 {
     if (!g_color_manager)
     {
@@ -542,16 +552,16 @@ static struct wp_image_description_v1 *build_named_description(struct wl_display
     {
         return NULL;
     }
-    wp_image_description_creator_params_v1_set_primaries_named(creator, primaries);
-    wp_image_description_creator_params_v1_set_tf_named(creator, tf);
-    if (with_mastering_primaries)
+    wp_image_description_creator_params_v1_set_primaries_named(creator, p->primaries_named);
+    wp_image_description_creator_params_v1_set_tf_named(creator, p->tf_named);
+    if (p->with_mastering_primaries)
     {
         wp_image_description_creator_params_v1_set_mastering_display_primaries(
             creator,
-            34000, 16000,
-            13250, 34500,
-             7500,  3000,
-            15635, 16450);
+            p->m_rx, p->m_ry,
+            p->m_gx, p->m_gy,
+            p->m_bx, p->m_by,
+            p->m_wx, p->m_wy);
     }
 
     struct wp_image_description_v1 *desc = wp_image_description_creator_params_v1_create(creator);
@@ -585,17 +595,13 @@ static struct wp_image_description_v1 *build_named_description(struct wl_display
     return desc;
 }
 
-// PQ/BT.2020 with HDR10 mastering metadata, for HDR output to an HDR-capable display.
-static struct wp_image_description_v1 *build_pq_description(struct wl_display *display)
+// Cache of built descriptions keyed by exact params, per surface. Two slots because the C# policy currently sends exactly two kinds (one HDR, one SDR); a hit skips re-running the ready/failed handshake on every toggle. Eviction is deliberately refused rather than implemented: destroying an evicted proxy that is still attached to cm_surface is untested territory, and with two slots and two kinds it can never be needed. If C# ever sends a third distinct params set (per-source mastering metadata is the tracked candidate), grow the cache alongside that change.
+struct desc_cache_entry
 {
-    return build_named_description(display, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ, 1);
-}
-
-// GAMMA22/BT.709 SDR. Per wp_color_management_v1 spec, a surface without an attached image description has compositor-defined handling — on KWin with an HDR output present we observed catastrophic blow-out of gamma22-encoded SDR output on the SDR scan-out (the exact misinterpretation mechanism wasn't instrumented, but the spec language is enough to justify always tagging). Pairs with Playback.DisableHdrOutput's `target-*=auto` defaults: mpv's gl_video resolves auto target-trc to gamma22 for HDR sources tone-mapped to SDR, and to bt.1886 (close-but-not-identical to gamma22) for native SDR sources. The slight gamma curve mismatch on bt.1886 sources is small enough to be invisible in practice; the alternative (pinning mpv to gamma2.2 to match the tag) was tried and empirically broke the HDR-on-SDR case for unclear reasons.
-static struct wp_image_description_v1 *build_sdr_description(struct wl_display *display)
-{
-    return build_named_description(display, WP_COLOR_MANAGER_V1_PRIMARIES_SRGB, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22, 0);
-}
+    int valid;
+    struct vompl_image_description_params params;
+    struct wp_image_description_v1 *desc;
+};
 
 //---------------------------------------------------------------
 // Entry point 1: subsurface + EGL surface + HDR (used by the Wayland path).
@@ -621,8 +627,7 @@ struct vompl_video_surface
     EGLContext egl_context;
     EGLSurface egl_surface;
     struct wp_color_management_surface_v1 *cm_surface;
-    struct wp_image_description_v1 *pq_image_desc;
-    struct wp_image_description_v1 *sdr_image_desc;
+    struct desc_cache_entry desc_cache[2];
     int buffer_w;
     int buffer_h;
 
@@ -789,7 +794,7 @@ struct vompl_video_surface *vompl_video_surface_create(
     wl_subsurface_set_position(vs->wl_subsurface, 0, 0);
     wl_subsurface_set_desync(vs->wl_subsurface);
 
-    // The subsurface starts with no wp_color_management_v1 image description attached. C# calls vompl_video_surface_set_hdr synchronously from OnVideoRenderContextReadyWayland, then again per-video from ApplyHdrPolicy as policy decisions arrive (SourceHdrChanged / CurrentOutputHdrChanged), staging either a PQ/BT.2020 (HDR) or GAMMA22/BT.709 (SDR) description. The staged tag's commit is piggy-backed on the next eglSwapBuffers so the CM state and the first new-content buffer land atomically. We never leave the surface untagged at frame time — see vompl_video_surface_set_hdr's comment for why.
+    // The subsurface starts with no wp_color_management_v1 image description attached. C# calls vompl_video_surface_set_image_description synchronously post-render-context-ready, then again per-video from ApplyHdrPolicy as policy decisions arrive (SourceHdrChanged / CurrentOutputHdrChanged), staging either an HDR or SDR description chosen by the C# policy layer. The staged tag's commit is piggy-backed on the next eglSwapBuffers so the CM state and the first new-content buffer land atomically. We never leave the surface untagged at frame time — see vompl_video_surface_set_image_description's comment for why.
 
     // EGL setup.
     vs->egl_display = eglGetDisplay((EGLNativeDisplayType)display);
@@ -852,8 +857,6 @@ fail:
     if (vs->egl_surface != EGL_NO_SURFACE) { eglDestroySurface(vs->egl_display, vs->egl_surface); }
     if (vs->egl_window) { wl_egl_window_destroy(vs->egl_window); }
     if (vs->egl_context != EGL_NO_CONTEXT) { eglDestroyContext(vs->egl_display, vs->egl_context); }
-    if (vs->pq_image_desc) { wp_image_description_v1_destroy(vs->pq_image_desc); }
-    if (vs->sdr_image_desc) { wp_image_description_v1_destroy(vs->sdr_image_desc); }
     if (vs->cm_surface) { wp_color_management_surface_v1_destroy(vs->cm_surface); }
     if (vs->wl_subsurface) { wl_subsurface_destroy(vs->wl_subsurface); }
     if (vs->wl_surface) { wl_surface_destroy(vs->wl_surface); }
@@ -954,12 +957,12 @@ void vompl_video_surface_get_buffer_size(struct vompl_video_surface *vs, int *ou
     if (out_h) { *out_h = vs->buffer_h; }
 }
 
-// Tags the subsurface with an explicit image description: PQ/BT.2020 when enable=1, GAMMA22/BT.709 SDR when enable=0. Intentionally does NOT call wl_surface_commit — the next eglSwapBuffers flushes the CM state double-buffered alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor (no one-frame flash of mis-tagged content). Caller (C#) must only call EnableHdrOutput on mpv if this returns 0 with enable=1; returning -1 means the compositor didn't advertise wp_color_manager_v1 (or description build failed) and mpv must stay on default-auto targets, else PQ-encoded output would hit an untagged surface.
+// Stages the caller-described image description on the subsurface. Intentionally does NOT call wl_surface_commit — the next eglSwapBuffers flushes the CM state double-buffered alongside the first new-content buffer, so tag-change and frame-change land atomically on the compositor (no one-frame flash of mis-tagged content). Returns 0 on success; -1 means the compositor didn't advertise wp_color_manager_v1 (or the description build failed) — the C# policy layer must then keep mpv on default-auto targets, else PQ-encoded output would hit an untagged surface.
 //
-// Why the SDR tag is non-optional: per wp_color_management_v1 spec, an untagged surface's color handling is "compositor implementation defined." On KWin with an HDR output present, untagged subsurfaces get misinterpreted in a way that catastrophically blows out gamma22-encoded SDR output when it scans onto an SDR panel. We confirmed empirically that explicit GAMMA22/BT.709 tagging fixes it; the exact misinterpretation mechanism (likely the compositor's HDR-aware working color space treating the bytes as PQ) wasn't instrumented and isn't load-bearing for the fix. Spec language is enough: don't leave the surface in compositor-defined territory.
-int vompl_video_surface_set_hdr(struct vompl_video_surface *vs, int enable)
+// Why C# never leaves the surface untagged (it always stages an explicit SDR description rather than unsetting): per wp_color_management_v1 spec, an untagged surface's color handling is "compositor implementation defined." On KWin with an HDR output present, untagged subsurfaces get misinterpreted in a way that catastrophically blows out gamma22-encoded SDR output when it scans onto an SDR panel. We confirmed empirically that explicit GAMMA22/BT.709 tagging fixes it; the exact misinterpretation mechanism wasn't instrumented and isn't load-bearing for the fix. Spec language is enough: don't leave the surface in compositor-defined territory.
+int vompl_video_surface_set_image_description(struct vompl_video_surface *vs, const struct vompl_image_description_params *p)
 {
-    if (!vs)
+    if (!vs || !p)
     {
         return -1;
     }
@@ -967,27 +970,50 @@ int vompl_video_surface_set_hdr(struct vompl_video_surface *vs, int enable)
     {
         return -1;
     }
-    struct wp_image_description_v1 **slot = enable ? &vs->pq_image_desc : &vs->sdr_image_desc;
-    if (!*slot)
+    struct desc_cache_entry *slot = NULL;
+    for (int i = 0; i < 2; i++)
     {
-        *slot = enable ? build_pq_description(vs->display) : build_sdr_description(vs->display);
-        if (!*slot)
+        if (vs->desc_cache[i].valid && memcmp(&vs->desc_cache[i].params, p, sizeof(*p)) == 0)
         {
-            fprintf(stderr, "[vompl] set_hdr(enable=%d): description build failed\n", enable);
+            slot = &vs->desc_cache[i];
+            break;
+        }
+    }
+    if (!slot)
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            if (!vs->desc_cache[i].valid)
+            {
+                slot = &vs->desc_cache[i];
+                break;
+            }
+        }
+        if (!slot)
+        {
+            fprintf(stderr, "[vompl] set_image_description: both cache slots hold different params; refusing to evict a possibly-attached description (see desc_cache_entry comment)\n");
             return -1;
         }
+        struct wp_image_description_v1 *desc = build_description(vs->display, p);
+        if (!desc)
+        {
+            fprintf(stderr, "[vompl] set_image_description: build failed (primaries=%u tf=%u)\n", p->primaries_named, p->tf_named);
+            return -1;
+        }
+        slot->params = *p;
+        slot->desc = desc;
+        slot->valid = 1;
     }
     if (!vs->cm_surface)
     {
         vs->cm_surface = wp_color_manager_v1_get_surface(g_color_manager, vs->wl_surface);
         if (!vs->cm_surface)
         {
-            fprintf(stderr, "[vompl] set_hdr: get_surface failed\n");
+            fprintf(stderr, "[vompl] set_image_description: get_surface failed\n");
             return -1;
         }
     }
-    wp_color_management_surface_v1_set_image_description(
-        vs->cm_surface, *slot, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
+    wp_color_management_surface_v1_set_image_description(vs->cm_surface, slot->desc, p->render_intent);
     return 0;
 }
 
@@ -1016,8 +1042,10 @@ void vompl_video_surface_destroy(struct vompl_video_surface *vs)
     }
     if (vs->egl_window) { wl_egl_window_destroy(vs->egl_window); }
     if (vs->cm_surface) { wp_color_management_surface_v1_destroy(vs->cm_surface); }
-    if (vs->pq_image_desc) { wp_image_description_v1_destroy(vs->pq_image_desc); }
-    if (vs->sdr_image_desc) { wp_image_description_v1_destroy(vs->sdr_image_desc); }
+    for (int i = 0; i < 2; i++)
+    {
+        if (vs->desc_cache[i].valid) { wp_image_description_v1_destroy(vs->desc_cache[i].desc); }
+    }
     if (vs->wl_subsurface) { wl_subsurface_destroy(vs->wl_subsurface); }
     if (vs->wl_surface) { wl_surface_destroy(vs->wl_surface); }
     free(vs);
