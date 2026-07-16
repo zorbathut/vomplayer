@@ -93,7 +93,13 @@ public sealed class StateDatabase : IDisposable
             }
             try
             {
-                using var tx = connection.BeginTransaction();
+                // BEGIN IMMEDIATE (deferred: false) takes the write lock up front, and the re-check under it closes a first-launch race: two processes on a fresh DB can both read user_version=0 before either migrates; without this, the loser would replay a step against an already-migrated DB and crash on e.g. CREATE TABLE.
+                using var tx = connection.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+                if (ReadUserVersion(connection, tx) >= m.Version)
+                {
+                    version = m.Version;
+                    continue;
+                }
                 m.Apply(tx);
                 SetUserVersion(tx, m.Version);
                 tx.Commit();
@@ -174,7 +180,13 @@ public sealed class StateDatabase : IDisposable
 
     private static int ReadUserVersion(SqliteConnection connection)
     {
+        return ReadUserVersion(connection, null);
+    }
+
+    private static int ReadUserVersion(SqliteConnection connection, SqliteTransaction? tx)
+    {
         using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = "PRAGMA user_version;";
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
