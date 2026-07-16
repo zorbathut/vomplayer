@@ -39,12 +39,8 @@ public sealed partial class MainWindow
             var contents = File.ReadAllText(path);
             var items = PlaylistFile.Parse(contents, Path.GetDirectoryName(path));
             // Empty parse leaves the current playlist intact — VideoContext.LoadPaths early-returns on
-            // an empty list rather than wiping. Reveal the panel for multi-item results (drag-drop UX).
-            viewModel.LoadPaths(items, replace: true);
-            if (viewModel.Playlist.Items.Count >= 2)
-            {
-                ShowPlaylistPanel();
-            }
+            // an empty list rather than wiping.
+            LoadReplacingAndRevealPanel(viewModel.SingleTarget, items);
         }
         catch (Exception ex)
         {
@@ -66,11 +62,7 @@ public sealed partial class MainWindow
                 return;
             }
             var items = PlaylistFile.Parse(text, null);
-            viewModel.LoadPaths(items, replace: true);
-            if (viewModel.Playlist.Items.Count >= 2)
-            {
-                ShowPlaylistPanel();
-            }
+            LoadReplacingAndRevealPanel(viewModel.SingleTarget, items);
         }
         catch (Exception ex)
         {

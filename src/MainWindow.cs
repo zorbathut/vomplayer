@@ -534,8 +534,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
             return;
         }
         // Drop on the primary video area always targets Primary, regardless of active slot. (When PiP is off this is identical to the window-level drop's target.)
-        viewModel.Primary.LoadPaths(paths, replace: true);
-        if (viewModel.Primary.Playlist.Items.Count >= 2)
+        LoadReplacingAndRevealPanel(viewModel.Primary, paths);
+    }
+
+    // Shared tail for every replace-load entry point (video/window drops, CLI forwards, playlist file/clipboard imports): load into the given context and auto-show the panel for multi-item results so first-time users see what their action produced. Single-file loads don't reveal — the user already sees their file playing.
+    internal void LoadReplacingAndRevealPanel(ViewModels.VideoContext target, IReadOnlyList<string> paths)
+    {
+        target.LoadPaths(paths, replace: true);
+        if (target.Playlist.Items.Count >= 2)
         {
             ShowPlaylistPanel();
         }
@@ -658,12 +664,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
             // Empty payload (typically: a directory drop that had no recognized video files inside). Don't orphan currently-playing media — UriListDropTarget already called drop.Finish, we just ignore.
             return;
         }
-        viewModel.LoadPaths(paths, replace: true);
-        // Auto-show the panel for multi-item playlists so first-time users see the result of their drop. Single-file drops don't reveal — the user already sees their file playing.
-        if (viewModel.Playlist.Items.Count >= 2)
-        {
-            ShowPlaylistPanel();
-        }
+        LoadReplacingAndRevealPanel(viewModel.SingleTarget, paths);
     }
 
     // Single dispatch site for HotkeyMap-bound actions. Returns true when the input has been consumed so the key controller can short-circuit propagation; the click handler ignores the return value because GestureClick doesn't propagate the same way. ExitFullscreen returns false when not actually fullscreen so the bound key (typically Escape) doesn't get silently swallowed in non-fullscreen state — matches the pre-customization behavior.
@@ -832,11 +833,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         {
             return;
         }
-        viewModel.Primary.LoadPaths(paths, replace: true);
-        if (viewModel.Primary.Playlist.Items.Count >= 2)
-        {
-            ShowPlaylistPanel();
-        }
+        LoadReplacingAndRevealPanel(viewModel.Primary, paths);
     }
 
     // Notify handler for the "fullscreened" property. Resyncs when the compositor/WM changes the window state behind our back (e.g., a tiling-WM shortcut that un-fullscreens). If the state already matches, SetFullscreen already applied the visibility logic synchronously — no work left.

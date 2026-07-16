@@ -10,6 +10,12 @@ internal static partial class WaylandDetect
     [LibraryImport(GtkLib, EntryPoint = "gdk_wayland_display_get_wl_display")]
     private static partial IntPtr GdkWaylandDisplayGetWlDisplay(IntPtr display);
 
+    // Shared binding — VideoSurface also needs the wl_display to hand to the shim. Lives here so the SONAME-pinned import exists exactly once.
+    internal static IntPtr GetWlDisplay(IntPtr gdkDisplayHandle)
+    {
+        return GdkWaylandDisplayGetWlDisplay(gdkDisplayHandle);
+    }
+
     // Returns true if the Gdk.Display is backed by Wayland. Implementation: call gdk_wayland_display_get_wl_display; on non-Wayland backends this returns NULL (and GDK logs a warning on stderr, but the call itself is safe). We swallow that stderr noise — it's the price of having no cleaner backend-detection API in GirCore 0.7.0.
     public static bool IsWaylandBackend(Gdk.Display display)
     {

@@ -12,9 +12,6 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
 {
     private const string GtkLib = "libgtk-4.so.1";
 
-    [LibraryImport(GtkLib, EntryPoint = "gdk_wayland_display_get_wl_display")]
-    private static partial IntPtr GdkWaylandDisplayGetWlDisplay(IntPtr display);
-
     [LibraryImport(GtkLib, EntryPoint = "gdk_wayland_surface_get_wl_surface")]
     private static partial IntPtr GdkWaylandSurfaceGetWlSurface(IntPtr surface);
 
@@ -291,7 +288,7 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
             RenderFailed?.Invoke(-1);
             return;
         }
-        wlDisplay = GdkWaylandDisplayGetWlDisplay(gdkDisplay.Handle.DangerousGetHandle());
+        wlDisplay = WaylandDetect.GetWlDisplay(gdkDisplay.Handle.DangerousGetHandle());
         IntPtr wlSurface = GdkWaylandSurfaceGetWlSurface(gdkSurface.Handle.DangerousGetHandle());
         if (wlDisplay == IntPtr.Zero || wlSurface == IntPtr.Zero)
         {
