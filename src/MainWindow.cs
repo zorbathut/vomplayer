@@ -243,14 +243,17 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         videoOverlay.SetHexpand(true);
         videoOverlay.SetVexpand(true);
 
-        // Black placeholder that fills the video region while the Wayland subsurface has no buffer attached yet (subsurface placed below the transparent parent shows the desktop through otherwise). Hidden permanently on mpv's FirstFrameRendered.
+        // Black placeholder that fills the video region while the Wayland subsurface has no buffer attached yet (subsurface placed below the transparent parent shows the desktop through otherwise). Hidden permanently on mpv's FirstFrameRendered. Wayland-path only: the GLArea path draws into its own widget (no transparency gap to mask) and has no FirstFrameRendered event, so adding the overlay there would cover the video forever.
         noVideoBg = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         noVideoBg.AddCssClass("vompl-no-video-bg");
         noVideoBg.SetHalign(Gtk.Align.Fill);
         noVideoBg.SetValign(Gtk.Align.Fill);
         noVideoBg.SetHexpand(true);
         noVideoBg.SetVexpand(true);
-        videoOverlay.AddOverlay(noVideoBg);
+        if (videoSurface != null)
+        {
+            videoOverlay.AddOverlay(noVideoBg);
+        }
 
         // Playlist panel sits to the right of the video. Hidden by default; toggled by "View → Playlist" or auto-shown when a multi-file drop populates the playlist (so first-time users see the result of their drop without hunting through menus). Wholesale-rebuild on Playlist.Changed.
         playlistPanel = new Controls.PlaylistPanel(viewModel.Playlist, viewModel.PlayPlaylistItem);
