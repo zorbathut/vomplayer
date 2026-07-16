@@ -280,7 +280,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         // --no-warnings + --no-progress in stderr keeps stderr clean for actual error output.
         psi.ArgumentList.Add("--newline");
         psi.ArgumentList.Add("--progress-template");
-        psi.ArgumentList.Add($"{ProgressPrefix} %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.status)s");
+        psi.ArgumentList.Add($"{ProgressPrefix} %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.status)s");
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add($"after_move:{FilenamePrefix} %(filepath)s");
         psi.ArgumentList.Add("--no-quiet");
@@ -374,9 +374,9 @@ public sealed class YtDlpDownloader : IUrlDownloader
     internal static bool TryParseProgress(string line, out UrlDownloadProgress progress)
     {
         progress = default!;
-        // Format: "VOMPLPROG <downloaded> <total> <status>". yt-dlp prints "NA" for unknown numeric fields; we map that to null/0 as appropriate.
+        // Format: "VOMPLPROG <downloaded> <total> <total_estimate> <status>". yt-dlp prints "NA" for unknown numeric fields; we map that to null/0 as appropriate. total_bytes is NA for HLS/DASH downloads, where yt-dlp puts the usable figure in total_bytes_estimate instead — prefer the exact value, fall back to the estimate so those downloads get a determinate bar. The estimate is emitted as a float ("12345.0"), hence the double parse.
         var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 4 || parts[0] != ProgressPrefix)
+        if (parts.Length < 5 || parts[0] != ProgressPrefix)
         {
             return false;
         }
@@ -389,7 +389,11 @@ public sealed class YtDlpDownloader : IUrlDownloader
         {
             total = totalParsed;
         }
-        string status = parts[3];
+        else if (double.TryParse(parts[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double estimate) && estimate > 0)
+        {
+            total = (long)estimate;
+        }
+        string status = parts[4];
         progress = new UrlDownloadProgress(downloaded, total, status);
         return true;
     }
