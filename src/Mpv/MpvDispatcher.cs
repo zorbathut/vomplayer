@@ -225,11 +225,6 @@ internal readonly ref struct MpvHandle
         return client.ObserveProperty(name, format);
     }
 
-    public int UnobserveProperty(ulong id)
-    {
-        return client.UnobserveProperty(id);
-    }
-
     public void DrainEvents()
     {
         client.DrainEvents();

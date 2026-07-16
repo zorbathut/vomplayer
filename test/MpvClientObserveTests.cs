@@ -64,35 +64,6 @@ public class MpvClientObserveTests
     }
 
     [Test]
-    public void UnobserveStopsFurtherEvents()
-    {
-        using var mpv = NewHeadless();
-        var events = new List<PropertyChange>();
-        mpv.PropertyChanged += events.Add;
-
-        var id = mpv.ObserveProperty("pause", MpvFormat.Flag);
-        PumpUntil(mpv, () => events.Count > 0, TimeSpan.FromSeconds(1));
-        var countBefore = events.Count;
-
-        var removed = mpv.UnobserveProperty(id);
-        Assert.That(removed, Is.EqualTo(1));
-
-        // Mutating the property would normally fire a PropertyChange event. After
-        // unobserve, nothing more should arrive for this id.
-        mpv.SetProperty("pause", "yes");
-
-        // Pump for a bounded period to catch any late events.
-        var stop = DateTime.UtcNow + TimeSpan.FromMilliseconds(200);
-        while (DateTime.UtcNow < stop)
-        {
-            mpv.DrainEvents();
-            Thread.Sleep(10);
-        }
-
-        Assert.That(events.Count, Is.EqualTo(countBefore));
-    }
-
-    [Test]
     public void TwoObserversDemuxById()
     {
         using var mpv = NewHeadless();
@@ -129,11 +100,4 @@ public class MpvClientObserveTests
         Assert.That(events.Any(e => e.Id == id2), Is.True);
     }
 
-    [Test]
-    public void UnobserveUnknownIdReturnsZero()
-    {
-        using var mpv = NewHeadless();
-        var removed = mpv.UnobserveProperty(99999);
-        Assert.That(removed, Is.Zero);
-    }
 }

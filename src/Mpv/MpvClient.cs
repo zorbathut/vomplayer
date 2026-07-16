@@ -184,17 +184,6 @@ internal sealed class MpvClient : IDisposable
         return id;
     }
 
-    // Returns the number of observations removed — 0 means the id wasn't registered. Not throwing on 0 lets callers write idempotent cleanup paths.
-    public int UnobserveProperty(ulong id)
-    {
-        var rc = LibMpv.UnobserveProperty(ctx, id);
-        if (rc < 0)
-        {
-            throw new MpvException(rc, LibMpv.ErrorString(rc));
-        }
-        return rc;
-    }
-
     public void DrainEvents()
     {
         if (ctx == IntPtr.Zero)

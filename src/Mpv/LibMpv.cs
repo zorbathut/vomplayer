@@ -34,9 +34,6 @@ internal static partial class LibMpv
     [LibraryImport(Lib, EntryPoint = "mpv_observe_property", StringMarshalling = StringMarshalling.Utf8)]
     public static partial int ObserveProperty(IntPtr ctx, ulong replyUserData, string name, MpvFormat format);
 
-    [LibraryImport(Lib, EntryPoint = "mpv_unobserve_property")]
-    public static partial int UnobserveProperty(IntPtr ctx, ulong registeredReplyUserData);
-
     [LibraryImport(Lib, EntryPoint = "mpv_free")]
     public static partial void Free(IntPtr data);
 
@@ -46,9 +43,6 @@ internal static partial class LibMpv
     // Asks libmpv to deliver log messages at or above `minLevel` via MPV_EVENT_LOG_MESSAGE. Levels (lowest-detail to most): "no" "fatal" "error" "warn" "info" "status" "v" "debug" "trace". Pass "no" to disable. Each delivered event carries an mpv_event_log_message struct (see EventLogMessage). Safe to call before or after Initialize. mpv terminates the message text with a single newline; consumers should strip it before display.
     [LibraryImport(Lib, EntryPoint = "mpv_request_log_messages", StringMarshalling = StringMarshalling.Utf8)]
     public static partial int RequestLogMessages(IntPtr ctx, string minLevel);
-
-    [LibraryImport(Lib, EntryPoint = "mpv_command_string", StringMarshalling = StringMarshalling.Utf8)]
-    public static partial int CommandString(IntPtr ctx, string args);
 
     [LibraryImport(Lib, EntryPoint = "mpv_wait_event")]
     public static partial IntPtr WaitEvent(IntPtr ctx, double timeout);
@@ -184,13 +178,6 @@ public enum MpvFormat
     NodeArray = 7,
     NodeMap = 8,
     ByteArray = 9,
-}
-
-[Flags]
-public enum MpvRenderUpdateFlag : ulong
-{
-    None = 0,
-    Frame = 1UL << 0,
 }
 
 public enum MpvRenderParamType
