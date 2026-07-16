@@ -96,7 +96,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     HotkeyMap IPipHost.Hotkeys { get { return hotkeys; } }
     void IPipHost.ExecuteAction(HotkeyAction action) { ExecuteAction(action); }
 
-    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
+    public MainWindow(Gtk.Application app, Playback.Playback playback, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, System.Collections.Generic.IReadOnlyList<string>? initialFiles)
     {
         if (app == null)
         {
@@ -157,10 +157,10 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         this.urlPrompt = new UrlPromptGtk(this, downloadStatusOverlay);
         viewModel = new ViewModelMain(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         viewModel.ChapterSeekPrerollSeconds = userConfig.Application.ChapterSeekPrerollSeconds;
-        // AttachAutosave before InitialFile is consumed (OnRenderContextReady) so the very first user-visible action — even one driven by the CLI arg — is captured.
+        // AttachAutosave before InitialFiles is consumed (OnRenderContextReady) so the very first user-visible action — even one driven by the CLI args — is captured.
         viewModel.AttachAutosave(savedPlaylists);
         viewModel.Autosave!.Saved += RebuildRecentMenu;
-        viewModel.InitialFile = initialFile;
+        viewModel.InitialFiles = initialFiles;
 
         Gtk.Widget videoWidget;
         if (WaylandDetect.IsWaylandBackend(GetDisplay()))

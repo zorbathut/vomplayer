@@ -41,7 +41,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     [ObservableProperty]
     private bool isPipEnabled;
 
-    public string? InitialFile { get; set; }
+    // Files passed on the command line, consumed once on the first render-context-ready. A list, not a single path: `vomplayer a.mp4 b.mp4` loads all of them, matching what the same invocation does when forwarded to an already-running primary.
+    public IReadOnlyList<string>? InitialFiles { get; set; }
     private bool initialFileLoaded;
 
     // The stored intended delta between the two streams: Secondary.Position == Primary.Position + targetOffsetSeconds. This is the single source of truth for sync-mode absolute seeks — they re-pin Secondary to primaryTarget + this — and the value the continuous drift controller defends. The governing rule: the offset is (re)captured ONLY by actions that establish the sync relationship from the current positions — EnablePip → 0; FileLoaded → null/pending; the selected→sync transition → captured divergence; EnsureTargetOffset's baseline-on-first-use of a pending value; and a sync-mode PlayPause that changes only ONE stream's play state (converging a differed pair "joins" one stream to the other, which sets the sync point). Actions that move BOTH streams together (sync Seek/StepChapter/StepFrame, a same-state play-both) never write it — they read and defend it, so ordinary seeking/playback can't shift the user's sync. Null means "pending" — no PiP, or not yet baselined after a load; reads go through EnsureTargetOffset, which resolves a pending value from the current divergence.
@@ -592,10 +593,17 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             return;
         }
         initialFileLoaded = true;
-        if (!string.IsNullOrEmpty(InitialFile))
+        if (InitialFiles != null && InitialFiles.Count > 0)
         {
-            // Initial file always lands in Primary — InitialFile is a process-level "the user passed this on argv" concept, not a per-context one. Routes through OpenFile so the command-line file is recorded in recents the same way drag-and-drop and the file picker are.
-            Primary.OpenFile(InitialFile);
+            // Initial files always land in Primary — InitialFiles is a process-level "the user passed these on argv" concept, not a per-context one. A single file routes through OpenFile so it's recorded in recents the same way drag-and-drop and the file picker are; multiple files go through the same replace-load the forwarded-command-line path uses.
+            if (InitialFiles.Count == 1)
+            {
+                Primary.OpenFile(InitialFiles[0]);
+            }
+            else
+            {
+                Primary.LoadPaths(InitialFiles, replace: true);
+            }
             return;
         }
         // A remote-forwarded GApplication OnOpen can arrive between window construction and the first render-context-ready callback. If that happened, Primary already has the externally-loaded file in its playlist — don't clobber it with the saved-playlist restore. Race window is small but real on slow startup.

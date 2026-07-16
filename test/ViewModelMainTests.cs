@@ -665,7 +665,7 @@ public partial class ViewModelMainTests
         var recents = new FakeRecentFiles();
         var vm = new ViewModelMain(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt())
         {
-            InitialFile = "/path/to/initial.mp4",
+            InitialFiles = new[] { "/path/to/initial.mp4" },
         };
 
         vm.OnRenderContextReady();
@@ -678,6 +678,21 @@ public partial class ViewModelMainTests
         vm.OnRenderContextReady();
         Assert.That(pb.LoadFileCalls, Is.EqualTo(1));
         Assert.That(recents.RecordedPaths.Count, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void OnRenderContextReadyLoadsAllInitialFiles()
+    {
+        // `vomplayer a.mp4 b.mp4` on a cold start must load both — the same invocation forwarded to a running primary already did, and the two paths must agree.
+        var pb = new FakePlayback();
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt())
+        {
+            InitialFiles = new[] { "/a.mp4", "/b.mp4" },
+        };
+
+        vm.OnRenderContextReady();
+        Assert.That(vm.Primary.Playlist.Items, Is.EqualTo(new[] { "/a.mp4", "/b.mp4" }));
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/a.mp4"));
     }
 
     [Test]

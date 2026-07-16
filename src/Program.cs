@@ -89,8 +89,8 @@ public static class Program
             var paths = StartupHelpers.ResolveCommandLineFiles(forwardedArgv, cwd, msg => Console.Error.WriteLine($"[vomplayer] {msg}"));
             if (window == null)
             {
-                // First-launch path (whether primary started with no args, with a file, or got a forwarded command line). Pass paths[0] as initialFile so OnRenderContextReady consumes it through Primary.OpenFile; extra files are dropped, matching the historical "one positional arg" behavior.
-                window = BuildAndPresent((Gtk.Application)sender, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, paths.Count > 0 ? paths[0] : null);
+                // First-launch path (whether primary started with no args, with files, or got a forwarded command line). All paths go through as InitialFiles, consumed on the first render-context-ready — same set of files the forwarded-to-running-primary branch below loads, so the two paths agree.
+                window = BuildAndPresent((Gtk.Application)sender, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, paths.Count > 0 ? paths : null);
             }
             else if (paths.Count > 0)
             {
@@ -108,7 +108,7 @@ public static class Program
         return app.RunWithSynchronizationContext(runArgs);
     }
 
-    private static MainWindow BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, string? initialFile)
+    private static MainWindow BuildAndPresent(Gtk.Application app, IRecentFiles recentFiles, ISavedPlaylists savedPlaylists, ITrackPreferences trackPreferences, UserConfig userConfig, string configPath, System.Collections.Generic.IReadOnlyList<string>? initialFiles)
     {
         // gtk_init ran setlocale(LC_ALL, "") already; force LC_NUMERIC=C back before any mpv call. Must happen on the main thread after GTK init, not before Main.
         LibC.ForceCNumericLocale();
@@ -120,7 +120,7 @@ public static class Program
         // Safety-net dispose for exit paths that bypass MainWindow.OnWindowCloseRequest (any future app.Quit() trigger, or a normal-but-non-window-close shutdown). On the typical close-the-window exit, OnWindowCloseRequest's chain has already disposed primary playback via Primary VideoContext.Dispose; this call is a no-op via the MpvDispatcher's idempotent disposed flag. Doesn't cover SIGKILL or process abort — those are OS-level concerns .NET can't intercept.
         app.OnShutdown += (_, _) => playback.Dispose();
 
-        var window = new MainWindow(app, playback, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, initialFile);
+        var window = new MainWindow(app, playback, recentFiles, savedPlaylists, trackPreferences, userConfig, configPath, initialFiles);
         window.Present();
         return window;
     }
