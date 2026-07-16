@@ -390,16 +390,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
             CheckLockstepAdvance();
             return;
         }
-        // ActiveHdrState is per-context coordination state, not a view-facing observable.
-        if (e.PropertyName == nameof(VideoContext.ActiveHdrState))
-        {
-            return;
-        }
         if (!ReferenceEquals(sender, SingleTarget))
         {
             return;
         }
-        // Re-fire on this VM under the same name. Property names on VideoContext intentionally match the VM's proxy properties one-to-one, so a verbatim re-fire is correct.
+        // Re-fire on this VM under the same name. VideoContext property names that have VM proxies match them one-to-one, so a verbatim re-fire is correct; context observables WITHOUT a proxy (CurrentFilePath, VideoAspect, VideoFps) also pass through, harmlessly — the view's name-switch has no case for them and consumers that care (PipController) subscribe to the contexts directly.
         OnPropertyChanged(e.PropertyName);
     }
 

@@ -286,12 +286,6 @@ public sealed partial class MainWindow
         }
         recentMenu.RemoveAll();
 
-        // savedPlaylists may be null in the brief window between MainWindow ctor and the AttachAutosave / construction-side wiring — render the placeholder rather than crash.
-        if (savedPlaylists == null)
-        {
-            recentMenu.InsertItem(-1, Gio.MenuItem.New("(no recent playlists)", "win.noop-recent-empty"));
-            return;
-        }
         var entries = savedPlaylists.GetMostRecent(RecentMenuPullLimit);
         var selected = PlaylistMenuSelector.Select(entries, RecentMenuTotalSlots, RecentMenuDirectoryCoverageSlots);
         if (selected.Count == 0)
