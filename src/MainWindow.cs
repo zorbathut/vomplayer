@@ -51,9 +51,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private Gio.SimpleAction? playlistVisibleAction;
     // Window-title brand string, rolled once at construction. The 1% VomplAyer roll wants to be stable for the session — re-rolling on every media-title update would let it flicker mid-playback.
     private readonly string brand;
-    private readonly VideoView? videoView;
-    private readonly VideoArea? videoArea;
-    private readonly VideoSurface? videoSurface;
+    private readonly Controls.IVideoHost videoHost;
     private readonly PipController pipController;
     private readonly DiagnosticOverlay diagnosticOverlay;
     private readonly DownloadStatusOverlay downloadStatusOverlay;
@@ -89,9 +87,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     Gtk.Window IPipHost.Window { get { return this; } }
     Gtk.Overlay IPipHost.VideoOverlay { get { return videoOverlay; } }
     Gtk.Box IPipHost.ControlsBox { get { return controlsBox; } }
-    VideoArea? IPipHost.PrimaryArea { get { return videoArea; } }
-    VideoView? IPipHost.PrimaryView { get { return videoView; } }
-    VideoSurface? IPipHost.PrimarySurface { get { return videoSurface; } }
+    Controls.IVideoHost IPipHost.PrimaryHost { get { return videoHost; } }
     Controls.PlaylistPanel IPipHost.PlaylistPanel { get { return playlistPanel; } }
     HotkeyMap IPipHost.Hotkeys { get { return hotkeys; } }
     void IPipHost.ExecuteAction(HotkeyAction action) { ExecuteAction(action); }
@@ -162,29 +158,20 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         viewModel.Autosave!.Saved += RebuildRecentMenu;
         viewModel.InitialFiles = initialFiles;
 
-        Gtk.Widget videoWidget;
+        // Path decision happens once, here; everything downstream holds the IVideoHost seam instead of per-path fields. VideoContext (inside the VM) owns the per-instance HDR policy: it subscribes to playback.SourceHdrChanged in its ctor and to surface.CurrentOutputHdrChanged when AttachHdrSink runs. AttachHdrSink fires from OnVideoRenderContextReady (post-realize) so SetHdr's pre-stage SDR call lands on a ready surface.
         if (WaylandDetect.IsWaylandBackend(GetDisplay()))
         {
-            var area = new VideoArea();
-            var surface = new VideoSurface(this, area);
-            playback.AttachRenderSurface(d => surface.SetMpvDispatcher(d));
-            surface.RenderContextReady += OnVideoRenderContextReadyWayland;
-            surface.RenderFailed += OnVideoRenderFailed;
-            surface.FirstFrameRendered += OnPrimaryFirstFrameRendered;
-            videoArea = area;
-            videoSurface = surface;
-            videoWidget = area;
-            // VideoContext (inside the VM) owns the per-instance HDR policy now: it subscribes to playback.SourceHdrChanged in its ctor and to surface.CurrentOutputHdrChanged when AttachHdrSink runs. AttachHdrSink fires from OnVideoRenderContextReadyWayland (post-realize) so SetHdr's pre-stage SDR call lands on a ready surface.
+            videoHost = new Controls.VideoHostWayland(this);
         }
         else
         {
-            var view = new VideoView();
-            playback.AttachRenderSurface(d => view.AttachDispatcher(d));
-            view.RenderContextReady += OnVideoRenderContextReadyGLArea;
-            view.RenderFailed += OnVideoRenderFailed;
-            videoView = view;
-            videoWidget = view;
+            videoHost = new Controls.VideoHostGlArea();
         }
+        videoHost.AttachPlayback(playback);
+        videoHost.RenderContextReady += OnVideoRenderContextReady;
+        videoHost.RenderFailed += OnVideoRenderFailed;
+        videoHost.FirstFrameRendered += OnPrimaryFirstFrameRendered;
+        Gtk.Widget videoWidget = videoHost.Widget;
 
         // Freedesktop standard icon names — present in every GTK icon theme (Adwaita, Yaru, Breeze, …). Tooltip carries the textual affordance for accessibility and discoverability since the button is icon-only.
         playPauseButton = Gtk.Button.NewFromIconName("media-playback-start");
@@ -250,7 +237,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         noVideoBg.SetValign(Gtk.Align.Fill);
         noVideoBg.SetHexpand(true);
         noVideoBg.SetVexpand(true);
-        if (videoSurface != null)
+        if (videoHost.WaylandSurface != null)
         {
             videoOverlay.AddOverlay(noVideoBg);
         }
@@ -491,13 +478,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         muteButton.SetTooltipText(viewModel.IsMuted ? "Unmute" : "Mute");
     }
 
-    // Wayland path: hand the IHdrSink to the per-context HDR policy so it can pre-stage the SDR image description (synchronously, before any frame renders), subscribe to output-HDR transitions, and run an initial ApplyHdrPolicy. AttachHdrSink encapsulates that sequence — see its docstring for the three pre-stage edge cases it covers. Same surface implements IVrrSink for the per-output VRR window, so attach it on the same boundary; AttachVrrSink runs an initial ApplyVrrPolicy once both sink and source FPS are known.
-    private void OnVideoRenderContextReadyWayland()
+    // Wayland path: hand the IHdrSink to the per-context HDR policy so it can pre-stage the SDR image description (synchronously, before any frame renders), subscribe to output-HDR transitions, and run an initial ApplyHdrPolicy. AttachHdrSink encapsulates that sequence — see its docstring for the three pre-stage edge cases it covers. Same surface implements IVrrSink for the per-output VRR window, so attach it on the same boundary; AttachVrrSink runs an initial ApplyVrrPolicy once both sink and source FPS are known. GLArea path: WaylandSurface is null and playback stays SDR — the old main-surface HDR attach produced a blown-out UI (GTK widgets render sRGB values into a surface KWin interprets as PQ) and can't be toggled per-file without destroying the GTK surface, so HDR content is tonemapped by mpv's auto targeting.
+    private void OnVideoRenderContextReady()
     {
-        if (videoSurface != null)
+        var surface = videoHost.WaylandSurface;
+        if (surface != null)
         {
-            viewModel.Primary.AttachHdrSink(videoSurface);
-            viewModel.Primary.AttachVrrSink(videoSurface);
+            viewModel.Primary.AttachHdrSink(surface);
+            viewModel.Primary.AttachVrrSink(surface);
         }
         viewModel.OnRenderContextReady();
     }
@@ -547,12 +535,6 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         {
             ShowPlaylistPanel();
         }
-    }
-
-    // GLArea path: always SDR. The old main-surface HDR attach produced a blown-out UI (GTK widgets render sRGB values into a surface KWin interprets as PQ) and can't be toggled per-file without destroying the GTK surface, so this path is SDR-only; HDR content is tonemapped by mpv's auto targeting.
-    private void OnVideoRenderContextReadyGLArea()
-    {
-        viewModel.OnRenderContextReady();
     }
 
     private void OnVideoRenderFailed(int code)
@@ -1060,15 +1042,14 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         }
         // Disposal order is load-bearing in two ways:
         //   (1) DiagnosticOverlay's 1 Hz timer reads playback + pipController — kill it first.
-        //   (2) videoSurface.Dispose (Wayland) / videoView.TeardownRenderContext (GLArea) calls mpv_render_context_free against the primary mpv handle; the handle is terminated by primary playback.Dispose which runs inside viewModel.Dispose (Primary VideoContext now owns its IPlayback's lifetime). So the render surface MUST dispose before viewModel — see MpvDispatcher.Dispose comment about render-surface-before-dispatcher ordering. The GLArea's unrealize-driven free would otherwise run at window destruction, after the core is gone.
+        //   (2) videoHost.TeardownRenderSurface calls mpv_render_context_free against the primary mpv handle; the handle is terminated by primary playback.Dispose which runs inside viewModel.Dispose (Primary VideoContext now owns its IPlayback's lifetime). So the render surface MUST tear down before viewModel — see MpvDispatcher.Dispose comment about render-surface-before-dispatcher ordering. (On the GLArea path the unrealize-driven free would otherwise run at window destruction, after the core is gone.)
         // PipController internally observes the same order for the secondary stream (its own surface disposes before viewModel.DisablePip).
         diagnosticOverlay.Dispose();
         downloadStatusOverlay.Dispose();
         pipController.Dispose();
         seekScaleController.Dispose();
         playlistPanel.Dispose();
-        videoSurface?.Dispose();
-        videoView?.TeardownRenderContext();
+        videoHost.TeardownRenderSurface();
         viewModel.Dispose();
         return false;
     }

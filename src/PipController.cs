@@ -11,7 +11,7 @@ using Vomplayer.Wayland;
 
 namespace Vomplayer;
 
-// Picture-in-Picture controller. Owns the secondary Playback / VideoSurface / VideoView, the stream-selector toolbar (widget construction only — MainWindow handles its placement in rootBox and fullscreen reparenting), the PiP layout machinery (drag-to-move, aspect-locked corner resize, hover-driven grip visibility), and the drift-controller tick timer. Subscribes to the VM's IsPipEnabled / SelectedSlot changes to keep the UI in sync; subscribes to each VideoContext's PropertyChanged for toolbar labels and PiP aspect.
+// Picture-in-Picture controller. Owns the secondary Playback and its IVideoHost, the stream-selector toolbar (widget construction only — MainWindow handles its placement in rootBox and fullscreen reparenting), the PiP layout machinery (drag-to-move, aspect-locked corner resize, hover-driven grip visibility), and the drift-controller tick timer. Subscribes to the VM's IsPipEnabled / SelectedSlot changes to keep the UI in sync; subscribes to each VideoContext's PropertyChanged for toolbar labels and PiP aspect.
 //
 // The secondary widget is wrapped in a `pipContainer` Gtk.Overlay; the container carries the absolute layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest) and hosts a small bottom-right resize grip. Drag gestures on the secondary move the container; on the grip, aspect-locked resize. Layout math (defaults, clamping, aspect projection) is in PipLayoutCalc — kept pure for unit tests.
 //
@@ -38,10 +38,8 @@ public sealed class PipController : IDisposable
     private readonly IUrlDownloader urlDownloader;
     private readonly IUrlPrompt urlPrompt;
 
-    // Secondary (PiP) widget set. All null when PiP is off; populated by Enable / torn down by Disable. The secondary Playback's lifetime is owned by the secondary VideoContext (constructed in Enable, disposed by viewModel.DisablePip → VideoContext.Dispose → playback.Dispose), so PipController doesn't track a field for it.
-    private VideoArea? secondaryArea;
-    private VideoView? secondaryView;
-    private VideoSurface? secondarySurface;
+    // Secondary (PiP) video host. Null when PiP is off; populated by Enable / torn down by Disable. The secondary Playback's lifetime is owned by the secondary VideoContext (constructed in Enable, disposed by viewModel.DisablePip → VideoContext.Dispose → playback.Dispose), so PipController doesn't track a field for it.
+    private IVideoHost? secondaryHost;
 
     // Wrapper hosting (secondary widget + resize grip). Carries the layout (margins/size). Null when PiP is off.
     private Gtk.Overlay? pipContainer;
@@ -189,16 +187,7 @@ public sealed class PipController : IDisposable
         var secondaryCtx = new VideoContext(pb, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         viewModel.EnablePip(secondaryCtx);
 
-        if (host.PrimaryArea != null)
-        {
-            // Wayland subsurface path.
-            BuildSecondaryVideoArea(secondaryCtx, pb);
-        }
-        else if (host.PrimaryView != null)
-        {
-            // GLArea fallback path.
-            BuildSecondaryVideoView(pb);
-        }
+        BuildSecondaryVideo(secondaryCtx, pb);
 
         // Track the primary's video aspect: a primary file load/unload changes the letterbox/pillarbox layout, which moves the video display rect the PiP is positioned relative to. ApplyPipLayout reads the current rect on each call, so we just need to re-trigger it when the aspect flips.
         viewModel.Primary.PropertyChanged += OnPrimaryContextPropertyChangedForPip;
@@ -240,30 +229,15 @@ public sealed class PipController : IDisposable
             GLib.Functions.SourceRemove(syncTimeoutId);
             syncTimeoutId = 0;
         }
-        if (host.PrimaryArea != null)
+        host.PrimaryHost.GeometryChanged -= OnPrimaryGeometryChangedForPip;
+        // Tear down the secondary render surface BEFORE viewModel.DisablePip — TeardownRenderSurface calls mpv_render_context_free against the secondary mpv handle, and viewModel.DisablePip → Secondary VideoContext.Dispose → secondary playback.Dispose terminates that handle. See MpvDispatcher.Dispose's "render surface must be disposed before the dispatcher" comment.
+        if (secondaryHost != null)
         {
-            host.PrimaryArea.GeometryChanged -= OnPrimaryAreaGeometryChangedForPip;
-        }
-        if (host.PrimaryView != null)
-        {
-            host.PrimaryView.OnResize -= OnPrimaryViewResizeForPip;
-        }
-        // Dispose the secondary render surface BEFORE viewModel.DisablePip — the surface's Dispose calls mpv_render_context_free against the secondary mpv handle, and viewModel.DisablePip → Secondary VideoContext.Dispose → secondary playback.Dispose terminates that handle. See MpvDispatcher.Dispose's "render surface must be disposed before the dispatcher" comment.
-        if (secondarySurface != null)
-        {
-            secondarySurface.RenderContextReady -= OnSecondaryRenderContextReadyWayland;
-            secondarySurface.RenderFailed -= OnSecondaryRenderFailed;
-            secondarySurface.FirstFrameRendered -= OnSecondaryFirstFrameRendered;
-            secondarySurface.Dispose();
-            secondarySurface = null;
-        }
-        if (secondaryView != null)
-        {
-            secondaryView.RenderContextReady -= OnSecondaryRenderContextReadyGLArea;
-            secondaryView.RenderFailed -= OnSecondaryRenderFailed;
-            // Same ordering contract as secondarySurface above: free the render context before viewModel.DisablePip terminates the secondary mpv core. Waiting for the widget's unrealize (RemoveOverlay below) would free it after the core is gone — documented UB in libmpv.
-            secondaryView.TeardownRenderContext();
-            secondaryView = null;
+            secondaryHost.RenderContextReady -= OnSecondaryRenderContextReady;
+            secondaryHost.RenderFailed -= OnSecondaryRenderFailed;
+            secondaryHost.FirstFrameRendered -= OnSecondaryFirstFrameRendered;
+            secondaryHost.TeardownRenderSurface();
+            secondaryHost = null;
         }
         // VM teardown now: disposes Secondary VideoContext (which detaches HDR/VRR sinks, unsubscribes Playback events, and disposes secondary Playback).
         viewModel.DisablePip();
@@ -275,7 +249,6 @@ public sealed class PipController : IDisposable
             pipResizeGripWidget = null;
             pipHoverController = null;
         }
-        secondaryArea = null;
         // Reset user-set layout so a future Enable starts at the default corner placement again. Persisting across enable/disable was considered and rejected — re-enabling a previously-dragged PiP at a stale absolute position is more disorienting than re-anchoring to the corner.
         pipUserWidthFraction = null;
         pipUserMarginStartFraction = null;
@@ -289,19 +262,19 @@ public sealed class PipController : IDisposable
     public void NotifyPrimaryFirstFrameRendered()
     {
         primaryFirstFrameRendered = true;
-        if (secondarySurface != null && host.PrimarySurface != null)
+        if (secondaryHost?.WaylandSurface != null && host.PrimaryHost.WaylandSurface != null)
         {
-            secondarySurface.PlaceAbove(host.PrimarySurface);
+            secondaryHost.WaylandSurface.PlaceAbove(host.PrimaryHost.WaylandSurface);
         }
     }
 
     public VideoSurface? GetTargetVideoSurfaceForDiagnostic()
     {
-        if (viewModel.SelectedSlot == ViewModelMain.VideoSlot.Secondary && secondarySurface != null)
+        if (viewModel.SelectedSlot == ViewModelMain.VideoSlot.Secondary && secondaryHost?.WaylandSurface != null)
         {
-            return secondarySurface;
+            return secondaryHost.WaylandSurface;
         }
-        return host.PrimarySurface;
+        return host.PrimaryHost.WaylandSurface;
     }
 
     private void OnSecondaryRenderFailed(int code)
@@ -309,54 +282,39 @@ public sealed class PipController : IDisposable
         Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
     }
 
-    // `pb` is passed in by Enable so we can wire AttachRenderSurface (an internal method on the concrete Playback type, not visible through IPlayback). VideoContext owns its lifetime — we don't retain a field.
-    private void BuildSecondaryVideoArea(VideoContext secondaryCtx, Playback.Playback pb)
+    // `pb` is passed in by Enable so we can wire AttachPlayback (which reaches AttachRenderSurface, an internal method on the concrete Playback type not visible through IPlayback). VideoContext owns its lifetime — we don't retain a field. The host kind mirrors the primary's path decision; everything below is path-agnostic except the subsurface stacking, which goes through the one nullable WaylandSurface.
+    private void BuildSecondaryVideo(VideoContext secondaryCtx, Playback.Playback pb)
     {
-        var area2 = new VideoArea();
+        IVideoHost host2;
+        if (host.PrimaryHost is VideoHostWayland)
+        {
+            host2 = new VideoHostWayland(host.Window);
+        }
+        else
+        {
+            host2 = new VideoHostGlArea();
+        }
+        secondaryHost = host2;
         // The secondary widget itself stays at default fill alignment inside its wrapper; the wrapper carries the layout.
-        secondaryArea = area2;
-        AttachPipContainer(area2);
+        AttachPipContainer(host2.Widget);
         // Re-size the PiP whenever the secondary's loaded source's aspect changes (file load with known dwidth/dheight, or unload back to null). The PropertyChanged source is the secondary VideoContext we just built — it lives at viewModel.Secondary now that Enable ran.
         secondaryCtx.PropertyChanged += OnSecondaryContextPropertyChanged;
 
-        var surface2 = new VideoSurface(host.Window, area2);
-        surface2.RenderContextReady += OnSecondaryRenderContextReadyWayland;
-        surface2.RenderFailed += OnSecondaryRenderFailed;
-        // Asymmetric with primary's hook (which just hides noVideoBg). See OnSecondaryFirstFrameRendered for the rationale.
-        surface2.FirstFrameRendered += OnSecondaryFirstFrameRendered;
-        secondarySurface = surface2;
-        pb.AttachRenderSurface(d => surface2.SetMpvDispatcher(d));
+        host2.RenderContextReady += OnSecondaryRenderContextReady;
+        host2.RenderFailed += OnSecondaryRenderFailed;
+        // Asymmetric with primary's hook (which just hides noVideoBg). See OnSecondaryFirstFrameRendered for the rationale. Wayland-only in effect (the GLArea host never fires it).
+        host2.FirstFrameRendered += OnSecondaryFirstFrameRendered;
+        host2.AttachPlayback(pb);
         // Stack PiP above primary so the smaller surface composites on top of the larger video buffer. wl_subsurface.place_above is double-buffered, so the native shim commits the parent immediately to make the new ordering atomic — see vompl_video_surface_place_above's docstring.
-        if (host.PrimarySurface != null)
+        if (host2.WaylandSurface != null && host.PrimaryHost.WaylandSurface != null)
         {
-            surface2.PlaceAbove(host.PrimarySurface);
+            host2.WaylandSurface.PlaceAbove(host.PrimaryHost.WaylandSurface);
         }
 
-        AttachPipBodyInputs(area2);
-        AttachSecondaryDropTarget(area2);
+        AttachPipBodyInputs(host2.Widget);
+        AttachSecondaryDropTarget(host2.Widget);
         // Track primary geometry so PiP rescales when the window resizes.
-        host.PrimaryArea!.GeometryChanged += OnPrimaryAreaGeometryChangedForPip;
-    }
-
-    private void BuildSecondaryVideoView(Playback.Playback pb)
-    {
-        var view2 = new VideoView();
-        secondaryView = view2;
-        AttachPipContainer(view2);
-
-        view2.RenderContextReady += OnSecondaryRenderContextReadyGLArea;
-        view2.RenderFailed += OnSecondaryRenderFailed;
-        pb.AttachRenderSurface(d => view2.AttachDispatcher(d));
-
-        AttachPipBodyInputs(view2);
-        AttachSecondaryDropTarget(view2);
-        // GLArea path: same per-source PiP-aspect bookkeeping as the Wayland path. viewModel.Secondary was set by Enable before this method runs.
-        if (viewModel.Secondary != null)
-        {
-            viewModel.Secondary.PropertyChanged += OnSecondaryContextPropertyChanged;
-        }
-        // Track primary geometry so PiP rescales when the window resizes — GLArea-path counterpart of the PrimaryArea.GeometryChanged hook above.
-        host.PrimaryView!.OnResize += OnPrimaryViewResizeForPip;
+        host.PrimaryHost.GeometryChanged += OnPrimaryGeometryChangedForPip;
     }
 
     // Wrap the secondary video widget in a Gtk.Overlay (`pipContainer`) and add the wrapper as the videoOverlay's PiP overlay child. The wrapper carries the layout (Halign=Start, Valign=Start, MarginStart, MarginTop, SizeRequest). A small DrawingArea is layered as the wrapper's overlay child in the bottom-right corner to act as the resize grip.
@@ -432,18 +390,15 @@ public sealed class PipController : IDisposable
         }
     }
 
-    private void OnSecondaryRenderContextReadyWayland()
+    private void OnSecondaryRenderContextReady()
     {
-        if (secondarySurface != null && viewModel.Secondary != null)
+        // Wayland: hand HDR/VRR sinks to the per-context policy. GLArea: WaylandSurface is null and HDR is not supported per ARCHITECTURE.md, so there's nothing to attach.
+        var surface = secondaryHost?.WaylandSurface;
+        if (surface != null && viewModel.Secondary != null)
         {
-            viewModel.Secondary.AttachHdrSink(secondarySurface);
-            viewModel.Secondary.AttachVrrSink(secondarySurface);
+            viewModel.Secondary.AttachHdrSink(surface);
+            viewModel.Secondary.AttachVrrSink(surface);
         }
-    }
-
-    private void OnSecondaryRenderContextReadyGLArea()
-    {
-        // GLArea fallback path: HDR is not supported per ARCHITECTURE.md, so there's no IHdrSink to attach. Nothing to do beyond letting mpv take over rendering through the dispatcher attached in BuildSecondaryVideoView.
     }
 
     private void OnSecondaryFirstFrameRendered()
@@ -454,18 +409,12 @@ public sealed class PipController : IDisposable
             return;
         }
         // Primary hasn't rendered yet but the secondary just produced its first frame. Hiding noVideoBg here (the symmetric thing the host does on its primary first frame) would expose the transparent parent main surface in the primary's region — desktop shows through. Instead, restack the secondary subsurface above the parent so the PiP composites over the still-visible noVideoBg. NotifyPrimaryFirstFrameRendered eventually restores the secondary to its normal "above primary, below parent" stacking when primary actually renders.
-        secondarySurface?.PlaceAboveParent();
+        secondaryHost?.WaylandSurface?.PlaceAboveParent();
     }
 
-    private void OnPrimaryAreaGeometryChangedForPip(int x, int y, int w, int h, int scale)
+    private void OnPrimaryGeometryChangedForPip()
     {
-        // VideoArea fires this whenever its allocation changes. Recompute PiP layout against the primary's new bounds (also re-clamps user-set margins so a window shrink can't strand the PiP off-screen).
-        ApplyPipLayout();
-    }
-
-    private void OnPrimaryViewResizeForPip(Gtk.GLArea sender, Gtk.GLArea.ResizeSignalArgs args)
-    {
-        // GLArea-path counterpart of OnPrimaryAreaGeometryChangedForPip.
+        // Fires whenever the primary video widget's allocation changes. Recompute PiP layout against the primary's new bounds (also re-clamps user-set margins so a window shrink can't strand the PiP off-screen).
         ApplyPipLayout();
     }
 
@@ -494,8 +443,8 @@ public sealed class PipController : IDisposable
     // Resolve the primary's video display rect in videoOverlay-space (== widget-space; the videoArea/videoView fills the overlay so the two share an origin). Combines the primary widget's allocation with the primary VideoContext's display aspect to compute the inner rect mpv actually paints into — which the user perceives as "the video" and the PiP is positioned relative to.
     private PipLayoutCalc.VideoRect ComputePrimaryVideoRect()
     {
-        int primaryW = host.PrimaryArea?.GetAllocatedWidth() ?? host.PrimaryView?.GetAllocatedWidth() ?? 0;
-        int primaryH = host.PrimaryArea?.GetAllocatedHeight() ?? host.PrimaryView?.GetAllocatedHeight() ?? 0;
+        int primaryW = host.PrimaryHost.Widget.GetAllocatedWidth();
+        int primaryH = host.PrimaryHost.Widget.GetAllocatedHeight();
         double? primaryAspect = viewModel.Primary.VideoAspect;
         return PipLayoutCalc.ComputeVideoRect(primaryW, primaryH, primaryAspect);
     }
@@ -506,16 +455,16 @@ public sealed class PipController : IDisposable
         {
             return;
         }
-        if (secondaryArea == null)
+        if (secondaryHost == null)
         {
-            // GLArea path: GTK draws the FBO at the widget's actual screen position so there's no separate subsurface position to keep in sync. Nothing to schedule.
             return;
         }
         pipGeometryRefreshScheduled = true;
         IdleSafe.Add((int)GLib.Constants.PRIORITY_DEFAULT_IDLE, () =>
         {
             pipGeometryRefreshScheduled = false;
-            secondaryArea?.RefreshGeometry();
+            // RefreshGeometry is a no-op on the GLArea path (GTK draws the FBO at the widget's actual position).
+            secondaryHost?.RefreshGeometry();
         });
     }
 
@@ -726,10 +675,8 @@ public sealed class PipController : IDisposable
     // Apply the selected CSS class to whichever video widget represents the currently-selected slot, or remove the highlight from all when no selection. The class adds a 2 px inset white outline so the user can see at a glance that the next input goes to that stream alone (vs. broadcast/sync when no widget is highlighted).
     private void UpdateSelectedVideoCss()
     {
-        host.PrimaryArea?.RemoveCssClass(SelectedVideoCssClass);
-        host.PrimaryView?.RemoveCssClass(SelectedVideoCssClass);
-        secondaryArea?.RemoveCssClass(SelectedVideoCssClass);
-        secondaryView?.RemoveCssClass(SelectedVideoCssClass);
+        host.PrimaryHost.Widget.RemoveCssClass(SelectedVideoCssClass);
+        secondaryHost?.Widget.RemoveCssClass(SelectedVideoCssClass);
         if (!viewModel.IsPipEnabled)
         {
             return;
@@ -737,11 +684,11 @@ public sealed class PipController : IDisposable
         Gtk.Widget? selectedWidget;
         if (viewModel.SelectedSlot == ViewModelMain.VideoSlot.Secondary)
         {
-            selectedWidget = secondaryArea ?? (Gtk.Widget?)secondaryView;
+            selectedWidget = secondaryHost?.Widget;
         }
         else if (viewModel.SelectedSlot == ViewModelMain.VideoSlot.Primary)
         {
-            selectedWidget = host.PrimaryArea ?? (Gtk.Widget?)host.PrimaryView;
+            selectedWidget = host.PrimaryHost.Widget;
         }
         else
         {
@@ -918,9 +865,7 @@ public interface IPipHost
     Gtk.Window Window { get; }
     Gtk.Overlay VideoOverlay { get; }
     Gtk.Box ControlsBox { get; }
-    VideoArea? PrimaryArea { get; }
-    VideoView? PrimaryView { get; }
-    VideoSurface? PrimarySurface { get; }
+    IVideoHost PrimaryHost { get; }
     PlaylistPanel PlaylistPanel { get; }
     HotkeyMap Hotkeys { get; }
     void ExecuteAction(HotkeyAction action);
