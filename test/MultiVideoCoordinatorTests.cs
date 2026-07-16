@@ -1,175 +1,13 @@
 using System;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Playback;
-using Vomplayer.Services;
-using Vomplayer.UserData;
 using Vomplayer.ViewModels;
 
 namespace Vomplayer.Tests;
 
 [TestFixture]
-public partial class MultiVideoCoordinatorTests
+public class MultiVideoCoordinatorTests
 {
-    // FakePlayback for coordinator tests. Tracks play/pause/seek/frame/chapter/volume call counts so we can verify fan-out vs. isolated routing.
-    private sealed partial class FakePlayback : ObservableObject, IPlayback
-    {
-        [ObservableProperty]
-        private double positionSeconds;
-
-        [ObservableProperty]
-        private double durationSeconds;
-
-        [ObservableProperty]
-        private bool isPaused = true;
-
-        [ObservableProperty]
-        private bool isSeeking;
-
-        [ObservableProperty]
-        private bool isCoreIdle;
-
-        [ObservableProperty]
-        private bool isEofReached;
-
-        [ObservableProperty]
-        private double volume = 100;
-
-        [ObservableProperty]
-        private bool isMuted;
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> audioTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
-
-        [ObservableProperty]
-        private int? currentVideoId;
-
-        [ObservableProperty]
-        private int? currentAudioId;
-
-        [ObservableProperty]
-        private int? currentSubtitleId;
-
-        [ObservableProperty]
-        private double? videoAspect;
-
-        [ObservableProperty]
-        private double? videoFps;
-
-        [ObservableProperty]
-        private double? estimatedVfFps;
-
-        [ObservableProperty]
-        private string? mediaTitle;
-
-        public event Action? FileLoaded;
-        public event Action? TracksReloaded;
-        public event Action<bool>? SourceHdrChanged;
-        public event Action<bool>? IsSourceFpsTrustedChanged;
-
-        public bool IsSourceHdr { get; set; }
-        public string? HwdecCurrent { get; set; }
-        public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
-
-        public bool IsSourceFpsTrusted { get; set; } = true;
-        public string FpsTrustReason { get; set; } = "";
-
-        public List<string> LoadedFiles { get; } = new();
-        public int TogglePauseCalls { get; private set; }
-        public List<bool> SetPausedCalls { get; } = new();
-        public List<double> SeekCalls { get; } = new();
-        public List<double> SeekRelativeCalls { get; } = new();
-        public int StepFrameForwardCalls { get; private set; }
-        public int StepFrameBackCalls { get; private set; }
-        public List<double> SetVolumeCalls { get; } = new();
-        public List<double> SetSpeedCalls { get; } = new();
-        public int ToggleMuteCalls { get; private set; }
-        public int EnableHdrOutputCalls { get; private set; }
-        public int DisableHdrOutputCalls { get; private set; }
-        public List<double> SetFrameMultiplierCalls { get; } = new();
-        public int ClearFrameMultiplierCalls { get; private set; }
-
-        public void Initialize() { }
-        public void LoadFile(string path, bool startPaused) { LoadedFiles.Add(path); }
-        public void TogglePause() { TogglePauseCalls++; IsPaused = !IsPaused; }
-        public void SetPaused(bool paused) { SetPausedCalls.Add(paused); IsPaused = paused; }
-        public void Seek(double seconds) { SeekCalls.Add(seconds); }
-        public void SeekRelative(double seconds) { SeekRelativeCalls.Add(seconds); }
-        public void StepFrameForward() { StepFrameForwardCalls++; }
-        public void StepFrameBack() { StepFrameBackCalls++; }
-        public void LoadAudio(string path) { }
-        public void LoadSubtitle(string path) { }
-        public void SetVideo(int? trackId) { }
-        public void SetAudio(int? trackId) { }
-        public void SetSubtitle(int? trackId) { }
-        public void SetVolume(double percent) { SetVolumeCalls.Add(percent); Volume = percent; }
-        public void SetSpeed(double rate) { SetSpeedCalls.Add(rate); }
-        public void AdjustVolume(double deltaPercent) { }
-        public void ToggleMute() { ToggleMuteCalls++; IsMuted = !IsMuted; }
-        public void EnableHdrOutput() { EnableHdrOutputCalls++; }
-        public void DisableHdrOutput() { DisableHdrOutputCalls++; }
-        public void SetFrameMultiplier(double outputFps) { SetFrameMultiplierCalls.Add(outputFps); }
-        public void ClearFrameMultiplier() { ClearFrameMultiplierCalls++; }
-
-        public void RaiseFileLoaded() { FileLoaded?.Invoke(); }
-        public void RaiseTracksReloaded() { TracksReloaded?.Invoke(); }
-        public void RaiseSourceHdrChanged(bool isHdr) { IsSourceHdr = isHdr; SourceHdrChanged?.Invoke(isHdr); }
-        public void RaiseIsSourceFpsTrustedChanged(bool trusted) { IsSourceFpsTrusted = trusted; IsSourceFpsTrustedChanged?.Invoke(trusted); }
-
-        public void Dispose() { }
-    }
-
-    private sealed class StubFilePicker : IFilePicker
-    {
-        public Task<string?> PickVideoFileAsync(string title) { return Task.FromResult<string?>(null); }
-        public Task<string?> PickAudioFileAsync(string title) { return Task.FromResult<string?>(null); }
-        public Task<string?> PickSubtitleFileAsync(string title) { return Task.FromResult<string?>(null); }
-    }
-
-    private sealed class StubRecentFiles : IRecentFiles
-    {
-        public void Record(string pathOrUri) { }
-        public void RecordPosition(string pathOrUri, double positionSeconds) { }
-        public double? GetPosition(string pathOrUri) { return null; }
-    }
-
-    private sealed class StubTrackPreferences : ITrackPreferences
-    {
-        public void Record(string directory, MediaKind kind, TrackPreference preference) { }
-        public TrackPreference? Get(string directory, MediaKind kind) { return null; }
-    }
-
-    private sealed class StubUrlDownloader : IUrlDownloader
-    {
-        public Task<bool> IsAvailableAsync(CancellationToken ct) { return Task.FromResult(false); }
-        public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct) { return Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()); }
-        public Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct) { return Task.FromResult(UrlLoadKind.MpvDirect); }
-        public Task<string> DownloadAsync(string url, IProgress<UrlDownloadProgress>? progress, CancellationToken ct) { return Task.FromResult(url); }
-    }
-
-    private sealed class StubUrlPrompt : IUrlPrompt
-    {
-        public Task<string?> PromptForUrlAsync(string title) { return Task.FromResult<string?>(null); }
-        public void ShowError(string title, string message) { }
-        public IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel) { return new NoopStatus(); }
-        private sealed class NoopStatus : IUrlStatusHandle
-        {
-            public IProgress<UrlDownloadProgress> Progress { get; } = new Progress<UrlDownloadProgress>(_ => { });
-            public void Dispose() { }
-        }
-    }
-
     // Owns one FakePlayback + the ViewModel built around it. EnableSecondary spins up a second FakePlayback + VideoContext, hands it to the VM.
     private sealed class Harness : IDisposable
     {
@@ -180,13 +18,13 @@ public partial class MultiVideoCoordinatorTests
         public Harness()
         {
             PrimaryPlayback = new FakePlayback();
-            Vm = new ViewModelMain(PrimaryPlayback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+            Vm = new ViewModelMain(PrimaryPlayback, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         }
 
         public VideoContext NewSecondary()
         {
             SecondaryPlayback = new FakePlayback();
-            return new VideoContext(SecondaryPlayback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+            return new VideoContext(SecondaryPlayback, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         }
 
         public void EnablePip()
@@ -454,9 +292,11 @@ public partial class MultiVideoCoordinatorTests
         Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 55.0, 85.0 }), "chapter pin uses the stored offset (5), not the live divergence (12)");
         h.Vm.StepFrameForward();  // frame-step both, equal fps → no correction
 
-        // The offset must still be 5. Introduce a > 1 s drift so the controller hard-resyncs and confirm it defends 5 (seek to Primary.Pos + 5), not some shifted value.
+        // The offset must still be 5. Introduce a > 1 s drift so the controller hard-resyncs and confirm it defends 5 (seek to Primary.Pos + 5), not some shifted value. IsCoreIdle=false marks both streams as actually advancing — the shared fake faithfully defaults to mpv's pre-load core-idle=true, which would gate the correction.
         h.PrimaryPlayback.IsPaused = false;
         h.SecondaryPlayback!.IsPaused = false;
+        h.PrimaryPlayback.IsCoreIdle = false;
+        h.SecondaryPlayback!.IsCoreIdle = false;
         h.PrimaryPlayback.PositionSeconds = 100;
         h.SecondaryPlayback!.PositionSeconds = 106.5;  // drift = (106.5 - 100) - 5 = 1.5 > hard-resync threshold
         h.SecondaryPlayback!.SeekCalls.Clear();
@@ -782,7 +622,9 @@ public partial class MultiVideoCoordinatorTests
         Assert.That(h.PrimaryPlayback.SetPausedCalls, Is.EqualTo(new[] { false }));
         Assert.That(h.SecondaryPlayback!.SetPausedCalls, Is.EqualTo(new[] { false }));
 
-        // The sync point is now the live divergence (40 - 10 = 30), not the stale 0. Prove it: a > 1 s drift hard-resyncs against offset 30.
+        // The sync point is now the live divergence (40 - 10 = 30), not the stale 0. Prove it: a > 1 s drift hard-resyncs against offset 30. Both streams are advancing post-converge — clear the fake's faithful core-idle default so the correction gate opens.
+        h.PrimaryPlayback.IsCoreIdle = false;
+        h.SecondaryPlayback!.IsCoreIdle = false;
         h.PrimaryPlayback.PositionSeconds = 20;
         h.SecondaryPlayback!.PositionSeconds = 51.5;  // divergence 31.5 vs offset 30 → drift 1.5 > hard-resync threshold
         h.Vm.ApplyDriftCorrection();
@@ -808,9 +650,11 @@ public partial class MultiVideoCoordinatorTests
 
         h.Vm.PlayPauseCommand.Execute(null);  // both paused (same state) → play together, offset defended
 
-        // Offset must still be the established 5 (not recaptured). A > 1 s drift hard-resyncs to Primary.Pos + 5.
+        // Offset must still be the established 5 (not recaptured). A > 1 s drift hard-resyncs to Primary.Pos + 5. Both streams are advancing now — clear the fake's faithful core-idle default so the correction gate opens.
         h.PrimaryPlayback.IsPaused = false;
         h.SecondaryPlayback!.IsPaused = false;
+        h.PrimaryPlayback.IsCoreIdle = false;
+        h.SecondaryPlayback!.IsCoreIdle = false;
         h.PrimaryPlayback.PositionSeconds = 30;
         h.SecondaryPlayback!.PositionSeconds = 36.5;  // drift = (36.5 - 30) - 5 = 1.5 > hard-resync threshold
         h.Vm.ApplyDriftCorrection();

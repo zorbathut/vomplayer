@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Playback;
 using Vomplayer.Services;
 using Vomplayer.UserData;
@@ -12,7 +11,7 @@ using Vomplayer.ViewModels;
 namespace Vomplayer.Tests;
 
 [TestFixture]
-public partial class PlaylistAutosaveTests
+public class PlaylistAutosaveTests
 {
     // Minimal in-memory ISavedPlaylists. Records every Save / Touch call (in order) so tests can assert mint-vs-reuse and recompute behavior. Backing dict supports GetById / GetMostRecent.
     private sealed class FakeSavedPlaylists : ISavedPlaylists
@@ -63,116 +62,9 @@ public partial class PlaylistAutosaveTests
         }
     }
 
-    private sealed partial class FakePlayback : ObservableObject, IPlayback
-    {
-        [ObservableProperty] private double positionSeconds;
-        [ObservableProperty] private double durationSeconds;
-        [ObservableProperty] private bool isPaused = true;
-        [ObservableProperty] private bool isSeeking;
-        [ObservableProperty] private bool isCoreIdle = true;
-        [ObservableProperty] private bool isEofReached;
-        [ObservableProperty] private double volume = 100;
-        [ObservableProperty] private bool isMuted;
-        [ObservableProperty] private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
-        [ObservableProperty] private IReadOnlyList<MediaTrack> audioTracks = Array.Empty<MediaTrack>();
-        [ObservableProperty] private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
-        [ObservableProperty] private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
-        [ObservableProperty] private int? currentVideoId;
-        [ObservableProperty] private int? currentAudioId;
-        [ObservableProperty] private int? currentSubtitleId;
-        [ObservableProperty] private double? videoAspect;
-        [ObservableProperty] private double? videoFps;
-        [ObservableProperty] private string? mediaTitle;
-        [ObservableProperty] private double? estimatedVfFps;
-
-#pragma warning disable CS0067 // events declared to satisfy IPlayback; tests don't fire them
-        public event Action? FileLoaded;
-        public event Action? TracksReloaded;
-        public event Action<bool>? SourceHdrChanged;
-        public event Action<bool>? IsSourceFpsTrustedChanged;
-#pragma warning restore CS0067
-
-        public bool IsSourceHdr { get; set; }
-        public string? HwdecCurrent { get; set; }
-        public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
-        public bool IsSourceFpsTrusted { get; set; } = true;
-        public string FpsTrustReason { get; set; } = "";
-
-        public List<(string path, bool startPaused)> LoadFileCalls { get; } = new();
-
-        public void Initialize() { }
-        public void LoadFile(string path, bool startPaused)
-        {
-            LoadFileCalls.Add((path, startPaused));
-        }
-        public void TogglePause() { IsPaused = !IsPaused; }
-        public void SetPaused(bool paused) { IsPaused = paused; }
-        public void Seek(double seconds) { }
-        public void SeekRelative(double seconds) { }
-        public void StepFrameForward() { }
-        public void StepFrameBack() { }
-        public void LoadAudio(string path) { }
-        public void LoadSubtitle(string path) { }
-        public void SetVideo(int? trackId) { }
-        public void SetAudio(int? trackId) { }
-        public void SetSubtitle(int? trackId) { }
-        public void SetVolume(double percent) { Volume = percent; }
-        public void SetSpeed(double rate) { }
-        public void AdjustVolume(double deltaPercent) { }
-        public void ToggleMute() { IsMuted = !IsMuted; }
-        public void EnableHdrOutput() { }
-        public void DisableHdrOutput() { }
-        public void SetFrameMultiplier(double outputFps) { }
-        public void ClearFrameMultiplier() { }
-        public void Dispose() { }
-
-        // Trigger MediaTitle PropertyChanged from outside — autosave subscribes to this.
-        public void RaiseMediaTitle(string? title) { MediaTitle = title; }
-    }
-
-    private sealed class StubFilePicker : IFilePicker
-    {
-        public Task<string?> PickVideoFileAsync(string title) { return Task.FromResult<string?>(null); }
-        public Task<string?> PickAudioFileAsync(string title) { return Task.FromResult<string?>(null); }
-        public Task<string?> PickSubtitleFileAsync(string title) { return Task.FromResult<string?>(null); }
-    }
-
-    private sealed class StubRecentFiles : IRecentFiles
-    {
-        public void Record(string pathOrUri) { }
-        public void RecordPosition(string pathOrUri, double positionSeconds) { }
-        public double? GetPosition(string pathOrUri) { return null; }
-    }
-
-    private sealed class StubTrackPreferences : ITrackPreferences
-    {
-        public void Record(string directory, MediaKind kind, TrackPreference preference) { }
-        public TrackPreference? Get(string directory, MediaKind kind) { return null; }
-    }
-
-    private sealed class StubUrlDownloader : IUrlDownloader
-    {
-        public Task<bool> IsAvailableAsync(CancellationToken ct) { return Task.FromResult(false); }
-        public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct) { return Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()); }
-        public Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct) { return Task.FromResult(UrlLoadKind.MpvDirect); }
-        public Task<string> DownloadAsync(string url, IProgress<UrlDownloadProgress>? progress, CancellationToken ct) { return Task.FromResult(url); }
-    }
-
-    private sealed class StubUrlPrompt : IUrlPrompt
-    {
-        public Task<string?> PromptForUrlAsync(string title) { return Task.FromResult<string?>(null); }
-        public void ShowError(string title, string message) { }
-        public IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel) { return new NoopStatus(); }
-        private sealed class NoopStatus : IUrlStatusHandle
-        {
-            public IProgress<UrlDownloadProgress> Progress { get; } = new Progress<UrlDownloadProgress>(_ => { });
-            public void Dispose() { }
-        }
-    }
-
     private static VideoContext NewContext()
     {
-        return new VideoContext(new FakePlayback(), new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        return new VideoContext(new FakePlayback(), new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
     }
 
     [Test]
@@ -323,14 +215,14 @@ public partial class PlaylistAutosaveTests
         var repo = new FakeSavedPlaylists();
         var autosave = new PlaylistAutosave(repo);
         var fakePlayback = new FakePlayback();
-        using var primary = new VideoContext(fakePlayback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        using var primary = new VideoContext(fakePlayback, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         autosave.BindPrimary(primary);
 
         primary.Playlist.Replace(new[] { "/some/dir/Movie.mp4" });
         Assert.That(repo.GetById(autosave.CurrentGuid)!.Title, Is.EqualTo("Movie.mp4"));
 
         // Now mpv reports the real media-title; VideoContext mirrors it via its PropertyChanged handler.
-        fakePlayback.RaiseMediaTitle("The Real Movie Title");
+        fakePlayback.MediaTitle = "The Real Movie Title";
         Assert.That(repo.GetById(autosave.CurrentGuid)!.Title, Is.EqualTo("The Real Movie Title"));
     }
 
@@ -341,15 +233,15 @@ public partial class PlaylistAutosaveTests
         var autosave = new PlaylistAutosave(repo);
         var primaryPb = new FakePlayback();
         var secondaryPb = new FakePlayback();
-        using var primary = new VideoContext(primaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
-        using var secondary = new VideoContext(secondaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        using var primary = new VideoContext(primaryPb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
+        using var secondary = new VideoContext(secondaryPb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         autosave.BindPrimary(primary);
         autosave.BindSecondary(secondary);
 
         primary.Playlist.Replace(new[] { "/a.mp4" });
         secondary.Playlist.Replace(new[] { "/b.mp4" });
-        primaryPb.RaiseMediaTitle("Alpha");
-        secondaryPb.RaiseMediaTitle("Beta");
+        primaryPb.MediaTitle = "Alpha";
+        secondaryPb.MediaTitle = "Beta";
         Assert.That(repo.GetById(autosave.CurrentGuid)!.Title, Is.EqualTo("Alpha + Beta"));
     }
 
@@ -413,15 +305,15 @@ public partial class PlaylistAutosaveTests
         var autosave = new PlaylistAutosave(repo);
         var primaryPb = new FakePlayback();
         var secondaryPb = new FakePlayback();
-        using var primary = new VideoContext(primaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
-        using var secondary = new VideoContext(secondaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        using var primary = new VideoContext(primaryPb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
+        using var secondary = new VideoContext(secondaryPb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         autosave.BindPrimary(primary);
         autosave.BindSecondary(secondary);
 
         primary.Playlist.Replace(new[] { "/p.mp4" });
         secondary.Playlist.Replace(new[] { "/s.mp4" });
-        primaryPb.RaiseMediaTitle("P");
-        secondaryPb.RaiseMediaTitle("S");
+        primaryPb.MediaTitle = "P";
+        secondaryPb.MediaTitle = "S";
         var guid = autosave.CurrentGuid;
         Assert.That(repo.GetById(guid)!.StreamCount, Is.EqualTo(2));
         int saveCountBefore = repo.SaveCalls.Count;
@@ -440,7 +332,7 @@ public partial class PlaylistAutosaveTests
         var repo = new FakeSavedPlaylists();
         var autosave = new PlaylistAutosave(repo);
         var primaryPb = new FakePlayback();
-        using var primary = new VideoContext(primaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        using var primary = new VideoContext(primaryPb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         autosave.BindPrimary(primary);
 
         primary.Playlist.Replace(new[] { "/a.mp4", "/b.mp4" });
@@ -452,7 +344,7 @@ public partial class PlaylistAutosaveTests
         primary.Playlist.SetCurrent(0);
         primary.Playlist.Append(new[] { "/y.mp4" });
         primary.Playlist.MoveMany(new[] { 0 }, 2);
-        primaryPb.RaiseMediaTitle("Title After Detach");
+        primaryPb.MediaTitle = "Title After Detach";
 
         Assert.That(repo.SaveCalls.Count, Is.EqualTo(saveCountBefore), "No Persist after Detach");
     }
@@ -498,7 +390,7 @@ public partial class PlaylistAutosaveTests
         // Pins the end-to-end shutdown bug: with PiP active and both slots populated, vm.Dispose must NOT clobber the saved row's secondary slot. Reproduces the production-observed corruption where a stream_count=2 row became stream_count=1 on app close.
         var vm = NewViewModelWithAutosave(out _, out var repo);
         var secondaryPb = new FakePlayback();
-        var secondary = new VideoContext(secondaryPb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        var secondary = new VideoContext(secondaryPb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         vm.EnablePip(secondary);
 
         vm.Primary.Playlist.Replace(new[] { "/p.mp4" });
@@ -520,7 +412,7 @@ public partial class PlaylistAutosaveTests
     {
         playback = new FakePlayback();
         repo = new FakeSavedPlaylists();
-        var vm = new ViewModelMain(playback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        var vm = new ViewModelMain(playback, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         vm.AttachAutosave(repo);
         return vm;
     }
@@ -551,7 +443,7 @@ public partial class PlaylistAutosaveTests
         vm.LoadFromSaved(guid, startPaused: true);
 
         // The Playback contract for LoadFile(_, startPaused: true) is "dispatch pause=yes atomically with loadfile so mpv loads paused". Verifying the call shape here is the closest the test layer can get without a real mpv handle; the production dispatch ordering in Playback.LoadFile is short enough to verify by reading.
-        Assert.That(pb.LoadFileCalls, Is.EqualTo(new[] { ("/a.mp4", true) }));
+        Assert.That(pb.LoadFileArgs, Is.EqualTo(new[] { ("/a.mp4", true) }));
     }
 
     [Test]
@@ -609,7 +501,7 @@ public partial class PlaylistAutosaveTests
     public void LoadFromSavedThrowsWithoutAttachAutosave()
     {
         var pb = new FakePlayback();
-        var vm = new ViewModelMain(pb, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
         Assert.Throws<InvalidOperationException>(() => vm.LoadFromSaved(Guid.NewGuid(), startPaused: true));
     }
 
@@ -636,8 +528,8 @@ public partial class PlaylistAutosaveTests
     {
         // The system, not the user, opened the restored file — so recents.last_opened must NOT be touched. (The position-resume flow still works because position_seconds is independent.)
         var pb = new FakePlayback();
-        var recents = new RecordingRecentFiles();
-        using var ctx = new VideoContext(pb, new StubFilePicker(), recents, new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        var recents = new FakeRecentFiles();
+        using var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
 
         ctx.RestorePlaylist(new[] { "/restored.mp4" }, currentIndex: 0, startPaused: true);
 
@@ -649,20 +541,12 @@ public partial class PlaylistAutosaveTests
     {
         // After restore, the user clicks a row → that's a deliberate open → recents IS bumped.
         var pb = new FakePlayback();
-        var recents = new RecordingRecentFiles();
-        using var ctx = new VideoContext(pb, new StubFilePicker(), recents, new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        var recents = new FakeRecentFiles();
+        using var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
 
         ctx.RestorePlaylist(new[] { "/a.mp4", "/b.mp4" }, currentIndex: 0, startPaused: true);
         ctx.PlayPlaylistItem(1);
 
         Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { "/b.mp4" }));
-    }
-
-    private sealed class RecordingRecentFiles : IRecentFiles
-    {
-        public List<string> RecordedPaths { get; } = new();
-        public void Record(string pathOrUri) { RecordedPaths.Add(pathOrUri); }
-        public void RecordPosition(string pathOrUri, double positionSeconds) { }
-        public double? GetPosition(string pathOrUri) { return null; }
     }
 }

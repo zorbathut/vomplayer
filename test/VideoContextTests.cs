@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Playback;
 using Vomplayer.Services;
 using Vomplayer.UserData;
@@ -13,161 +12,8 @@ using Vomplayer.Wayland;
 namespace Vomplayer.Tests;
 
 [TestFixture]
-public partial class VideoContextTests
+public class VideoContextTests
 {
-    // Minimal FakePlayback for VideoContext tests. Mirrors the surface VideoContext consumes; intentionally not shared with ViewModelMainTests' richer fake because these tests only exercise EOF / playlist / advance — keeping the fake focused makes the tests easier to read.
-    private sealed partial class FakePlayback : ObservableObject, IPlayback
-    {
-        [ObservableProperty]
-        private double positionSeconds;
-
-        [ObservableProperty]
-        private double durationSeconds;
-
-        [ObservableProperty]
-        private bool isPaused = true;
-
-        [ObservableProperty]
-        private bool isSeeking;
-
-        [ObservableProperty]
-        private bool isCoreIdle = true;
-
-        [ObservableProperty]
-        private bool isEofReached;
-
-        [ObservableProperty]
-        private double volume = 100;
-
-        [ObservableProperty]
-        private bool isMuted;
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> audioTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
-
-        [ObservableProperty]
-        private int? currentVideoId;
-
-        [ObservableProperty]
-        private int? currentAudioId;
-
-        [ObservableProperty]
-        private int? currentSubtitleId;
-
-        [ObservableProperty]
-        private double? videoAspect;
-
-        [ObservableProperty]
-        private double? videoFps;
-
-        [ObservableProperty]
-        private string? mediaTitle;
-
-        [ObservableProperty]
-        private double? estimatedVfFps;
-
-        public event Action? FileLoaded;
-        public event Action? TracksReloaded;
-        public event Action<bool>? SourceHdrChanged;
-        public event Action<bool>? IsSourceFpsTrustedChanged;
-
-        public bool IsSourceHdr { get; set; }
-        public string? HwdecCurrent { get; set; }
-        public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
-        public int EnableHdrOutputCalls { get; private set; }
-        public int DisableHdrOutputCalls { get; private set; }
-
-        public bool IsSourceFpsTrusted { get; set; } = true;
-        public string FpsTrustReason { get; set; } = "";
-        public List<double> SetFrameMultiplierCalls { get; } = new();
-        public int ClearFrameMultiplierCalls { get; private set; }
-
-        public List<string> LoadedFiles { get; } = new();
-
-        public void Initialize() { }
-        public void LoadFile(string path, bool startPaused)
-        {
-            LoadedFiles.Add(path);
-            // Mirror production Playback.LoadFile, which synchronously clears IsEofReached so a stale carry-over from the prior file can't trip the auto-advance rising-edge gate. The synchronous PropertyChanged this fires is what re-enters the eof handler, so faking it here is necessary for the multi-advance scenarios to behave like production.
-            IsEofReached = false;
-        }
-        public void TogglePause() { IsPaused = !IsPaused; }
-        public void SetPaused(bool paused) { IsPaused = paused; }
-        public void Seek(double seconds) { }
-        public void SeekRelative(double seconds) { }
-        public void StepFrameForward() { }
-        public void StepFrameBack() { }
-        public void LoadAudio(string path) { }
-        public void LoadSubtitle(string path) { }
-        public void SetVideo(int? trackId) { }
-        public void SetAudio(int? trackId) { }
-        public void SetSubtitle(int? trackId) { }
-        public void SetVolume(double percent) { Volume = percent; }
-        public void SetSpeed(double rate) { }
-        public void AdjustVolume(double deltaPercent) { }
-        public void ToggleMute() { IsMuted = !IsMuted; }
-        public void EnableHdrOutput() { EnableHdrOutputCalls++; }
-        public void DisableHdrOutput() { DisableHdrOutputCalls++; }
-        public void SetFrameMultiplier(double outputFps) { SetFrameMultiplierCalls.Add(outputFps); }
-        public void ClearFrameMultiplier() { ClearFrameMultiplierCalls++; }
-
-        public void RaiseFileLoaded() { FileLoaded?.Invoke(); }
-        public void RaiseTracksReloaded() { TracksReloaded?.Invoke(); }
-        public void RaiseSourceHdrChanged(bool isHdr) { IsSourceHdr = isHdr; SourceHdrChanged?.Invoke(isHdr); }
-        public void RaiseIsSourceFpsTrustedChanged(bool trusted) { IsSourceFpsTrusted = trusted; IsSourceFpsTrustedChanged?.Invoke(trusted); }
-
-        public void Dispose() { }
-    }
-
-    private sealed class StubFilePicker : IFilePicker
-    {
-        public Task<string?> PickVideoFileAsync(string title) { return Task.FromResult<string?>(null); }
-        public Task<string?> PickAudioFileAsync(string title) { return Task.FromResult<string?>(null); }
-        public Task<string?> PickSubtitleFileAsync(string title) { return Task.FromResult<string?>(null); }
-    }
-
-    private sealed class StubRecentFiles : IRecentFiles
-    {
-        public void Record(string pathOrUri) { }
-        public void RecordPosition(string pathOrUri, double positionSeconds) { }
-        public double? GetPosition(string pathOrUri) { return null; }
-    }
-
-    private sealed class StubTrackPreferences : ITrackPreferences
-    {
-        public void Record(string directory, MediaKind kind, TrackPreference preference) { }
-        public TrackPreference? Get(string directory, MediaKind kind) { return null; }
-    }
-
-    private sealed class StubUrlDownloader : IUrlDownloader
-    {
-        public Task<bool> IsAvailableAsync(CancellationToken ct) { return Task.FromResult(false); }
-        public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct) { return Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()); }
-        public Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct) { return Task.FromResult(UrlLoadKind.MpvDirect); }
-        public Task<string> DownloadAsync(string url, IProgress<UrlDownloadProgress>? progress, CancellationToken ct) { return Task.FromResult(url); }
-    }
-
-    private sealed class StubUrlPrompt : IUrlPrompt
-    {
-        public Task<string?> PromptForUrlAsync(string title) { return Task.FromResult<string?>(null); }
-        public void ShowError(string title, string message) { }
-        public IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel) { return new NoopStatus(); }
-        private sealed class NoopStatus : IUrlStatusHandle
-        {
-            public IProgress<UrlDownloadProgress> Progress { get; } = new Progress<UrlDownloadProgress>(_ => { });
-            public void Dispose() { }
-        }
-    }
-
     private sealed class FakeVrrSink : IVrrSink
     {
         public VrrRange? Range { get; set; }
@@ -200,7 +46,7 @@ public partial class VideoContextTests
     private static VideoContext NewContext(out FakePlayback playback)
     {
         playback = new FakePlayback();
-        return new VideoContext(playback, new StubFilePicker(), new StubRecentFiles(), new StubTrackPreferences(), new StubUrlDownloader(), new StubUrlPrompt());
+        return new VideoContext(playback, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
     }
 
     [Test]

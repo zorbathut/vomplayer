@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using CommunityToolkit.Mvvm.ComponentModel;
 using Vomplayer.Playback;
 using Vomplayer.Services;
 using Vomplayer.UserData;
@@ -12,405 +11,8 @@ using Vomplayer.ViewModels;
 namespace Vomplayer.Tests;
 
 [TestFixture]
-public partial class ViewModelMainTests
+public class ViewModelMainTests
 {
-    private sealed partial class FakePlayback : ObservableObject, IPlayback
-    {
-        [ObservableProperty]
-        private double positionSeconds;
-
-        [ObservableProperty]
-        private double durationSeconds;
-
-        [ObservableProperty]
-        private bool isPaused = true;
-
-        [ObservableProperty]
-        private bool isSeeking;
-
-        [ObservableProperty]
-        private bool isCoreIdle = true;
-
-        [ObservableProperty]
-        private bool isEofReached;
-
-        [ObservableProperty]
-        private double volume = 100;
-
-        [ObservableProperty]
-        private bool isMuted;
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> videoTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> audioTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaTrack> subtitleTracks = Array.Empty<MediaTrack>();
-
-        [ObservableProperty]
-        private IReadOnlyList<MediaChapter> chapters = Array.Empty<MediaChapter>();
-
-        [ObservableProperty]
-        private int? currentVideoId;
-
-        [ObservableProperty]
-        private int? currentAudioId;
-
-        [ObservableProperty]
-        private int? currentSubtitleId;
-
-        [ObservableProperty]
-        private double? videoAspect;
-
-        [ObservableProperty]
-        private double? videoFps;
-
-        [ObservableProperty]
-        private double? estimatedVfFps;
-
-        [ObservableProperty]
-        private string? mediaTitle;
-
-        public event Action? FileLoaded;
-        public event Action? TracksReloaded;
-        public event Action<bool>? SourceHdrChanged;
-        public event Action<bool>? IsSourceFpsTrustedChanged;
-
-        public bool IsSourceHdr { get; set; }
-        public string? HwdecCurrent { get; set; }
-        public IReadOnlyList<string> HwdecTranscript { get; set; } = Array.Empty<string>();
-        public int EnableHdrOutputCalls { get; private set; }
-        public int DisableHdrOutputCalls { get; private set; }
-        public bool IsSourceFpsTrusted { get; set; } = true;
-        public string FpsTrustReason { get; set; } = "";
-        public List<double> SetFrameMultiplierCalls { get; } = new();
-        public int ClearFrameMultiplierCalls { get; private set; }
-
-        public int InitializeCalls { get; private set; }
-        public int TogglePauseCalls { get; private set; }
-        // Mutable from tests so post-load assertions can isolate per-step deltas (the playlist tests reset these between LoadPaths and a follow-up auto-advance to assert "this trigger ALONE produced one new load").
-        public int LoadFileCalls { get; set; }
-        public string? LastLoadedFile { get; set; }
-        public List<string> LoadedFiles { get; } = new();
-        public double? LastSeekSeconds { get; private set; }
-        public string? LastLoadedAudio { get; private set; }
-        public string? LastLoadedSubtitle { get; private set; }
-        public List<int?> VideoSelections { get; } = new();
-        public List<int?> AudioSelections { get; } = new();
-        public List<int?> SubtitleSelections { get; } = new();
-        public List<double> RelativeSeeks { get; } = new();
-        public int FrameStepForwardCalls { get; private set; }
-        public int FrameStepBackCalls { get; private set; }
-        public List<double> VolumeWrites { get; } = new();
-        public List<double> VolumeAdjustments { get; } = new();
-        public int ToggleMuteCalls { get; private set; }
-
-        public void Initialize()
-        {
-            InitializeCalls++;
-        }
-
-        public void LoadFile(string path, bool startPaused)
-        {
-            LoadFileCalls++;
-            LastLoadedFile = path;
-            LoadedFiles.Add(path);
-        }
-
-        // Real Playback.TogglePause writes to mpv asynchronously — IsPaused only changes when mpv echoes it back via OnMpvPropertyChanged. The fake elides that latency intentionally; tests asserting on rapid-toggle race behavior would need to add an async-ish fake.
-        public void TogglePause()
-        {
-            TogglePauseCalls++;
-            IsPaused = !IsPaused;
-        }
-
-        public List<bool> SetPausedCalls { get; } = new();
-        public void SetPaused(bool paused)
-        {
-            SetPausedCalls.Add(paused);
-            IsPaused = paused;
-        }
-
-        public void Seek(double seconds)
-        {
-            LastSeekSeconds = seconds;
-        }
-
-        public void SeekRelative(double seconds)
-        {
-            RelativeSeeks.Add(seconds);
-        }
-
-        public void StepFrameForward()
-        {
-            FrameStepForwardCalls++;
-        }
-
-        public void StepFrameBack()
-        {
-            FrameStepBackCalls++;
-        }
-
-        public void LoadAudio(string path)
-        {
-            LastLoadedAudio = path;
-        }
-
-        public void LoadSubtitle(string path)
-        {
-            LastLoadedSubtitle = path;
-        }
-
-        public void SetVideo(int? trackId)
-        {
-            VideoSelections.Add(trackId);
-        }
-
-        public void SetAudio(int? trackId)
-        {
-            AudioSelections.Add(trackId);
-        }
-
-        public void SetSubtitle(int? trackId)
-        {
-            SubtitleSelections.Add(trackId);
-        }
-
-        // Mirror real Playback's behavior at the fake's seam: SetVolume tracks the request and applies it to the observable so VM mirrors update synchronously. AdjustVolume logs the delta separately so tests can distinguish "user dragged the slider" (SetVolume) from "user pressed VolumeUp" (AdjustVolume).
-        public void SetVolume(double percent)
-        {
-            VolumeWrites.Add(percent);
-            Volume = percent;
-        }
-
-        // Real Playback.AdjustVolume issues mpv's `add volume <delta>` command — no local read-modify-write, so the cached `Volume` doesn't change here either. Tests that want to observe the post-adjust value should set `Volume` themselves to simulate the mpv echo.
-        public void AdjustVolume(double deltaPercent)
-        {
-            VolumeAdjustments.Add(deltaPercent);
-        }
-
-        public void SetSpeed(double rate)
-        {
-        }
-
-        public void ToggleMute()
-        {
-            ToggleMuteCalls++;
-            IsMuted = !IsMuted;
-        }
-
-        public void EnableHdrOutput()
-        {
-            EnableHdrOutputCalls++;
-        }
-
-        public void DisableHdrOutput()
-        {
-            DisableHdrOutputCalls++;
-        }
-
-        public void SetFrameMultiplier(double outputFps) { SetFrameMultiplierCalls.Add(outputFps); }
-        public void ClearFrameMultiplier() { ClearFrameMultiplierCalls++; }
-
-        public void RaiseSourceHdrChanged(bool isHdr)
-        {
-            IsSourceHdr = isHdr;
-            SourceHdrChanged?.Invoke(isHdr);
-        }
-
-        public void RaiseIsSourceFpsTrustedChanged(bool trusted)
-        {
-            IsSourceFpsTrusted = trusted;
-            IsSourceFpsTrustedChanged?.Invoke(trusted);
-        }
-
-        public void RaiseFileLoaded()
-        {
-            FileLoaded?.Invoke();
-        }
-
-
-        public void RaiseTracksReloaded()
-        {
-            TracksReloaded?.Invoke();
-        }
-
-        public void Dispose()
-        {
-        }
-    }
-
-    private sealed class FakeFilePicker : IFilePicker
-    {
-        public string? NextResult { get; set; }
-        public string? NextAudioResult { get; set; }
-        public string? NextSubtitleResult { get; set; }
-        public int Calls { get; private set; }
-        public int AudioCalls { get; private set; }
-        public int SubtitleCalls { get; private set; }
-
-        public Task<string?> PickVideoFileAsync(string title)
-        {
-            Calls++;
-            return Task.FromResult(NextResult);
-        }
-
-        public Task<string?> PickAudioFileAsync(string title)
-        {
-            AudioCalls++;
-            return Task.FromResult(NextAudioResult);
-        }
-
-        public Task<string?> PickSubtitleFileAsync(string title)
-        {
-            SubtitleCalls++;
-            return Task.FromResult(NextSubtitleResult);
-        }
-    }
-
-    private sealed class FakeRecentFiles : IRecentFiles
-    {
-        public List<string> RecordedPaths { get; } = new();
-        // Pre-seed via the dictionary to simulate "this file already has a saved position"; mutated by RecordPosition for save-side assertions.
-        public Dictionary<string, double> Positions { get; } = new();
-        public List<(string Path, double Position)> RecordedPositions { get; } = new();
-        public List<string> GetPositionCalls { get; } = new();
-
-        public void Record(string pathOrUri)
-        {
-            RecordedPaths.Add(pathOrUri);
-        }
-
-        public void RecordPosition(string pathOrUri, double positionSeconds)
-        {
-            RecordedPositions.Add((pathOrUri, positionSeconds));
-            Positions[pathOrUri] = positionSeconds;
-        }
-
-        public double? GetPosition(string pathOrUri)
-        {
-            GetPositionCalls.Add(pathOrUri);
-            return Positions.TryGetValue(pathOrUri, out var p) ? p : null;
-        }
-    }
-
-    private sealed class FakeTrackPreferences : ITrackPreferences
-    {
-        // Order-preserving log of (directory, kind, preference) to make assertion-by-equality easy in save tests.
-        public List<(string Dir, MediaKind Kind, TrackPreference Pref)> RecordedPrefs { get; } = new();
-        // Pre-seeded responses for Get; tests put a value here to simulate "this directory has a saved preference for this kind".
-        public Dictionary<(string Dir, MediaKind Kind), TrackPreference> Stored { get; } = new();
-        public List<(string Dir, MediaKind Kind)> GetCalls { get; } = new();
-
-        public void Record(string directory, MediaKind kind, TrackPreference preference)
-        {
-            RecordedPrefs.Add((directory, kind, preference));
-            Stored[(directory, kind)] = preference;
-        }
-
-        public TrackPreference? Get(string directory, MediaKind kind)
-        {
-            GetCalls.Add((directory, kind));
-            return Stored.TryGetValue((directory, kind), out var p) ? p : null;
-        }
-    }
-
-    private sealed class FakeUrlDownloader : Vomplayer.Services.IUrlDownloader
-    {
-        public bool Available { get; set; } = true;
-        public IReadOnlyList<string> NextProbeResult { get; set; } = Array.Empty<string>();
-        // Default to YtDlpDownload so legacy tests written before the probe step still exercise the download path. Tests that want to validate the mpv-direct branch set this to MpvDirect explicitly.
-        public Vomplayer.Services.UrlLoadKind ClassifyResult { get; set; } = Vomplayer.Services.UrlLoadKind.YtDlpDownload;
-        public Exception? ClassifyException { get; set; }
-        public Func<string, string>? DownloadResolver { get; set; }
-        public TaskCompletionSource<string>? PendingDownload { get; set; }
-        public List<string> ProbeCalls { get; } = new();
-        public List<string> ClassifyCalls { get; } = new();
-        public List<string> DownloadCalls { get; } = new();
-        public List<CancellationToken> ObservedTokens { get; } = new();
-
-        public Task<bool> IsAvailableAsync(CancellationToken ct)
-        {
-            return Task.FromResult(Available);
-        }
-
-        public Task<IReadOnlyList<string>> ProbeAsync(string url, CancellationToken ct)
-        {
-            ProbeCalls.Add(url);
-            return Task.FromResult(NextProbeResult);
-        }
-
-        public Task<Vomplayer.Services.UrlLoadKind> ClassifyAsync(string url, CancellationToken ct)
-        {
-            ClassifyCalls.Add(url);
-            if (ClassifyException != null)
-            {
-                throw ClassifyException;
-            }
-            return Task.FromResult(ClassifyResult);
-        }
-
-        public Task<string> DownloadAsync(string url, IProgress<Vomplayer.Services.UrlDownloadProgress>? progress, CancellationToken ct)
-        {
-            DownloadCalls.Add(url);
-            ObservedTokens.Add(ct);
-            if (PendingDownload != null)
-            {
-                // Capture the TCS at call time so a later test mutation of PendingDownload (e.g., setting it to null before triggering the next download) doesn't NRE the cancellation callback.
-                var tcs = PendingDownload;
-                ct.Register(() => tcs.TrySetCanceled(ct));
-                return tcs.Task;
-            }
-            if (DownloadResolver != null)
-            {
-                return Task.FromResult(DownloadResolver(url));
-            }
-            return Task.FromResult($"/fake/{url}");
-        }
-    }
-
-    private sealed class FakeUrlPrompt : Vomplayer.Services.IUrlPrompt
-    {
-        public string? NextUrl { get; set; }
-        public List<(string Title, string Message)> Errors { get; } = new();
-        public int PromptCalls { get; private set; }
-        public int StatusShown { get; private set; }
-        public int StatusDisposed { get; private set; }
-
-        public Task<string?> PromptForUrlAsync(string title)
-        {
-            PromptCalls++;
-            return Task.FromResult(NextUrl);
-        }
-
-        public void ShowError(string title, string message)
-        {
-            Errors.Add((title, message));
-        }
-
-        public Vomplayer.Services.IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel)
-        {
-            StatusShown++;
-            return new TrackingStatus(this);
-        }
-
-        private sealed class TrackingStatus : Vomplayer.Services.IUrlStatusHandle
-        {
-            private readonly FakeUrlPrompt owner;
-            private bool disposed;
-            public TrackingStatus(FakeUrlPrompt owner) { this.owner = owner; }
-            public IProgress<Vomplayer.Services.UrlDownloadProgress> Progress { get; } = new Progress<Vomplayer.Services.UrlDownloadProgress>(_ => { });
-            public void Dispose()
-            {
-                if (disposed) { return; }
-                disposed = true;
-                owner.StatusDisposed++;
-            }
-        }
-    }
-
     [Test]
     public void NullPlaybackThrows()
     {
@@ -495,7 +97,7 @@ public partial class ViewModelMainTests
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.SeekRelative(-5);
         vm.SeekRelative(10);
-        Assert.That(pb.RelativeSeeks, Is.EqualTo(new[] { -5.0, 10.0 }));
+        Assert.That(pb.SeekRelativeCalls, Is.EqualTo(new[] { -5.0, 10.0 }));
     }
 
     [Test]
@@ -506,8 +108,8 @@ public partial class ViewModelMainTests
         vm.StepFrameForward();
         vm.StepFrameForward();
         vm.StepFrameBack();
-        Assert.That(pb.FrameStepForwardCalls, Is.EqualTo(2));
-        Assert.That(pb.FrameStepBackCalls, Is.EqualTo(1));
+        Assert.That(pb.StepFrameForwardCalls, Is.EqualTo(2));
+        Assert.That(pb.StepFrameBackCalls, Is.EqualTo(1));
     }
 
     [Test]
@@ -1479,7 +1081,7 @@ public partial class ViewModelMainTests
         var pb = new FakePlayback();
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.SetVolume(75);
-        Assert.That(pb.VolumeWrites, Is.EqualTo(new[] { 75.0 }));
+        Assert.That(pb.SetVolumeCalls, Is.EqualTo(new[] { 75.0 }));
     }
 
     [Test]
@@ -1489,7 +1091,7 @@ public partial class ViewModelMainTests
         var vm = new ViewModelMain(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         vm.AdjustVolume(-5);
         vm.AdjustVolume(10);
-        Assert.That(pb.VolumeAdjustments, Is.EqualTo(new[] { -5.0, 10.0 }));
+        Assert.That(pb.AdjustVolumeCalls, Is.EqualTo(new[] { -5.0, 10.0 }));
     }
 
     [Test]

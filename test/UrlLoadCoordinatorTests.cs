@@ -71,55 +71,6 @@ public class UrlLoadCoordinatorTests
         }
     }
 
-    private sealed class FakeUrlPrompt : IUrlPrompt
-    {
-        public string? NextUrl { get; set; }
-        public List<(string Title, string Message)> Errors { get; } = new();
-        public int PromptCalls { get; private set; }
-        // StatusShown / StatusDisposed count ShowUrlStatus calls and handle disposals — StatusDisposed == StatusShown is the leak invariant (no overlay left stuck visible). LastCancellable / LastOnCancel capture the most recent Show's cancel affordance so tests can prove the Cancel button aborts the load.
-        public int StatusShown { get; private set; }
-        public int StatusDisposed { get; private set; }
-        public bool LastCancellable { get; private set; }
-        public Action? LastOnCancel { get; private set; }
-        // Optional shared ordered log (also fed by FakeUrlDownloader) for the "status shown before probe/classify" ordering tests.
-        public List<string>? EventLog { get; set; }
-
-        public Task<string?> PromptForUrlAsync(string title)
-        {
-            PromptCalls++;
-            return Task.FromResult(NextUrl);
-        }
-
-        public void ShowError(string title, string message)
-        {
-            Errors.Add((title, message));
-        }
-
-        public IUrlStatusHandle ShowUrlStatus(string statusText, Action? onCancel)
-        {
-            StatusShown++;
-            LastCancellable = onCancel != null;
-            LastOnCancel = onCancel;
-            EventLog?.Add("show");
-            return new TrackingStatus(this);
-        }
-
-        private sealed class TrackingStatus : IUrlStatusHandle
-        {
-            private readonly FakeUrlPrompt owner;
-            private bool disposed;
-            public TrackingStatus(FakeUrlPrompt owner) { this.owner = owner; }
-            public IProgress<UrlDownloadProgress> Progress { get; } = new Progress<UrlDownloadProgress>(_ => { });
-            public void Dispose()
-            {
-                if (disposed) { return; }
-                disposed = true;
-                owner.StatusDisposed++;
-                owner.EventLog?.Add("hide");
-            }
-        }
-    }
-
     [Test]
     public void NullDownloaderThrows()
     {
