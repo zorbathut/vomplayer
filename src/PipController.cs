@@ -282,29 +282,21 @@ public sealed class PipController : IDisposable
         Console.Error.WriteLine($"[vomplayer] mpv render failed with code {code}; video rendering stopped.");
     }
 
-    // `pb` is passed in by Enable so we can wire AttachPlayback (which reaches AttachRenderSurface, an internal method on the concrete Playback type not visible through IPlayback). VideoContext owns its lifetime — we don't retain a field. The host kind mirrors the primary's path decision; everything below is path-agnostic except the subsurface stacking, which goes through the one nullable WaylandSurface.
+    // `pb` is passed in by Enable so we can wire AttachPlayback (which reaches AttachRenderSurface, an internal method on the concrete Playback type not visible through IPlayback). VideoContext owns its lifetime — we don't retain a field. The host is minted by the primary's own factory (IPipHost.CreateVideoHost) so the two streams can never diverge in kind; everything below is path-agnostic except the subsurface stacking, which goes through the one nullable WaylandSurface.
     private void BuildSecondaryVideo(VideoContext secondaryCtx, Playback.Playback pb)
     {
-        IVideoHost host2;
-        if (host.PrimaryHost is VideoHostWayland)
-        {
-            host2 = new VideoHostWayland(host.Window);
-        }
-        else
-        {
-            host2 = new VideoHostGlArea();
-        }
+        IVideoHost host2 = host.CreateVideoHost();
         secondaryHost = host2;
-        // The secondary widget itself stays at default fill alignment inside its wrapper; the wrapper carries the layout.
-        AttachPipContainer(host2.Widget);
-        // Re-size the PiP whenever the secondary's loaded source's aspect changes (file load with known dwidth/dheight, or unload back to null). The PropertyChanged source is the secondary VideoContext we just built — it lives at viewModel.Secondary now that Enable ran.
-        secondaryCtx.PropertyChanged += OnSecondaryContextPropertyChanged;
-
+        // Subscribe, then attach, then parent: on Wayland the window is already realized here, so AttachPlayback synchronously realizes the subsurface and builds the render context — the handlers must be wired first so RenderContextReady/RenderFailed land instead of vanishing, and attaching before AttachPipContainer keeps the "attach before the widget realizes" contract honest rather than relying on GTK's deferred realize.
         host2.RenderContextReady += OnSecondaryRenderContextReady;
         host2.RenderFailed += OnSecondaryRenderFailed;
         // Asymmetric with primary's hook (which just hides noVideoBg). See OnSecondaryFirstFrameRendered for the rationale. Wayland-only in effect (the GLArea host never fires it).
         host2.FirstFrameRendered += OnSecondaryFirstFrameRendered;
         host2.AttachPlayback(pb);
+        // The secondary widget itself stays at default fill alignment inside its wrapper; the wrapper carries the layout.
+        AttachPipContainer(host2.Widget);
+        // Re-size the PiP whenever the secondary's loaded source's aspect changes (file load with known dwidth/dheight, or unload back to null). The PropertyChanged source is the secondary VideoContext we just built — it lives at viewModel.Secondary now that Enable ran.
+        secondaryCtx.PropertyChanged += OnSecondaryContextPropertyChanged;
         // Stack PiP above primary so the smaller surface composites on top of the larger video buffer. wl_subsurface.place_above is double-buffered, so the native shim commits the parent immediately to make the new ordering atomic — see vompl_video_surface_place_above's docstring.
         if (host2.WaylandSurface != null && host.PrimaryHost.WaylandSurface != null)
         {
@@ -866,6 +858,8 @@ public interface IPipHost
     Gtk.Overlay VideoOverlay { get; }
     Gtk.Box ControlsBox { get; }
     IVideoHost PrimaryHost { get; }
+    // Mint a new video host of the same kind as the primary — the render-path decision stays in MainWindow.CreateVideoHost, its single home.
+    IVideoHost CreateVideoHost();
     PlaylistPanel PlaylistPanel { get; }
     HotkeyMap Hotkeys { get; }
     void ExecuteAction(HotkeyAction action);

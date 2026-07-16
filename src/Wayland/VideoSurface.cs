@@ -189,8 +189,12 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
         WaylandOutputRegistry.IsHdrChanged += OnRegistryIsHdrChanged;
         WaylandOutputRegistry.VrrRangeChanged += OnRegistryVrrRangeChanged;
 
-        // If the GTK window is already realized at construction time — the case for the lazily-created PiP secondary VideoSurface in PipController.Enable() — OnRealize will never fire, leaving `surface` null forever. Run the realize handler synchronously so the subsurface is created on this thread, before any caller can call into us. Primary VideoSurface (constructed pre-realize from MainWindow's ctor) takes the normal event-driven path.
-        if (window.GetRealized())
+    }
+
+    // If the GTK window was already realized at construction time — the lazily-created PiP secondary case — OnRealize will never fire, leaving `surface` null forever; this runs the realize path synchronously. Split out of the ctor so the owner (VideoHostWayland) can wire RenderFailed/RenderContextReady handlers first — a synchronous realize failure then lands on wired handlers instead of vanishing. No-op when the window isn't realized yet (the primary at startup takes the event-driven path) or when the subsurface already exists.
+    public void EnsureRealized()
+    {
+        if (surface == null && window.GetRealized())
         {
             OnWindowRealize(window, EventArgs.Empty);
         }

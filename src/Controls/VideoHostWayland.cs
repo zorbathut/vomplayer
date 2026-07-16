@@ -47,6 +47,8 @@ public sealed class VideoHostWayland : IVideoHost
             throw new InvalidOperationException("AttachPlayback called after TeardownRenderSurface.");
         }
         var s = surface;
+        // Realize synchronously first when the window is already realized (the PiP-secondary case) — the owner's event handlers are wired by now, so a realize failure is reported instead of lost. Must precede AttachRenderSurface: SetMpvDispatcher only creates the render context once the subsurface exists.
+        s.EnsureRealized();
         playback.AttachRenderSurface(d => s.SetMpvDispatcher(d));
     }
 

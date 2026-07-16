@@ -88,6 +88,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     Gtk.Overlay IPipHost.VideoOverlay { get { return videoOverlay; } }
     Gtk.Box IPipHost.ControlsBox { get { return controlsBox; } }
     Controls.IVideoHost IPipHost.PrimaryHost { get { return videoHost; } }
+    Controls.IVideoHost IPipHost.CreateVideoHost() { return CreateVideoHost(); }
     Controls.PlaylistPanel IPipHost.PlaylistPanel { get { return playlistPanel; } }
     HotkeyMap IPipHost.Hotkeys { get { return hotkeys; } }
     void IPipHost.ExecuteAction(HotkeyAction action) { ExecuteAction(action); }
@@ -158,19 +159,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         viewModel.Autosave!.Saved += RebuildRecentMenu;
         viewModel.InitialFiles = initialFiles;
 
-        // Path decision happens once, here; everything downstream holds the IVideoHost seam instead of per-path fields. VideoContext (inside the VM) owns the per-instance HDR policy: it subscribes to playback.SourceHdrChanged in its ctor and to surface.CurrentOutputHdrChanged when AttachHdrSink runs. AttachHdrSink fires from OnVideoRenderContextReady (post-realize) so SetHdr's pre-stage SDR call lands on a ready surface.
-        if (WaylandDetect.IsWaylandBackend(GetDisplay()))
-        {
-            videoHost = new Controls.VideoHostWayland(this);
-        }
-        else
-        {
-            videoHost = new Controls.VideoHostGlArea();
-        }
-        videoHost.AttachPlayback(playback);
+        // Path decision lives in CreateVideoHost (shared with PipController's secondary via IPipHost); everything downstream holds the IVideoHost seam instead of per-path fields. Subscribe before AttachPlayback so an already-realized-window synchronous failure would be reported, not lost. VideoContext (inside the VM) owns the per-instance HDR policy: it subscribes to playback.SourceHdrChanged in its ctor and to surface.CurrentOutputHdrChanged when AttachHdrSink runs. AttachHdrSink fires from OnVideoRenderContextReady (post-realize) so SetHdr's pre-stage SDR call lands on a ready surface.
+        videoHost = CreateVideoHost();
         videoHost.RenderContextReady += OnVideoRenderContextReady;
         videoHost.RenderFailed += OnVideoRenderFailed;
         videoHost.FirstFrameRendered += OnPrimaryFirstFrameRendered;
+        videoHost.AttachPlayback(playback);
         Gtk.Widget videoWidget = videoHost.Widget;
 
         // Freedesktop standard icon names — present in every GTK icon theme (Adwaita, Yaru, Breeze, …). Tooltip carries the textual affordance for accessibility and discoverability since the button is icon-only.
@@ -476,6 +470,16 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         }
         muteButton.SetIconName(icon);
         muteButton.SetTooltipText(viewModel.IsMuted ? "Unmute" : "Mute");
+    }
+
+    // The one place the render-path decision is made. PipController mints its PiP secondary through this same factory (via IPipHost.CreateVideoHost) so the two streams can never diverge in kind.
+    private Controls.IVideoHost CreateVideoHost()
+    {
+        if (WaylandDetect.IsWaylandBackend(GetDisplay()))
+        {
+            return new Controls.VideoHostWayland(this);
+        }
+        return new Controls.VideoHostGlArea();
     }
 
     // Wayland path: hand the IHdrSink to the per-context HDR policy so it can pre-stage the SDR image description (synchronously, before any frame renders), subscribe to output-HDR transitions, and run an initial ApplyHdrPolicy. AttachHdrSink encapsulates that sequence — see its docstring for the three pre-stage edge cases it covers. Same surface implements IVrrSink for the per-output VRR window, so attach it on the same boundary; AttachVrrSink runs an initial ApplyVrrPolicy once both sink and source FPS are known. GLArea path: WaylandSurface is null and playback stays SDR — the old main-surface HDR attach produced a blown-out UI (GTK widgets render sRGB values into a surface KWin interprets as PQ) and can't be toggled per-file without destroying the GTK surface, so HDR content is tonemapped by mpv's auto targeting.
