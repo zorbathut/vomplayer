@@ -29,14 +29,9 @@ public sealed partial class SeekScaleController : IDisposable
     private readonly IPlayback playback;
     private readonly Gtk.Scale scale;
 
-    // Seek-scale state machine. idle = not pressing and !awaitingSeekSettle; holding = the user is pressing the scale (queried live via IsUserPressingScale, not stored — see that method); settling = awaitingSeekSettle (post-release, waiting for mpv's in-flight seek to land). `seekValueAtPress` is captured at press as the pre-seek position; the settle gate waits for the reported position to differ from it (i.e. to actually become the seek destination). Gating on "the position moved off the pre-seek value" rather than on `seeking=false` avoids a race where mpv fires `seeking=false` before its `time-pos` update, which would otherwise let a stale SeekValue push flicker the scale. Capturing at press (not release) matters: mpv's echo of a click-to-seek can arrive during the brief click-hold, so a release-time capture would record the *destination* and the gate could never fire while paused.
-    private bool awaitingSeekSettle;
-    private double seekValueAtPress;
-    // Dedupe OnValueChanged against the last value we sent to SeekTo, reset to NaN on each press. NaN comparison is always false so the first post-press value-change always seeks; subsequent emissions at the same value (from any source) are skipped. Cheap defense against spurious re-emissions.
-    private double lastUserSeek = double.NaN;
+    // The press/release/settle state machine, extracted pure for tests — see SeekScaleGate for the semantics (press-time baseline, settle-on-position-moved, user-seek dedupe). This shell supplies the live inputs: "is the user pressing" comes from GTK gesture state (IsUserPressingScale), "is mpv seeking" from playback. The gate's cached VM value is an equality-gated mirror of mpv's position (SeekValue is an [ObservableProperty] that only fires on a distinct value), so the press baseline is "the last distinct echoed normalized position", not a live mpv read — close enough in practice. Assumes the host's `viewModel.PropertyChanged → SetVmSeekValue` forward is synchronous on the main thread (true today via CommunityToolkit.Mvvm + GTK main-loop dispatch); a future refactor that batched or debounced VM forwards would let the cache lag mpv's actual position and would need a live Func<double> read instead.
+    private readonly SeekScaleGate gate = new();
     private bool updatingFromVm;
-    // Latest VM-side SeekValue, cached so the press-time baseline capture and the seek-settle handler can read it without a Func<double> dependency on the host. This is an equality-gated mirror of mpv's position (SeekValue is an [ObservableProperty] that only fires on a distinct value), so the press baseline is "the last distinct echoed normalized position", not a live mpv read — close enough in practice. Assumes the host's `viewModel.PropertyChanged → SetVmSeekValue` forward is synchronous on the main thread (true today via CommunityToolkit.Mvvm + GTK main-loop dispatch); a future refactor that batched or debounced VM forwards would let this cache lag mpv's actual position and would need to switch back to a live Func<double> read.
-    private double currentVmSeekValue;
     // Delegate is retained as an instance field so it stays rooted while the signal connection lives. Handler id + controller pointer let us disconnect synchronously in Dispose, before the delegate field is nulled and before GTK tears the widget down — closing the narrow window where a late event could dispatch into a collectable delegate.
     private SeekLegacyEventCallback? seekLegacyCallback;
     private ulong seekLegacyHandlerId;
@@ -91,24 +86,13 @@ public sealed partial class SeekScaleController : IDisposable
         return (scale.GetStateFlags() & Gtk.StateFlags.Active) != 0;
     }
 
-    // Push a VM-side SeekValue update through to the widget, applying the holding/settling gates. Cache the value first so the press-time and seek-settle paths can read it without a separate accessor on the host.
+    // Push a VM-side SeekValue update through to the widget, applying the gate's holding/settling rules.
     public void SetVmSeekValue(double value)
     {
-        currentVmSeekValue = value;
-        if (IsUserPressingScale())
+        if (gate.OnVmSeekValue(value, IsUserPressingScale()))
         {
-            return;
+            PushToScale();
         }
-        // While settling, only resume tracking once mpv's time-pos has actually moved off the pre-seek (press-time) value — the reliable "the seek landed" signal. Checking `!IsSeeking` alone would race with the `seeking` property arriving before the matching time-pos.
-        if (awaitingSeekSettle)
-        {
-            if (value == seekValueAtPress)
-            {
-                return;
-            }
-            awaitingSeekSettle = false;
-        }
-        PushToScale();
     }
 
     public void SetSensitive(bool sensitive)
@@ -116,7 +100,7 @@ public sealed partial class SeekScaleController : IDisposable
         scale.SetSensitive(sensitive);
     }
 
-    // Seek on every user-driven change; `updatingFromVm` breaks the VM→scale→VM loop; `lastUserSeek` dedupes repeated emissions at the same value (see field comment). Scroll-wheel and keyboard Arrow keys take this path too — no press, so `scale=Active` stays false and the standard VM-push flow resumes after each seek.
+    // Seek on every user-driven change; `updatingFromVm` breaks the VM→scale→VM loop; the gate dedupes repeated emissions at the same value. Scroll-wheel and keyboard Arrow keys take this path too — no press, so `scale=Active` stays false and the standard VM-push flow resumes after each seek.
     private void OnSeekScaleValueChanged(Gtk.Range sender, EventArgs e)
     {
         if (updatingFromVm)
@@ -124,12 +108,10 @@ public sealed partial class SeekScaleController : IDisposable
             return;
         }
         double v = scale.GetValue();
-        if (v == lastUserSeek)
+        if (gate.ShouldEmitUserSeek(v))
         {
-            return;
+            SeekRequested?.Invoke(v);
         }
-        lastUserSeek = v;
-        SeekRequested?.Invoke(v);
     }
 
     // Callback marshalled into GTK via raw g_signal_connect_data. Runs on the main thread (GTK signal delivery). Reads the event type via P/Invoke (not GirCore) and drives the state machine. Always returns 0 (gboolean FALSE) so the scale's internal gestures still process the event — returning nonzero would short-circuit them.
@@ -140,20 +122,13 @@ public sealed partial class SeekScaleController : IDisposable
         {
             case Gdk.EventType.ButtonPress:
             case Gdk.EventType.TouchBegin:
-                // Capture the pre-seek position as the settle baseline now, before any seek echo lands. See seekValueAtPress comment for why press-time (not release-time).
-                awaitingSeekSettle = false;
-                lastUserSeek = double.NaN;
-                seekValueAtPress = currentVmSeekValue;
+                gate.OnPress();
                 break;
             case Gdk.EventType.ButtonRelease:
             case Gdk.EventType.TouchEnd:
             case Gdk.EventType.TouchCancel:
             case Gdk.EventType.GrabBroken:
-                if (playback.IsSeeking)
-                {
-                    awaitingSeekSettle = true;
-                }
-                else
+                if (gate.OnRelease(playback.IsSeeking))
                 {
                     PushToScale();
                 }
@@ -162,14 +137,11 @@ public sealed partial class SeekScaleController : IDisposable
         return 0;
     }
 
-    // mpv fires `seeking=false` and the new `time-pos` from the same playback-loop step, but the events may arrive in either order via the property-change queue. If `seeking` arrives first and we push VM.SeekValue right then, we'd push the pre-seek stale position and flicker old→new on the next tick. Instead, keep this handler as a pure safety net: clear `awaitingSeekSettle` and push only once the VM has moved off the press-time baseline — which covers the paused case, where no further time-pos tick will arrive to drive SetVmSeekValue.
     private void OnPlaybackPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(IPlayback.IsSeeking)
-            && awaitingSeekSettle && !playback.IsSeeking && !IsUserPressingScale()
-            && currentVmSeekValue != seekValueAtPress)
+            && gate.OnSeekingChanged(playback.IsSeeking, IsUserPressingScale()))
         {
-            awaitingSeekSettle = false;
             PushToScale();
         }
     }
@@ -177,7 +149,7 @@ public sealed partial class SeekScaleController : IDisposable
     private void PushToScale()
     {
         updatingFromVm = true;
-        scale.SetValue(currentVmSeekValue);
+        scale.SetValue(gate.CurrentVmSeekValue);
         updatingFromVm = false;
     }
 
