@@ -113,10 +113,10 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
         }
     }
 
-    // Whether the output the subsurface is currently on advertises an HDR (PQ/HLG) preferred image description. null means unknown — either the surface has no active wl_output yet (pre-first-enter), the shim's HDR probe hasn't completed, or the compositor doesn't advertise wp_color_manager_v1. Callers should treat null as SDR for conservative defaults.
+    // Raw preferred-image-description observation for the output the subsurface is currently on. null means unknown — either the surface has no active wl_output yet (pre-first-enter), the shim's probe hasn't completed, or the compositor doesn't advertise wp_color_manager_v1. Callers classify via HdrClassifier and should treat null as SDR for conservative defaults.
     //
-    // Reuses FrameTimingBridge.ActiveOutput's first-wins convention: on a subsurface spanning multiple outputs, this reflects whichever output the compositor reported first in wl_surface.enter. TODO: on a span that covers an HDR panel + an SDR panel simultaneously, first-wins can report HDR while pixels on the SDR side receive a PQ-tagged surface (imperfect compositor tonemap-down). Safer future policy: return false if ANY entered output is SDR, true only when all entered outputs are HDR.
-    public bool? CurrentOutputIsHdr
+    // Reuses FrameTimingBridge.ActiveOutput's first-wins convention: on a subsurface spanning multiple outputs, this reflects whichever output the compositor reported first in wl_surface.enter. TODO: on a span that covers an HDR panel + an SDR panel simultaneously, first-wins can report HDR while pixels on the SDR side receive a PQ-tagged surface (imperfect compositor tonemap-down). Safer future policy: classify SDR if ANY entered output is SDR, HDR only when all entered outputs are HDR.
+    public OutputImageDescription? CurrentOutputImageDescription
     {
         get
         {
@@ -129,11 +129,25 @@ public sealed partial class VideoSurface : IDisposable, IHdrSink, IVrrSink
             {
                 return null;
             }
-            if (WaylandOutputRegistry.TryGetIsHdr(active.Value, out var isHdr))
+            if (WaylandOutputRegistry.TryGetImageDescription(active.Value, out var desc))
             {
-                return isHdr;
+                return desc;
             }
             return null;
+        }
+    }
+
+    // Classified HDR bit derived from CurrentOutputImageDescription; feeds the CurrentOutputHdrChanged dedup in PublishOutputHdrIfChanged.
+    private bool? CurrentOutputIsHdr
+    {
+        get
+        {
+            OutputImageDescription? desc = CurrentOutputImageDescription;
+            if (desc == null)
+            {
+                return null;
+            }
+            return HdrClassifier.IsHdr(desc.Value);
         }
     }
 

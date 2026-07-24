@@ -147,7 +147,7 @@ public sealed class DiagnosticOverlay : IDisposable
         var surface = activeVideoSurfaceProvider();
         VrrClassification vrrClass = VrrClassification.Unknown;
         int measuredHzCenti = 0;
-        bool? displayHdr = ctx.HdrSink?.CurrentOutputIsHdr;
+        OutputImageDescription? displayDesc = ctx.HdrSink?.CurrentOutputImageDescription;
         bool isWaylandPath = surface != null;
         if (surface != null)
         {
@@ -159,7 +159,7 @@ public sealed class DiagnosticOverlay : IDisposable
         return new DiagnosticSnapshot(
             Hwdec: ctx.Playback.HwdecCurrent,
             IsSourceHdr: ctx.Playback.IsSourceHdr,
-            DisplayIsHdr: displayHdr,
+            DisplayImageDescription: displayDesc,
             HdrActive: ctx.ActiveHdrState == VideoContext.HdrActiveState.Hdr,
             VrrClass: vrrClass,
             VrrMeasuredHzCenti: measuredHzCenti,

@@ -4,15 +4,15 @@ using Vomplayer.Wayland;
 
 namespace Vomplayer.Controls;
 
-// Pure-data snapshot consumed by the diagnostic overlay. Kept intentionally flat so the formatter has no GTK/mpv dependencies and is unit-testable without a runtime. IsWaylandPath is explicit rather than derived from DisplayIsHdr==null + VrrClass==Unknown, because those combinations are also valid pre-warmup states on the Wayland path.
+// Pure-data snapshot consumed by the diagnostic overlay. Kept intentionally flat so the formatter has no GTK/mpv dependencies and is unit-testable without a runtime. IsWaylandPath is explicit rather than derived from DisplayImageDescription==null + VrrClass==Unknown, because those combinations are also valid pre-warmup states on the Wayland path.
 //
-// DisplayIsHdr vs HdrActive: DisplayIsHdr is the physical monitor's HDR capability (what the current wl_output's preferred image description advertises). HdrActive is whether the player has tagged the subsurface PQ — driven only by source HDR (×shim succeeded), no longer by display HDR-capability. When source is HDR but display is SDR, HdrActive is still true: we delegate the PQ→SDR tone-map to the compositor (KWin uses libplacebo, smplayer/gpu-next quality). The "(intended)" suffix on HdrActive=true hedges honestly — the protocol has no feedback channel, so we can only claim we set the tag, not prove the compositor honors it.
+// DisplayImageDescription vs HdrActive: DisplayImageDescription is the raw preferred-image-description observation for the current wl_output; the display's HDR capability is classified from it via HdrClassifier (PQ/HLG tf OR luminance headroom) and the display: row shows which rule fired plus the raw values, so a compositor behavior change (like KWin 6.6 dropping the PQ preferred tf) is diagnosable at a glance. HdrActive is whether the player has tagged the subsurface PQ — driven only by source HDR (×shim succeeded), not by display HDR-capability. When source is HDR but display is SDR, HdrActive is still true: we delegate the PQ→SDR tone-map to the compositor (KWin uses libplacebo, smplayer/gpu-next quality). The "(intended)" suffix on HdrActive=true hedges honestly — the protocol has no feedback channel, so we can only claim we set the tag, not prove the compositor honors it.
 //
 // fps + vrr fields: SourceFps mirrors mpv's container-fps; EstimatedVfFps mirrors estimated-vf-fps (drives the trust monitor; surfaced for diagnostic visibility only). IsSourceFpsTrusted + FpsTrustReason describe the trust monitor's verdict for the current file. OutputVrrRange + ConnectorName describe the panel the surface is currently entered on. VrrDecision is the most recent ApplyVrrPolicy outcome.
 public readonly record struct DiagnosticSnapshot(
     string? Hwdec,
     bool IsSourceHdr,
-    bool? DisplayIsHdr,
+    OutputImageDescription? DisplayImageDescription,
     bool HdrActive,
     VrrClassification VrrClass,
     int VrrMeasuredHzCenti,
@@ -34,8 +34,8 @@ public static class DiagnosticFormatter
         {
             "hwdec:   " + FormatHwdec(s.Hwdec),
             "source:  " + (s.IsSourceHdr ? "HDR (PQ/HLG)" : "SDR"),
-            "display: " + FormatDisplayHdr(s.IsWaylandPath, s.DisplayIsHdr),
-            "active:  " + FormatHdrActive(s.IsWaylandPath, s.HdrActive, s.DisplayIsHdr),
+            "display: " + FormatDisplayHdr(s.IsWaylandPath, s.DisplayImageDescription),
+            "active:  " + FormatHdrActive(s.IsWaylandPath, s.HdrActive, s.DisplayImageDescription),
             "VRR:     " + FormatVrr(s.IsWaylandPath, s.VrrClass, s.VrrMeasuredHzCenti),
             "fps:     " + FormatFpsLine(s),
             "vrr:     " + FormatVrrPolicyLine(s),
@@ -83,20 +83,33 @@ public static class DiagnosticFormatter
         return hwdec;
     }
 
-    private static string FormatDisplayHdr(bool isWaylandPath, bool? displayIsHdr)
+    // Renders the classification verdict, WHICH rule justified it, and the raw observed values, so a future compositor behavior change (KWin has already changed its preferred-description shape once) is diagnosable straight off the overlay.
+    private static string FormatDisplayHdr(bool isWaylandPath, OutputImageDescription? displayDesc)
     {
         if (!isWaylandPath)
         {
             return "N/A (GLArea)";
         }
-        if (displayIsHdr == null)
+        if (displayDesc == null)
         {
             return "unknown";
         }
-        return displayIsHdr.Value ? "HDR" : "SDR";
+        OutputImageDescription d = displayDesc.Value;
+        string tf = "tf=" + (d.HasTfNamed ? TfName(d.TfNamed) : "?");
+        string prim = d.HasPrimariesNamed ? ", prim=" + PrimariesName(d.PrimariesNamed) : "";
+        string lum = d.HasLuminances ? ", max=" + d.MaxLum + " ref=" + d.RefLum + " nit" : ", no luminances";
+        switch (HdrClassifier.Classify(d))
+        {
+            case HdrJustification.TransferFunction:
+                return "HDR (preferred " + tf + prim + lum + ")";
+            case HdrJustification.LuminanceHeadroom:
+                return "HDR (luminance headroom: max=" + d.MaxLum + " > ref=" + d.RefLum + " nit, " + tf + prim + ")";
+            default:
+                return "SDR (" + tf + prim + lum + ")";
+        }
     }
 
-    private static string FormatHdrActive(bool isWaylandPath, bool hdrActive, bool? displayIsHdr)
+    private static string FormatHdrActive(bool isWaylandPath, bool hdrActive, OutputImageDescription? displayDesc)
     {
         if (!isWaylandPath)
         {
@@ -107,11 +120,39 @@ public static class DiagnosticFormatter
             return "SDR";
         }
         // hdrActive=true means we tagged the subsurface PQ and pinned mpv to PQ targets. Whether the user actually sees HDR scan-out depends on the display: HDR display = pass-through; SDR display = compositor tonemaps PQ→SDR (we delegate to libplacebo via KWin). The "(intended)" hedge applies in both cases — the protocol has no feedback channel proving the compositor honored the tag.
-        if (displayIsHdr == true)
+        if (displayDesc != null && HdrClassifier.IsHdr(displayDesc.Value))
         {
             return "HDR (intended)";
         }
         return "HDR→SDR (compositor)";
+    }
+
+    // Short names for the wp_color_manager_v1.transfer_function values we expect to encounter; raw number fallback keeps unexpected values diagnosable rather than hidden.
+    private static string TfName(uint tf)
+    {
+        switch (tf)
+        {
+            case 1: return "bt1886";
+            case 2: return "gamma22";
+            case 5: return "ext_linear";
+            case 9: return "srgb";
+            case 11: return "st2084_pq";
+            case 13: return "hlg";
+            default: return tf.ToString(CultureInfo.InvariantCulture);
+        }
+    }
+
+    // Short names for the wp_color_manager_v1.primaries values we expect to encounter.
+    private static string PrimariesName(uint p)
+    {
+        switch (p)
+        {
+            case 1: return "srgb";
+            case 6: return "bt2020";
+            case 8: return "dci_p3";
+            case 9: return "display_p3";
+            default: return p.ToString(CultureInfo.InvariantCulture);
+        }
     }
 
     private static string FormatVrr(bool isWaylandPath, VrrClassification cls, int measuredHzCenti)

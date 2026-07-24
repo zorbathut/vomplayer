@@ -88,53 +88,50 @@ public class WaylandOutputRegistryTests
         Assert.That(mhz, Is.EqualTo(60000));
     }
 
+    // Description shapes mirroring what real compositors emit (see HdrClassifier): modern KWin expresses HDR-enabled as luminance headroom on a gamma22 preferred tf; legacy compositors advertise PQ outright; SDR outputs have max==ref.
+    private static readonly OutputImageDescription HdrHeadroomDesc = new(HasTfNamed: true, TfNamed: 2, HasPrimariesNamed: true, PrimariesNamed: 6, HasLuminances: true, MinLum: 0, MaxLum: 390, RefLum: 201);
+    private static readonly OutputImageDescription HdrPqDesc = new(HasTfNamed: true, TfNamed: 11, HasPrimariesNamed: false, PrimariesNamed: 0, HasLuminances: false, MinLum: 0, MaxLum: 0, RefLum: 0);
+    private static readonly OutputImageDescription SdrDesc = new(HasTfNamed: true, TfNamed: 2, HasPrimariesNamed: true, PrimariesNamed: 1, HasLuminances: true, MinLum: 100, MaxLum: 200, RefLum: 200);
+
     [Test]
-    public void UnknownNameHasNoHdrBit()
+    public void UnknownNameHasNoImageDescription()
     {
-        Assert.That(WaylandOutputRegistry.TryGetIsHdr(42, out _), Is.False);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(42, out _), Is.False);
     }
 
     [Test]
-    public void HdrBitStored()
+    public void ImageDescriptionRoundTrips()
     {
-        WaylandOutputRegistry.OnOutputHdr(5, true);
-        Assert.That(WaylandOutputRegistry.TryGetIsHdr(5, out var isHdr), Is.True);
-        Assert.That(isHdr, Is.True);
+        WaylandOutputRegistry.OnOutputImageDescription(7, HdrHeadroomDesc);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(7, out var desc), Is.True);
+        Assert.That(desc, Is.EqualTo(HdrHeadroomDesc));
     }
 
     [Test]
-    public void SdrBitStored()
+    public void DescriptionUpdateOverwrites()
     {
-        WaylandOutputRegistry.OnOutputHdr(6, false);
-        Assert.That(WaylandOutputRegistry.TryGetIsHdr(6, out var isHdr), Is.True);
-        Assert.That(isHdr, Is.False);
+        WaylandOutputRegistry.OnOutputImageDescription(8, SdrDesc);
+        WaylandOutputRegistry.OnOutputImageDescription(8, HdrHeadroomDesc);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(8, out var desc), Is.True);
+        Assert.That(desc, Is.EqualTo(HdrHeadroomDesc));
     }
 
     [Test]
-    public void HdrBitUpdateOverwrites()
+    public void DescriptionClearedOnRemoval()
     {
-        WaylandOutputRegistry.OnOutputHdr(8, false);
-        WaylandOutputRegistry.OnOutputHdr(8, true);
-        Assert.That(WaylandOutputRegistry.TryGetIsHdr(8, out var isHdr), Is.True);
-        Assert.That(isHdr, Is.True);
-    }
-
-    [Test]
-    public void HdrBitClearedOnRemoval()
-    {
-        WaylandOutputRegistry.OnOutputHdr(11, true);
+        WaylandOutputRegistry.OnOutputImageDescription(11, HdrHeadroomDesc);
         WaylandOutputRegistry.OnOutputMode(11, 60000);
         WaylandOutputRegistry.OnOutputRemoved(11);
-        Assert.That(WaylandOutputRegistry.TryGetIsHdr(11, out _), Is.False);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(11, out _), Is.False);
         Assert.That(WaylandOutputRegistry.TryGetMode(11, out _), Is.False);
     }
 
     [Test]
-    public void HdrAndModeAreIndependent()
+    public void DescriptionAndModeAreIndependent()
     {
         WaylandOutputRegistry.OnOutputMode(20, 60000);
-        Assert.That(WaylandOutputRegistry.TryGetIsHdr(20, out _), Is.False);
-        WaylandOutputRegistry.OnOutputHdr(21, true);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(20, out _), Is.False);
+        WaylandOutputRegistry.OnOutputImageDescription(21, HdrHeadroomDesc);
         Assert.That(WaylandOutputRegistry.TryGetMode(21, out _), Is.False);
     }
 
@@ -142,13 +139,13 @@ public class WaylandOutputRegistryTests
     public void ReAddAfterRemovalStoresNewValueAndFiresEvent()
     {
         // Hot-plug cycle: remove the output, then re-add with a different HDR state. The re-add must both store the new value and fire IsHdrChanged so subscribers see the refresh.
-        WaylandOutputRegistry.OnOutputHdr(30, true);
+        WaylandOutputRegistry.OnOutputImageDescription(30, HdrHeadroomDesc);
         WaylandOutputRegistry.OnOutputRemoved(30);
         var fires = new List<uint>();
         WaylandOutputRegistry.IsHdrChanged += n => fires.Add(n);
-        WaylandOutputRegistry.OnOutputHdr(30, false);
-        Assert.That(WaylandOutputRegistry.TryGetIsHdr(30, out var isHdr), Is.True);
-        Assert.That(isHdr, Is.False);
+        WaylandOutputRegistry.OnOutputImageDescription(30, SdrDesc);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(30, out var desc), Is.True);
+        Assert.That(HdrClassifier.IsHdr(desc), Is.False);
         Assert.That(fires, Is.EqualTo(new[] { 30u }));
     }
 
@@ -157,28 +154,54 @@ public class WaylandOutputRegistryTests
     {
         var fires = new List<uint>();
         WaylandOutputRegistry.IsHdrChanged += n => fires.Add(n);
-        WaylandOutputRegistry.OnOutputHdr(40, true);
+        WaylandOutputRegistry.OnOutputImageDescription(40, HdrHeadroomDesc);
         Assert.That(fires, Is.EqualTo(new[] { 40u }));
     }
 
     [Test]
-    public void IsHdrChangedFiresOnTransition()
+    public void IsHdrChangedFiresOnClassificationTransition()
     {
         var fires = new List<uint>();
         WaylandOutputRegistry.IsHdrChanged += n => fires.Add(n);
-        WaylandOutputRegistry.OnOutputHdr(41, false);
-        WaylandOutputRegistry.OnOutputHdr(41, true);
+        WaylandOutputRegistry.OnOutputImageDescription(41, SdrDesc);
+        WaylandOutputRegistry.OnOutputImageDescription(41, HdrHeadroomDesc);
         Assert.That(fires, Is.EqualTo(new[] { 41u, 41u }));
     }
 
     [Test]
     public void IsHdrChangedDoesNotFireOnNoopUpdate()
     {
-        WaylandOutputRegistry.OnOutputHdr(42, true);
+        WaylandOutputRegistry.OnOutputImageDescription(42, HdrHeadroomDesc);
         var fires = new List<uint>();
         WaylandOutputRegistry.IsHdrChanged += n => fires.Add(n);
-        WaylandOutputRegistry.OnOutputHdr(42, true);
+        WaylandOutputRegistry.OnOutputImageDescription(42, HdrHeadroomDesc);
         Assert.That(fires, Is.Empty);
+    }
+
+    [Test]
+    public void IsHdrChangedDoesNotFireOnRawValueOnlyChange()
+    {
+        // Dedup keys on the classified bit: a raw-value tweak that stays HDR (e.g. the user adjusts the peak-brightness override) must not fire — the diagnostic overlay re-reads the record on its refresh tick.
+        WaylandOutputRegistry.OnOutputImageDescription(43, HdrHeadroomDesc);
+        var fires = new List<uint>();
+        WaylandOutputRegistry.IsHdrChanged += n => fires.Add(n);
+        WaylandOutputRegistry.OnOutputImageDescription(43, HdrHeadroomDesc with { MaxLum = 400 });
+        Assert.That(fires, Is.Empty);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(43, out var desc), Is.True);
+        Assert.That(desc.MaxLum, Is.EqualTo(400));
+    }
+
+    [Test]
+    public void IsHdrChangedDoesNotFireOnJustificationOnlyChange()
+    {
+        // The exact transition a future KWin re-advertising PQ would produce: HDR-via-headroom replaced by HDR-via-tf. Classification stays HDR, so no event — but the stored record must still update.
+        WaylandOutputRegistry.OnOutputImageDescription(44, HdrHeadroomDesc);
+        var fires = new List<uint>();
+        WaylandOutputRegistry.IsHdrChanged += n => fires.Add(n);
+        WaylandOutputRegistry.OnOutputImageDescription(44, HdrPqDesc);
+        Assert.That(fires, Is.Empty);
+        Assert.That(WaylandOutputRegistry.TryGetImageDescription(44, out var desc), Is.True);
+        Assert.That(desc, Is.EqualTo(HdrPqDesc));
     }
 
     [Test]

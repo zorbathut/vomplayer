@@ -781,7 +781,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return;
         }
-        bool? outputHdr = hdrSink.CurrentOutputIsHdr;
+        OutputImageDescription? outputDesc = hdrSink.CurrentOutputImageDescription;
         bool wantHdr = lastSourceHdr;
         HdrActiveState newState;
         if (wantHdr)
@@ -819,7 +819,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
         if (LogHdr)
         {
-            string outStr = outputHdr.HasValue ? (outputHdr.Value ? "HDR" : "SDR") : "unknown";
+            string outStr = outputDesc.HasValue ? (HdrClassifier.IsHdr(outputDesc.Value) ? "HDR" : "SDR") : "unknown";
             Console.Error.WriteLine($"[vompl] hdr policy: source={(lastSourceHdr ? "HDR" : "SDR")} display={outStr} → {newState} (was {ActiveHdrState})");
         }
         ActiveHdrState = newState;

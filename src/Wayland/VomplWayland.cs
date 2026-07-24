@@ -304,21 +304,29 @@ internal static partial class VomplOutputCallbacks
         }
     }
 
-    private static void OnImageInfo(uint registryName, int hasTfNamed, uint tfNamed)
+    private static void OnImageInfo(uint registryName, int hasTfNamed, uint tfNamed, int hasPrimariesNamed, uint primariesNamed, int hasLuminances, uint minLum, uint maxLum, uint refLum)
     {
         try
         {
-            bool isHdr = HdrClassifier.IsHdr(hasTfNamed != 0, tfNamed);
-            WaylandOutputRegistry.OnOutputHdr(registryName, isHdr);
+            var desc = new OutputImageDescription(
+                HasTfNamed: hasTfNamed != 0, TfNamed: tfNamed,
+                HasPrimariesNamed: hasPrimariesNamed != 0, PrimariesNamed: primariesNamed,
+                HasLuminances: hasLuminances != 0, MinLum: minLum, MaxLum: maxLum, RefLum: refLum);
+            WaylandOutputRegistry.OnOutputImageDescription(registryName, desc);
             if (logHdr)
             {
-                string tfStr = hasTfNamed != 0 ? tfNamed.ToString() : "absent";
-                Console.Error.WriteLine($"[vompl] output {registryName} tf_named={tfStr} isHdr={isHdr}");
+                string tfStr = desc.HasTfNamed ? desc.TfNamed.ToString() : "absent";
+                string primStr = desc.HasPrimariesNamed ? desc.PrimariesNamed.ToString() : "absent";
+                // min_e4 is the protocol's 1/10000 cd/m² wire unit; max/ref are plain cd/m².
+                string lumStr = desc.HasLuminances ? $"min_e4={desc.MinLum} max={desc.MaxLum} ref={desc.RefLum}" : "absent";
+                var justification = HdrClassifier.Classify(desc);
+                string verdict = justification == HdrJustification.None ? "SDR" : $"HDR ({justification})";
+                Console.Error.WriteLine($"[vompl] output {registryName} tf_named={tfStr} primaries_named={primStr} lum({lumStr}) → {verdict}");
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[vomplayer] WaylandOutputRegistry.OnOutputHdr threw: {ex}");
+            Console.Error.WriteLine($"[vomplayer] WaylandOutputRegistry.OnOutputImageDescription threw: {ex}");
         }
     }
 
@@ -343,7 +351,7 @@ internal static partial class VomplOutputCallbacks
     private delegate void OutputRemovedCallback(uint registryName);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void OutputImageInfoCallback(uint registryName, int hasTfNamed, uint tfNamed);
+    private delegate void OutputImageInfoCallback(uint registryName, int hasTfNamed, uint tfNamed, int hasPrimariesNamed, uint primariesNamed, int hasLuminances, uint minLum, uint maxLum, uint refLum);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void OutputNameCallback(uint registryName, IntPtr namePtr);

@@ -7,12 +7,17 @@ namespace Vomplayer.Tests;
 [TestFixture]
 public class DiagnosticFormatterTests
 {
+    // Real-world description shapes as observed on KWin 6.6.5 (see HdrClassifier): SDR outputs report gamma22/sRGB with max==ref; the HDR-enabled output reports gamma22/BT.2020 with luminance headroom; legacy compositors report a PQ preferred tf outright.
+    private static readonly OutputImageDescription SdrDesc = new(HasTfNamed: true, TfNamed: 2, HasPrimariesNamed: true, PrimariesNamed: 1, HasLuminances: true, MinLum: 100, MaxLum: 200, RefLum: 200);
+    private static readonly OutputImageDescription HdrHeadroomDesc = new(HasTfNamed: true, TfNamed: 2, HasPrimariesNamed: true, PrimariesNamed: 6, HasLuminances: true, MinLum: 0, MaxLum: 390, RefLum: 201);
+    private static readonly OutputImageDescription HdrPqDesc = new(HasTfNamed: true, TfNamed: 11, HasPrimariesNamed: false, PrimariesNamed: 0, HasLuminances: true, MinLum: 0, MaxLum: 1000, RefLum: 203);
+
     private static DiagnosticSnapshot Baseline()
     {
         return new DiagnosticSnapshot(
             Hwdec: "vaapi",
             IsSourceHdr: false,
-            DisplayIsHdr: false,
+            DisplayImageDescription: SdrDesc,
             HdrActive: false,
             VrrClass: VrrClassification.Fixed,
             VrrMeasuredHzCenti: 6000,
@@ -70,31 +75,61 @@ public class DiagnosticFormatterTests
         Assert.That(DiagnosticFormatter.FormatLines(s)[1], Is.EqualTo("source:  SDR"));
     }
 
+    // The display: row surfaces the classification verdict, WHICH rule justified it, and the raw observed values, so a compositor-side behavior change (KWin 6.6 dropped the PQ preferred tf in favor of luminance headroom) is diagnosable straight off the overlay.
     [Test]
-    public void DisplayHdrOnWaylandTrueRendersHdr()
+    public void DisplayHdrViaHeadroomRendersJustificationAndValues()
     {
-        var s = Baseline() with { DisplayIsHdr = true };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: HDR"));
+        var s = Baseline() with { DisplayImageDescription = HdrHeadroomDesc };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: HDR (luminance headroom: max=390 > ref=201 nit, tf=gamma22, prim=bt2020)"));
     }
 
     [Test]
-    public void DisplayHdrOnWaylandFalseRendersSdr()
+    public void DisplayHdrViaPreferredTfRendersJustificationAndValues()
     {
-        var s = Baseline() with { DisplayIsHdr = false };
-        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: SDR"));
+        var s = Baseline() with { DisplayImageDescription = HdrPqDesc };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: HDR (preferred tf=st2084_pq, max=1000 ref=203 nit)"));
+    }
+
+    [Test]
+    public void DisplayHdrViaPreferredTfWithoutLuminancesRendersAbsence()
+    {
+        var s = Baseline() with { DisplayImageDescription = HdrPqDesc with { HasLuminances = false } };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: HDR (preferred tf=st2084_pq, no luminances)"));
+    }
+
+    [Test]
+    public void DisplaySdrRendersRawValues()
+    {
+        var s = Baseline() with { DisplayImageDescription = SdrDesc };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: SDR (tf=gamma22, prim=srgb, max=200 ref=200 nit)"));
+    }
+
+    [Test]
+    public void DisplaySdrWithUnknownTfValueRendersRawNumber()
+    {
+        // A tf value outside the short-name map must surface as the raw enum number, not vanish.
+        var s = Baseline() with { DisplayImageDescription = SdrDesc with { TfNamed = 4, HasPrimariesNamed = false, HasLuminances = false } };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: SDR (tf=4, no luminances)"));
+    }
+
+    [Test]
+    public void DisplaySdrWithAbsentTfRendersQuestionMark()
+    {
+        var s = Baseline() with { DisplayImageDescription = new OutputImageDescription(HasTfNamed: false, TfNamed: 0, HasPrimariesNamed: false, PrimariesNamed: 0, HasLuminances: true, MinLum: 100, MaxLum: 200, RefLum: 200) };
+        Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: SDR (tf=?, max=200 ref=200 nit)"));
     }
 
     [Test]
     public void DisplayHdrOnWaylandNullRendersUnknown()
     {
-        var s = Baseline() with { DisplayIsHdr = null };
+        var s = Baseline() with { DisplayImageDescription = null };
         Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: unknown"));
     }
 
     [Test]
     public void DisplayHdrOnGlareaRendersNA()
     {
-        var s = Baseline() with { IsWaylandPath = false, DisplayIsHdr = null };
+        var s = Baseline() with { IsWaylandPath = false, DisplayImageDescription = null };
         Assert.That(DiagnosticFormatter.FormatLines(s)[2], Is.EqualTo("display: N/A (GLArea)"));
     }
 
@@ -102,14 +137,15 @@ public class DiagnosticFormatterTests
     [Test]
     public void HdrActiveOnHdrDisplayRendersIntended()
     {
-        var s = Baseline() with { HdrActive = true, DisplayIsHdr = true };
+        // Classification for the active: line runs on the record — headroom-HDR counts as an HDR display just like a PQ preferred tf would.
+        var s = Baseline() with { HdrActive = true, DisplayImageDescription = HdrHeadroomDesc };
         Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  HDR (intended)"));
     }
 
     [Test]
     public void HdrActiveOnSdrDisplayRendersCompositorTonemap()
     {
-        var s = Baseline() with { HdrActive = true, DisplayIsHdr = false };
+        var s = Baseline() with { HdrActive = true, DisplayImageDescription = SdrDesc };
         Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  HDR→SDR (compositor)"));
     }
 
@@ -117,7 +153,7 @@ public class DiagnosticFormatterTests
     public void HdrActiveOnUnknownDisplayRendersCompositorTonemap()
     {
         // Unknown display capability: assume the conservative "the compositor will handle it" framing rather than promising HDR scan-out we can't verify. Matches the SDR-display branch.
-        var s = Baseline() with { HdrActive = true, DisplayIsHdr = null };
+        var s = Baseline() with { HdrActive = true, DisplayImageDescription = null };
         Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  HDR→SDR (compositor)"));
     }
 
@@ -132,14 +168,14 @@ public class DiagnosticFormatterTests
     public void HdrActiveOnGlareaRendersNA()
     {
         // On GLArea, HdrActive is ignored because IsWaylandPath=false short-circuits. Verify by setting it to true (which would otherwise render an HDR-flavor label).
-        var s = Baseline() with { IsWaylandPath = false, DisplayIsHdr = null, HdrActive = true };
+        var s = Baseline() with { IsWaylandPath = false, DisplayImageDescription = null, HdrActive = true };
         Assert.That(DiagnosticFormatter.FormatLines(s)[3], Is.EqualTo("active:  N/A (GLArea)"));
     }
 
     [Test]
     public void VrrOnGlareaRendersNA()
     {
-        var s = Baseline() with { IsWaylandPath = false, VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 0, DisplayIsHdr = null };
+        var s = Baseline() with { IsWaylandPath = false, VrrClass = VrrClassification.Unknown, VrrMeasuredHzCenti = 0, DisplayImageDescription = null };
         Assert.That(DiagnosticFormatter.FormatLines(s)[4], Is.EqualTo("VRR:     N/A (GLArea)"));
     }
 
@@ -194,7 +230,7 @@ public class DiagnosticFormatterTests
         var s = new DiagnosticSnapshot(
             Hwdec: "vaapi",
             IsSourceHdr: true,
-            DisplayIsHdr: true,
+            DisplayImageDescription: HdrHeadroomDesc,
             HdrActive: true,
             VrrClass: VrrClassification.Fixed,
             VrrMeasuredHzCenti: 6000,
@@ -211,7 +247,7 @@ public class DiagnosticFormatterTests
         {
             "hwdec:   vaapi",
             "source:  HDR (PQ/HLG)",
-            "display: HDR",
+            "display: HDR (luminance headroom: max=390 > ref=201 nit, tf=gamma22, prim=bt2020)",
             "active:  HDR (intended)",
             "VRR:     FIXED @ 60.00 Hz",
             "fps:     25.000 src / 25.001 est (trusted)",

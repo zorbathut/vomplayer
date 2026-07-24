@@ -30,8 +30,8 @@
 
 typedef void (*vompl_output_mode_fn)(uint32_t registry_name, int32_t refresh_mhz);
 typedef void (*vompl_output_removed_fn)(uint32_t registry_name);
-// Forwards the raw tf_named observation for an output's preferred image description. has_tf_named is 0 if no tf_named event arrived before the info `done` (compositor described the TF some other way, or the description failed). Classification into HDR/SDR lives in C# (HdrClassifier).
-typedef void (*vompl_output_image_info_fn)(uint32_t registry_name, int has_tf_named, uint32_t tf_named);
+// Forwards the raw observations from an output's preferred image description: tf_named, primaries_named, and the luminances triple. Each has_* is 0 if the corresponding event did not arrive before the info `done` (compositor described that aspect some other way, or not at all). Wire units preserved raw: min_lum is 1/10000 cd/m², max_lum/ref_lum are cd/m². Classification into HDR/SDR lives in C# (HdrClassifier) — modern KWin signals HDR via luminance headroom (max > ref) rather than a PQ preferred tf, so the luminances are load-bearing, not just diagnostic.
+typedef void (*vompl_output_image_info_fn)(uint32_t registry_name, int has_tf_named, uint32_t tf_named, int has_primaries_named, uint32_t primaries_named, int has_luminances, uint32_t min_lum, uint32_t max_lum, uint32_t ref_lum);
 // Forwards the wl_output v4 .name event (the DRM connector name like "HDMI-A-1"). Empty / NULL on compositors that bind v < 4 or that never emit the event. Consumed by C# WaylandOutputRegistry, which uses the name to look up EDID + the resolved VRR window.
 typedef void (*vompl_output_name_fn)(uint32_t registry_name, const char *name);
 
@@ -51,7 +51,7 @@ static vompl_output_name_fn g_output_name_cb;
 
 // Per-output record. The consumer (C#) is the authoritative store for everything the listeners forward — vompl_set_output_callbacks must be registered BEFORE the first ensure_globals (VideoSurface guarantees this by calling EnsureRegistered ahead of the first surface creation); events fired before registration would be dropped, not replayed.
 //
-// HDR probe state (cm_output, pending_desc, pending_info, pending_tf_*) drives a single-shot ready→get_information→tf_named→done handshake per probe. A fresh probe starts on initial output bind and on every wp_color_management_output_v1.image_description_changed event; any in-flight proxies are destroyed before restarting so at most one chain is live per output at a time.
+// HDR probe state (cm_output, pending_desc, pending_info, pending_*) drives a single-shot ready→get_information→(info events)→done handshake per probe. A fresh probe starts on initial output bind and on every wp_color_management_output_v1.image_description_changed event; any in-flight proxies are destroyed before restarting so at most one chain is live per output at a time.
 struct output_info
 {
     struct wl_output *output;
@@ -61,6 +61,12 @@ struct output_info
     struct wp_image_description_info_v1 *pending_info;
     int pending_tf_named_seen;
     uint32_t pending_tf_named;
+    int pending_primaries_named_seen;
+    uint32_t pending_primaries_named;
+    int pending_lum_seen;
+    uint32_t pending_min_lum;
+    uint32_t pending_max_lum;
+    uint32_t pending_ref_lum;
     struct output_info *next;
 };
 
@@ -145,13 +151,13 @@ static const struct wl_output_listener output_listener_impl = {
 };
 
 //---------------------------------------------------------------
-// Per-output HDR-capability probe: introspect the output's preferred image description and classify the panel as HDR iff its transfer function is PQ or HLG. Flow (driven by the compositor's event loop):
+// Per-output HDR-capability probe: introspect the output's preferred image description and forward the raw observations (tf_named, primaries_named, luminances) to C#, where HdrClassifier decides HDR vs SDR. Flow (driven by the compositor's event loop):
 //
 //   get_image_description
 //     └─ ready    → get_information
-//                     └─ tf_named (captured)
-//                     └─ done     → classify + fire callback, destroy info
-//     └─ failed   → leave is_hdr_valid as-is (unknown or last known), destroy desc
+//                     └─ tf_named / primaries_named / luminances (captured)
+//                     └─ done     → fire callback with raw values, destroy info
+//     └─ failed   → no callback fires; the C# registry keeps its last-known record, destroy desc
 //
 // image_description_changed restarts the flow; old in-flight state is torn down first.
 //---------------------------------------------------------------
@@ -173,6 +179,12 @@ static void teardown_pending_probe(struct output_info *info)
     }
     info->pending_tf_named_seen = 0;
     info->pending_tf_named = 0;
+    info->pending_primaries_named_seen = 0;
+    info->pending_primaries_named = 0;
+    info->pending_lum_seen = 0;
+    info->pending_min_lum = 0;
+    info->pending_max_lum = 0;
+    info->pending_ref_lum = 0;
     if (had)
     {
         g_hdr_probes_inflight--;
@@ -192,7 +204,7 @@ static void oi_desc_failed(void *data, struct wp_image_description_v1 *desc, uin
     teardown_pending_probe(info);
 }
 
-// Only tf_named and done are load-bearing; every other event is accepted and discarded. Listener slots can't be NULL (libwayland dispatches via the vtable unconditionally) so each slot points at an ignore-shaped stub with the correct signature.
+// tf_named, primaries_named, luminances, and done are captured/load-bearing; every other event is accepted and discarded. Listener slots can't be NULL (libwayland dispatches via the vtable unconditionally) so each discarded slot points at an ignore-shaped stub with the correct signature.
 //
 // icc_file carries a file descriptor transferred over the socket. We don't use ICC profiles, but we must still close the fd or it leaks — one per probe per output with an ICC-described profile, plus one per image_description_changed restart.
 static void oi_info_icc_file(void *data, struct wp_image_description_info_v1 *i, int32_t icc, uint32_t icc_size)
@@ -209,7 +221,10 @@ static void oi_info_primaries(void *data, struct wp_image_description_info_v1 *i
 }
 static void oi_info_primaries_named(void *data, struct wp_image_description_info_v1 *i, uint32_t p)
 {
-    (void)data; (void)i; (void)p;
+    (void)i;
+    struct output_info *info = data;
+    info->pending_primaries_named = p;
+    info->pending_primaries_named_seen = 1;
 }
 static void oi_info_tf_power(void *data, struct wp_image_description_info_v1 *i, uint32_t eexp)
 {
@@ -217,7 +232,12 @@ static void oi_info_tf_power(void *data, struct wp_image_description_info_v1 *i,
 }
 static void oi_info_luminances(void *data, struct wp_image_description_info_v1 *i, uint32_t mn, uint32_t mx, uint32_t ref)
 {
-    (void)data; (void)i; (void)mn; (void)mx; (void)ref;
+    (void)i;
+    struct output_info *info = data;
+    info->pending_min_lum = mn;
+    info->pending_max_lum = mx;
+    info->pending_ref_lum = ref;
+    info->pending_lum_seen = 1;
 }
 static void oi_info_target_primaries(void *data, struct wp_image_description_info_v1 *i, int32_t rx, int32_t ry, int32_t gx, int32_t gy, int32_t bx, int32_t by, int32_t wx, int32_t wy)
 {
@@ -250,7 +270,10 @@ static void oi_info_done(void *data, struct wp_image_description_info_v1 *i)
     struct output_info *info = data;
     if (g_output_image_info_cb)
     {
-        g_output_image_info_cb(info->registry_name, info->pending_tf_named_seen, info->pending_tf_named);
+        g_output_image_info_cb(info->registry_name,
+            info->pending_tf_named_seen, info->pending_tf_named,
+            info->pending_primaries_named_seen, info->pending_primaries_named,
+            info->pending_lum_seen, info->pending_min_lum, info->pending_max_lum, info->pending_ref_lum);
     }
     // done is terminal — conventional client pattern is wl_proxy_destroy after receiving it. The info proxy has no destroy request (there's nothing to tell the server), so wp_image_description_info_v1_destroy is purely client-side. teardown_pending_probe handles that.
     teardown_pending_probe(info);
@@ -451,7 +474,7 @@ static int ensure_globals(struct wl_display *display)
         return -4;
     }
 
-    // Pump additional roundtrips so the per-output HDR-capability probe (get_image_description → ready → get_information → tf_named/done) completes before returning. Each full probe needs ~2 roundtrips. Capped so a misbehaving compositor can't wedge init; if the cap is hit the still-pending outputs never deliver an image-info callback (consumer treats unknown as SDR), but we log so a surprise "everything probed as SDR" is diagnosable.
+    // Pump additional roundtrips so the per-output HDR-capability probe (get_image_description → ready → get_information → info events/done) completes before returning. Each full probe needs ~2 roundtrips. Capped so a misbehaving compositor can't wedge init; if the cap is hit the still-pending outputs never deliver an image-info callback (consumer treats unknown as SDR), but we log so a surprise "everything probed as SDR" is diagnosable.
     for (int i = 0; i < 6 && g_hdr_probes_inflight > 0; i++)
     {
         if (wl_display_roundtrip(display) < 0)

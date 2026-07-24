@@ -7,7 +7,7 @@ namespace Vomplayer.Wayland;
 //
 // Tracks per-output:
 //   - current-mode refresh rate (mHz), consumed by the VRR classifier.
-//   - HDR-capability bit, derived from the output's preferred image description's transfer function (PQ/HLG ⇒ HDR).
+//   - the preferred image description's raw observations (tf_named, primaries_named, luminances); HDR-capability is classified from these on read via HdrClassifier (PQ/HLG tf OR luminance headroom).
 //   - DRM connector name (e.g. "HDMI-A-1") from wl_output v4 .name.
 //   - Resolved VRR window (min/max Hz) for the panel, looked up via the IEdidSource at the moment the connector name lands.
 // Keyed by name rather than by wl_output* because names are stable opaque wire-level identifiers — pointers would turn every global_remove into a potential UAF across the managed/unmanaged boundary.
@@ -16,7 +16,7 @@ namespace Vomplayer.Wayland;
 public static class WaylandOutputRegistry
 {
     private static readonly Dictionary<uint, int> modesByName = new();
-    private static readonly Dictionary<uint, bool> isHdrByName = new();
+    private static readonly Dictionary<uint, OutputImageDescription> imageDescByName = new();
     private static readonly Dictionary<uint, string> namesByRegistry = new();
     private static readonly Dictionary<uint, VrrRange?> vrrRangeByRegistry = new();
 
@@ -35,11 +35,12 @@ public static class WaylandOutputRegistry
         modesByName[registryName] = refreshMhz;
     }
 
-    // Called when the shim finishes introspecting an output's preferred image description (initial handshake or wp_color_management_output_v1.image_description_changed). isHdr is true iff the transfer function is PQ or HLG.
-    public static void OnOutputHdr(uint registryName, bool isHdr)
+    // Called when the shim finishes introspecting an output's preferred image description (initial handshake or wp_color_management_output_v1.image_description_changed). Stores the raw observation; IsHdrChanged dedup keys on the classified HDR bit, not the raw values — a raw-only change (e.g. peak-brightness override tweaked while staying HDR) doesn't fire, and the diagnostic overlay re-reads the record on its own refresh tick anyway.
+    public static void OnOutputImageDescription(uint registryName, OutputImageDescription desc)
     {
-        bool changed = !isHdrByName.TryGetValue(registryName, out var prev) || prev != isHdr;
-        isHdrByName[registryName] = isHdr;
+        bool newIsHdr = HdrClassifier.IsHdr(desc);
+        bool changed = !imageDescByName.TryGetValue(registryName, out var prev) || HdrClassifier.IsHdr(prev) != newIsHdr;
+        imageDescByName[registryName] = desc;
         if (changed)
         {
             IsHdrChanged?.Invoke(registryName);
@@ -63,7 +64,7 @@ public static class WaylandOutputRegistry
     public static void OnOutputRemoved(uint registryName)
     {
         modesByName.Remove(registryName);
-        isHdrByName.Remove(registryName);
+        imageDescByName.Remove(registryName);
         namesByRegistry.Remove(registryName);
         if (vrrRangeByRegistry.Remove(registryName))
         {
@@ -76,9 +77,9 @@ public static class WaylandOutputRegistry
         return modesByName.TryGetValue(registryName, out refreshMhz);
     }
 
-    public static bool TryGetIsHdr(uint registryName, out bool isHdr)
+    public static bool TryGetImageDescription(uint registryName, out OutputImageDescription desc)
     {
-        return isHdrByName.TryGetValue(registryName, out isHdr);
+        return imageDescByName.TryGetValue(registryName, out desc);
     }
 
     public static bool TryGetName(uint registryName, out string name)
@@ -116,7 +117,7 @@ public static class WaylandOutputRegistry
     internal static void Reset()
     {
         modesByName.Clear();
-        isHdrByName.Clear();
+        imageDescByName.Clear();
         namesByRegistry.Clear();
         vrrRangeByRegistry.Clear();
         IsHdrChanged = null;

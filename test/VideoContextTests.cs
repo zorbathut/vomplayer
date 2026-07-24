@@ -30,8 +30,8 @@ public class VideoContextTests
         public List<bool> SetHdrCalls { get; } = new();
         // SetHdr return value — 0 = success, -1 = compositor refused. Tests configure this to simulate the failed-sink case.
         public int NextRc { get; set; }
-        public bool? CurrentOutputIsHdrValue { get; set; }
-        public bool? CurrentOutputIsHdr { get { return CurrentOutputIsHdrValue; } }
+        public OutputImageDescription? CurrentOutputImageDescriptionValue { get; set; }
+        public OutputImageDescription? CurrentOutputImageDescription { get { return CurrentOutputImageDescriptionValue; } }
         public event Action? CurrentOutputHdrChanged;
 
         public int SetHdr(bool enable)
