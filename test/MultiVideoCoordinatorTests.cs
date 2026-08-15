@@ -32,6 +32,23 @@ public class MultiVideoCoordinatorTests
             Vm.EnablePip(NewSecondary());
         }
 
+        // Establish a known sync offset the way the runtime does: a Secondary FileLoaded clears to pending, and the drift controller's first both-advancing tick baselines from the current divergence. Call after EnablePip with both durations already set (the controller gates on them — the guard asserts loudly instead of leaving the offset silently pending). Restores each stream's core-idle flag afterwards so the calling test's scenario is undisturbed; positions are left at the given values.
+        public void EstablishOffset(double primaryPos, double secondaryPos)
+        {
+            Assert.That(PrimaryPlayback.DurationSeconds, Is.GreaterThan(0), "EstablishOffset requires Primary's duration to be set first");
+            Assert.That(SecondaryPlayback!.DurationSeconds, Is.GreaterThan(0), "EstablishOffset requires Secondary's duration to be set first");
+            SecondaryPlayback!.RaiseFileLoaded();
+            PrimaryPlayback.PositionSeconds = primaryPos;
+            SecondaryPlayback!.PositionSeconds = secondaryPos;
+            bool primaryIdle = PrimaryPlayback.IsCoreIdle;
+            bool secondaryIdle = SecondaryPlayback!.IsCoreIdle;
+            PrimaryPlayback.IsCoreIdle = false;
+            SecondaryPlayback!.IsCoreIdle = false;
+            Vm.ApplyDriftCorrection();
+            PrimaryPlayback.IsCoreIdle = primaryIdle;
+            SecondaryPlayback!.IsCoreIdle = secondaryIdle;
+        }
+
         // Drive a single context to file-EOF: load a playlist, fire FileLoaded, set duration, set EOF. Mirrors a natural file end.
         public static void ReachFileEof(VideoContext ctx, FakePlayback pb)
         {
@@ -197,12 +214,8 @@ public class MultiVideoCoordinatorTests
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 600;   // 10:00
         h.SecondaryPlayback!.DurationSeconds = 900; // 15:00, asymmetric on purpose
-        h.PrimaryPlayback.PositionSeconds = 480;   // Primary at 8:00
-        h.SecondaryPlayback!.PositionSeconds = 700; // Secondary at 11:40
-
-        // Establish offset = +220 (Secondary 220s ahead) via the authorized select round-trip.
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // captures offset = 700 - 480 = 220
+        // Establish offset = +220 (Secondary 220s ahead): Primary at 8:00, Secondary at 11:40.
+        h.EstablishOffset(480, 700);
 
         // Click takes Primary from 8:00 (480s) to 5:00 (300s). Secondary is absolute-pinned to 300 + 220 = 520 — which is 700 - 180, i.e. the same -180s net move Primary made, NOT 0.5 * 900 = 450.
         h.Vm.SeekTo(0.5);
@@ -265,7 +278,7 @@ public class MultiVideoCoordinatorTests
     [Test]
     public void SyncTransportNeverChangesEstablishedOffset()
     {
-        // The headline invariant: once an offset is established, NO sync-mode transport (SeekTo, SeekRelative, StepChapter, StepFrame) may change it. Only single-track selection does. We establish offset = 5 via a select round-trip, run every transport kind, then prove the offset survived by checking a follow-up correction still defends 5.
+        // The headline invariant: once an offset is established, NO sync-mode transport (SeekTo, SeekRelative, StepChapter, StepFrame) may change it. Only an intentional asymmetric adjustment (an isolated transport action, or a differed-pair converge) does. We establish offset = 5, run every transport kind, then prove the offset survived by checking a follow-up correction still defends 5.
         using var h = new Harness();
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 200;
@@ -274,11 +287,8 @@ public class MultiVideoCoordinatorTests
         h.SecondaryPlayback!.VideoFps = 30;
         h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 80) };
 
-        // Establish offset = 5 (Secondary 5s ahead) via the authorized select→deselect adjustment.
-        h.PrimaryPlayback.PositionSeconds = 0;
-        h.SecondaryPlayback!.PositionSeconds = 5;
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // captures offset = 5
+        // Establish offset = 5 (Secondary 5s ahead).
+        h.EstablishOffset(0, 5);
 
         // Now simulate the streams drifting during playback so the LIVE divergence (12) differs from the STORED offset (5). If any seek re-derived the offset from live positions instead of reading the stored value, the assertions below would see primaryTarget + 12, not + 5 — this is what pins "stored, not re-derived".
         h.PrimaryPlayback.PositionSeconds = 40;
@@ -318,12 +328,8 @@ public class MultiVideoCoordinatorTests
             new MediaChapter(1, "Act 1", 60),
             new MediaChapter(2, "Act 2", 180),
         };
-        h.PrimaryPlayback.PositionSeconds = 30;   // currently in Intro (chapter 0)
-        h.SecondaryPlayback!.PositionSeconds = 95; // 65s ahead of Primary
-
-        // Establish offset = +65 via the authorized select round-trip.
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // captures offset = 95 - 30 = 65
+        // Establish offset = +65: Primary at 30 (in Intro, chapter 0), Secondary 65s ahead at 95.
+        h.EstablishOffset(30, 95);
 
         // Step +1 → Primary's target is chapter 1 at 60s; Secondary is absolute-pinned to 60 + 65 = 125 (= 95 + Primary's +30 move), NOT to its own chapter 1.
         h.Vm.StepChapter(1);
@@ -377,12 +383,8 @@ public class MultiVideoCoordinatorTests
         h.PrimaryPlayback.DurationSeconds = 300;
         h.SecondaryPlayback!.DurationSeconds = 300;
         h.PrimaryPlayback.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 120) };
-        h.PrimaryPlayback.PositionSeconds = 20;
-        h.SecondaryPlayback!.PositionSeconds = 0;  // 20s behind Primary
-
-        // Establish offset = -20 via the authorized select round-trip.
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // captures offset = 0 - 20 = -20
+        // Establish offset = -20: Secondary 20s behind Primary.
+        h.EstablishOffset(20, 0);
 
         h.Vm.SeekToChapter(120);   // target 120 - 5 = 115; Secondary absolute-pinned to 115 + (-20) = 95
         Assert.That(h.PrimaryPlayback.SeekCalls.Count, Is.EqualTo(1));
@@ -600,15 +602,14 @@ public class MultiVideoCoordinatorTests
     [Test]
     public void PlayPauseConvergingDifferedStreamsSetsSyncPoint()
     {
-        // Repro: user plays one track alone, switches to all-track mode, then hits Space to start all. The already-playing track drifted between the mode switch and the Space press, so the offset captured at deselect is now stale. Bringing the two streams to a common play state via Space only actually STARTS one of them (the other was already playing) — that's a fresh sync point: capture the offset from the live divergence.
+        // Repro: user plays one track alone (isolated), leaves the pair in differed play states, then hits Space in sync mode. The already-playing track drifted since the offset was last established, so the stored offset is stale. Bringing the two streams to a common play state via Space only actually STARTS one of them (the other was already playing) — an intentional asymmetric action: capture the offset from the live divergence.
         using var h = new Harness();
         h.EnablePip();
         h.PrimaryPlayback.DurationSeconds = 60;
         h.SecondaryPlayback!.DurationSeconds = 60;
 
-        // A stale offset of 0 from an earlier select round-trip (both were at 0 then).
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
+        // A stale established offset of 0 (both were at 0 then).
+        h.EstablishOffset(0, 0);
 
         // Streams now in DIFFERENT play states: Secondary has been playing and drifted to 40, Primary is paused at 10.
         h.PrimaryPlayback.IsPaused = true;
@@ -640,11 +641,8 @@ public class MultiVideoCoordinatorTests
         h.PrimaryPlayback.DurationSeconds = 60;
         h.SecondaryPlayback!.DurationSeconds = 60;
 
-        // Establish offset = 5 via a select round-trip, both paused.
-        h.PrimaryPlayback.PositionSeconds = 0;
-        h.SecondaryPlayback!.PositionSeconds = 5;
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 5
+        // Establish offset = 5, then pause both.
+        h.EstablishOffset(0, 5);
         h.PrimaryPlayback.IsPaused = true;
         h.SecondaryPlayback!.IsPaused = true;
 
@@ -659,6 +657,213 @@ public class MultiVideoCoordinatorTests
         h.SecondaryPlayback!.PositionSeconds = 36.5;  // drift = (36.5 - 30) - 5 = 1.5 > hard-resync threshold
         h.Vm.ApplyDriftCorrection();
         Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 35.0 }), "offset unchanged at 5 → hard resync targets 30 + 5 = 35");
+    }
+
+    [Test]
+    public void SyncPauseTogetherPreservesEstablishedOffset()
+    {
+        // The literal reported bug: both streams playing in sync with an established offset, user pauses them together — the offset must not move. Pausing gates the drift controller (core-idle), so the diagnostic read is the authoritative assert here.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.EstablishOffset(0, 5);
+
+        h.Vm.PlayPauseCommand.Execute(null);  // play/play → pause/pause
+
+        Assert.That(h.PrimaryPlayback.SetPausedCalls, Is.EqualTo(new[] { true }));
+        Assert.That(h.SecondaryPlayback!.SetPausedCalls, Is.EqualTo(new[] { true }));
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(5.0).Within(1e-9), "pausing together must not move the sync offset");
+    }
+
+    [Test]
+    public void PlayPauseConvergingDifferedStreamsToPauseAlsoSetsSyncPoint()
+    {
+        // The pause-direction converge: Primary playing, Secondary already paused → Space pauses the pair. Only Primary actually changed state — the same asymmetric "join" as the play direction, capturing the offset from the live (on-screen) divergence.
+        using var h = new Harness();
+        h.EnablePip();
+        h.PrimaryPlayback.DurationSeconds = 60;
+        h.SecondaryPlayback!.DurationSeconds = 60;
+        h.EstablishOffset(0, 0);  // stale established offset
+
+        h.PrimaryPlayback.IsPaused = false;
+        h.PrimaryPlayback.PositionSeconds = 20;
+        h.SecondaryPlayback!.IsPaused = true;
+        h.SecondaryPlayback!.PositionSeconds = 8;  // frozen while paused; live divergence = -12
+
+        h.Vm.PlayPauseCommand.Execute(null);  // target = !Primary.IsPaused = pause both
+
+        Assert.That(h.PrimaryPlayback.SetPausedCalls, Is.EqualTo(new[] { true }));
+        Assert.That(h.SecondaryPlayback!.SetPausedCalls, Is.EqualTo(new[] { true }));
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(-12.0).Within(1e-9), "the joining pause captures the on-screen arrangement");
+    }
+
+    [Test]
+    public void IsolatedTransportOnFilelessStreamDoesNotVoidOffset()
+    {
+        // The isolated void is gated on the selected stream actually having a file: on a fileless stream every underlying transport is a gated no-op, and a true no-op must not invalidate the sync (same principle as the chapterless StepChapter).
+        using var h = new Harness();
+        h.EnablePip();  // offset = 0 established
+        h.PrimaryPlayback.DurationSeconds = 60;  // Secondary stays fileless (Duration 0)
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+
+        h.Vm.PlayPauseCommand.Execute(null);
+        h.Vm.SeekTo(0.5);
+        h.Vm.SeekRelative(10);
+        h.Vm.StepFrameForward();
+
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(0.0).Within(1e-9), "gated no-ops on a fileless stream must not void the offset");
+    }
+
+    [Test]
+    public void SelectionRoundTripPreservesEstablishedOffset()
+    {
+        // Selection is orthogonal to the sync offset: a select/deselect round-trip with no isolated transport action in between must leave the established offset untouched — even if the streams drifted while isolated (the controller is gated then). This is also the fullscreen controls auto-hide path, which deselects via a TIMER (MainWindow's OnControlsHideTimeout → SetSelected(null)): a timer must never be able to move the user's sync.
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.EstablishOffset(0, 5);
+
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        h.SecondaryPlayback!.PositionSeconds = 5.3;  // decoder drift while isolated — no VM command issued
+        h.Vm.SetSelected(null);
+
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(5.0).Within(1e-9), "deselect must not recapture from the drifted positions");
+        // The 0.3 s drift against the preserved offset is corrected, not adopted as the new target.
+        h.Vm.ApplyDriftCorrection();
+        Assert.That(h.SecondaryPlayback!.SetSpeedCalls, Is.EqualTo(new[] { 0.95 }).Within(1e-9), "controller defends 5, catching the isolated-era drift");
+    }
+
+    [Test]
+    public void IsolatedPlayPauseClearsOffsetToPending()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.EstablishOffset(0, 5);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Not.Null, "selection alone must not invalidate the offset");
+
+        h.Vm.PlayPauseCommand.Execute(null);
+
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Null, "an isolated pause/play is an asymmetric adjustment — the old offset is void");
+    }
+
+    [Test]
+    public void IsolatedSeekToClearsOffsetToPendingAndRebaselinesInSync()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.EstablishOffset(0, 5);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Not.Null, "selection alone must not invalidate the offset");
+
+        h.Vm.SeekTo(0.5);  // isolated: seeks Secondary alone to 30
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Null, "an isolated seek is an asymmetric adjustment — the old offset is void");
+
+        // Back in sync, the first both-advancing tick baselines from the adjusted divergence.
+        h.Vm.SetSelected(null);
+        h.PrimaryPlayback.PositionSeconds = 0;
+        h.SecondaryPlayback!.PositionSeconds = 7;
+        h.Vm.ApplyDriftCorrection();
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(7.0).Within(1e-9), "pending re-baselines from the post-adjustment divergence");
+        // And the new offset is defended.
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 17.3;  // drift = (17.3 - 10) - 7 = +0.3
+        h.Vm.ApplyDriftCorrection();
+        Assert.That(h.SecondaryPlayback!.SetSpeedCalls, Is.EqualTo(new[] { 0.95 }).Within(1e-9));
+    }
+
+    [Test]
+    public void IsolatedSeekRelativeClearsOffsetToPending()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.EstablishOffset(0, 5);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Not.Null, "selection alone must not invalidate the offset");
+
+        h.Vm.SeekRelative(10);
+
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Null, "an isolated relative seek is an asymmetric adjustment — the old offset is void");
+        Assert.That(h.SecondaryPlayback!.SeekRelativeCalls, Is.EqualTo(new[] { 10.0 }));
+        Assert.That(h.PrimaryPlayback.SeekRelativeCalls, Is.Empty);
+    }
+
+    [Test]
+    public void IsolatedStepFrameClearsOffsetToPending()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.EstablishOffset(0, 5);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Not.Null, "selection alone must not invalidate the offset");
+
+        h.Vm.StepFrameForward();
+
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Null, "an isolated frame-step is an asymmetric adjustment — the old offset is void");
+    }
+
+    [Test]
+    public void IsolatedStepChapterClearsOffsetToPending()
+    {
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.SecondaryPlayback!.Chapters = new[] { new MediaChapter(0, "a", 0), new MediaChapter(1, "b", 60) };
+        h.EstablishOffset(0, 5);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Not.Null, "selection alone must not invalidate the offset");
+
+        h.Vm.StepChapter(1);  // Secondary at 5 → its chapter 1 at 60
+
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.EqualTo(new[] { 60.0 }));
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Null, "an isolated chapter step is an asymmetric adjustment — the old offset is void");
+    }
+
+    [Test]
+    public void IsolatedStepChapterWithoutChaptersLeavesOffsetEstablished()
+    {
+        // The chapterless resolver returns null → nothing moved → a true no-op. An operation that did nothing must not invalidate the offset (a pending re-baseline would silently absorb the live drift into the target).
+        using var h = new Harness();
+        h.EnablePip();
+        ReadySyncMode(h);
+        h.EstablishOffset(0, 5);
+        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+
+        h.Vm.StepChapter(1);  // Secondary has no chapters → true no-op
+
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(5.0).Within(1e-9), "a true no-op must not invalidate the offset");
+    }
+
+    [Test]
+    public void SyncPlayPauseResolvesPendingOffsetAtGestureTime()
+    {
+        // The both-paused cueing endgame: after isolated adjustments the offset is pending and both streams sit frozen at the cued positions. The same-state Space that starts them together must resolve the offset THEN — from the exact frozen positions — not at the first both-advancing tick, which would bake each decoder's startup skew into the target the controller is supposed to correct.
+        using var h = new Harness();
+        h.EnablePip();
+        h.PrimaryPlayback.DurationSeconds = 60;
+        h.SecondaryPlayback!.DurationSeconds = 60;
+        h.SecondaryPlayback!.RaiseFileLoaded();  // offset → pending
+        h.PrimaryPlayback.IsPaused = true;
+        h.SecondaryPlayback!.IsPaused = true;
+        h.PrimaryPlayback.PositionSeconds = 10;
+        h.SecondaryPlayback!.PositionSeconds = 17;  // frozen cued divergence = 7
+
+        h.Vm.PlayPauseCommand.Execute(null);  // pause/pause → play/play
+
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(7.0).Within(1e-9), "pending resolves from the frozen positions at the gesture");
+
+        // Post-play decoder startup skew is corrected toward 7, not adopted as the target.
+        h.PrimaryPlayback.IsCoreIdle = false;
+        h.SecondaryPlayback!.IsCoreIdle = false;
+        h.PrimaryPlayback.PositionSeconds = 11;
+        h.SecondaryPlayback!.PositionSeconds = 17.9;  // drift = (17.9 - 11) - 7 = -0.1
+        h.Vm.ApplyDriftCorrection();
+        Assert.That(h.SecondaryPlayback!.SetSpeedCalls, Is.EqualTo(new[] { 1.05 }).Within(1e-9), "startup skew corrected against the gesture-time offset");
     }
 
     [Test]
@@ -871,11 +1076,8 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        // Establish a non-trivial offset by transitioning out of selected mode.
-        h.PrimaryPlayback.PositionSeconds = 5;
-        h.SecondaryPlayback!.PositionSeconds = 12;  // offset = 7
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // capture: offset = 12 - 5 = 7
+        // Establish a non-trivial offset = 12 - 5 = 7.
+        h.EstablishOffset(5, 12);
 
         // Sanity: an immediate tick with the same positions sees drift 0 → idle (no seek, no nudge).
         h.Vm.ApplyDriftCorrection();
@@ -904,11 +1106,8 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.PrimaryPlayback.PositionSeconds = 5;
-        h.SecondaryPlayback!.PositionSeconds = 12;
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);
-        // Offset captured = 7.
+        h.EstablishOffset(5, 12);
+        // Offset established = 7.
 
         h.SecondaryPlayback!.RaiseFileLoaded();
         // Lazy-capture round: no correction even with what would be drift against the OLD offset.
@@ -920,20 +1119,28 @@ public class MultiVideoCoordinatorTests
     }
 
     [Test]
-    public void SelectedToSyncCapturesNewOffset()
+    public void IsolatedAdjustmentRebaselinesOffsetAfterReturnToSync()
     {
-        // The selected→null transition is the user's "I just established this offset deliberately" signal. After capture, an in-sync advance with the same offset is a no-op; introducing drift produces a speed nudge in the catch-up direction.
+        // The user's intentional asymmetric adjustment: select Secondary, move it alone (the isolated action clears the offset to pending), return to sync. The deselect itself writes nothing; the first both-advancing tick baselines from the adjusted divergence, and from then on the controller defends the new offset.
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
         h.PrimaryPlayback.PositionSeconds = 0;
         h.SecondaryPlayback!.PositionSeconds = 0;
 
-        // User selects Secondary, frame-steps to align it +5s ahead.
+        // User selects Secondary and steps it +5s ahead. The isolated transport action is what invalidates the offset — selection alone leaves it untouched.
         h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Not.Null, "selection alone must not invalidate the offset");
+        h.Vm.StepFrameForward();
         h.SecondaryPlayback!.PositionSeconds = 5;
-        // Returns to sync. Capture: offset = 5 - 0 = 5.
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds, Is.Null, "isolated adjustment cleared the offset to pending");
         h.Vm.SetSelected(null);
+
+        // First tick baselines offset = 5 from the adjusted divergence (drift 0 → idle).
+        h.Vm.ApplyDriftCorrection();
+        Assert.That(h.SecondaryPlayback!.SeekCalls, Is.Empty);
+        Assert.That(h.SecondaryPlayback!.SetSpeedCalls, Is.Empty);
+        Assert.That(h.Vm.GetSyncDiagnostic().TargetOffsetSeconds!.Value, Is.EqualTo(5.0).Within(1e-9));
 
         // No drift: both advance by 10s, offset preserved → idle.
         h.PrimaryPlayback.PositionSeconds = 10;
@@ -950,7 +1157,7 @@ public class MultiVideoCoordinatorTests
     }
 
     [Test]
-    public void SyncToSelectedClearsOffsetAndGatesCorrection()
+    public void SyncToSelectedGatesCorrection()
     {
         // Entering selected mode disables the slave: ApplyDriftCorrection must early-out on a non-null SelectedSlot regardless of drift size or offset state — no seek, no speed nudge.
         using var h = new Harness();
@@ -975,10 +1182,7 @@ public class MultiVideoCoordinatorTests
         h.EnablePip();
         ReadySyncMode(h);
         // Establish a non-zero offset.
-        h.PrimaryPlayback.PositionSeconds = 0;
-        h.SecondaryPlayback!.PositionSeconds = 5;
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // captures offset = 5
+        h.EstablishOffset(0, 5);
 
         h.Vm.StepChapter(1);  // Primary has no chapters → no-op
 
@@ -1001,10 +1205,7 @@ public class MultiVideoCoordinatorTests
             new MediaChapter(0, "Intro", 0),
             new MediaChapter(1, "Outro", 200),
         };
-        h.PrimaryPlayback.PositionSeconds = 0;
-        h.SecondaryPlayback!.PositionSeconds = 5;
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // captures offset = 5
+        h.EstablishOffset(0, 5);
 
         h.PrimaryPlayback.PositionSeconds = 250;  // in the last chapter
         h.Vm.StepChapter(1);  // past the end → no-op
@@ -1022,8 +1223,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
 
         // Secondary far ahead.
         h.PrimaryPlayback.PositionSeconds = 10;
@@ -1045,8 +1244,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
 
         h.PrimaryPlayback.PositionSeconds = 10;
         h.SecondaryPlayback!.PositionSeconds = 10.2;  // ahead 0.2
@@ -1061,8 +1258,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
 
         h.PrimaryPlayback.PositionSeconds = 10;
         h.SecondaryPlayback!.PositionSeconds = 9.8;  // behind 0.2
@@ -1078,8 +1273,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
         h.PrimaryPlayback.PositionSeconds = 10;
 
         // Behind by 0.2 → CatchUp, 1.05.
@@ -1106,8 +1299,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
         h.PrimaryPlayback.PositionSeconds = 10;
 
         // Ahead 0.035 → 0.965.
@@ -1131,8 +1322,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
 
         h.PrimaryPlayback.PositionSeconds = 10;
         h.SecondaryPlayback!.PositionSeconds = 10.010;  // drift +10 ms
@@ -1148,8 +1337,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
         h.PrimaryPlayback.PositionSeconds = 10;
 
         // Enter CatchUp behind → 1.05.
@@ -1171,8 +1358,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
         h.PrimaryPlayback.PositionSeconds = 10;
 
         h.SecondaryPlayback!.PositionSeconds = 9.8;  // behind → 1.05
@@ -1193,8 +1378,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // capture offset = 0
 
         h.SecondaryPlayback!.PositionSeconds = 5;  // would be huge drift
         h.SecondaryPlayback!.IsSeeking = true;
@@ -1216,8 +1399,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
 
         h.PrimaryPlayback.PositionSeconds = 10;
         h.SecondaryPlayback!.PositionSeconds = 10.5;  // would be coarse
@@ -1246,10 +1427,7 @@ public class MultiVideoCoordinatorTests
         h.EnablePip();
         ReadySyncMode(h);
 
-        h.PrimaryPlayback.PositionSeconds = 0;
-        h.SecondaryPlayback!.PositionSeconds = 5;
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // captures offset = 5
+        h.EstablishOffset(0, 5);
 
         h.Vm.DisablePip();
         h.EnablePip();             // Vm.Secondary is a fresh context; offset reset to 0.
@@ -1301,8 +1479,6 @@ public class MultiVideoCoordinatorTests
 
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset = 0
         h.PrimaryPlayback.PositionSeconds = 10;
         h.SecondaryPlayback!.PositionSeconds = 10.2;  // ahead 0.2
 
@@ -1323,8 +1499,6 @@ public class MultiVideoCoordinatorTests
         using var h = new Harness();
         h.EnablePip();
         ReadySyncMode(h);
-        h.Vm.SetSelected(ViewModelMain.VideoSlot.Secondary);
-        h.Vm.SetSelected(null);  // offset captured = 0
         h.PrimaryPlayback.PositionSeconds = 10;
         h.SecondaryPlayback!.PositionSeconds = 10.2;  // drift 0.2 → latched catch-up
         h.Vm.ApplyDriftCorrection();
@@ -1387,7 +1561,7 @@ public class MultiVideoCoordinatorTests
     [Test]
     public void SyncPlayPauseDoesNotCaptureOffsetAgainstFilelessStream()
     {
-        // The differed-pre-state "join" capture assumes exactly one stream actually changed state. A fileless stream's SetPaused is a gated no-op — it can't join anything, and capturing Secondary.Position − Primary.Position against a stream with no position would store garbage. The EnablePip-established offset must survive.
+        // Both offset writes in the sync PlayPause path — the eager pending-resolution and the differed-pre-state "join" capture — gate on both streams having files. A fileless stream's SetPaused is a gated no-op (it can't join anything), and resolving or capturing Secondary.Position − Primary.Position against a stream with no position would store garbage. The EnablePip-established offset must survive.
         using var h = new Harness();
         h.EnablePip();  // offset = 0
         h.PrimaryPlayback.IsPaused = true;  // fileless

@@ -451,6 +451,8 @@ public sealed partial class Playback : ObservableObject, IPlayback
 
     public void SetPaused(bool paused)
     {
+        // The mirror updates synchronously, ahead of mpv's echo (IPlayback contract): ViewModelMain's sync-broadcast reads IsPaused at gesture time to pick the flip target and to detect a genuinely differed pair — an echo-lagged mirror would let a same-state pair look differed right after a previous toggle and corrupt the sync offset. The echo later confirms (equality-gated, no double fire) or corrects if mpv-side state diverged. This is an absolute write, so the RMW-race rationale that keeps TogglePause on `cycle` doesn't apply. Residual echo lag this does NOT close: LoadFile's atomic pause option stays echo-only (harmless — FileLoaded voids the offset anyway), and a stale echo from a rapid true→false pair can transiently revert the mirror until the second echo lands. That revert window can still fake a differed pair on a third rapid toggle and trigger the coordinator's join capture against an established offset — consequence bounded to capturing the current live drift (sub-deadband in steady state, up to ~1 s mid-catchup) for one echo round-trip; accepted rather than adding a command-generation counter.
+        IsPaused = paused;
         dispatcher.Post(h => h.SetProperty("pause", paused ? "yes" : "no"));
     }
 

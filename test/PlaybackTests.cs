@@ -162,6 +162,17 @@ public class PlaybackTests
         Assert.That(Playback.Playback.IsHdrGamma(gamma), Is.EqualTo(expected));
     }
 
+    // The synchronous IsPaused mirror (IPlayback.SetPaused contract): the commanded state must be readable immediately, not after mpv's echo — ViewModelMain's sync-broadcast join detection and flip target read the mirror at gesture time. Uninitialized instance: no event-pump thread, so the mirror can only change via the synchronous write under test.
+    [Test]
+    public void SetPausedUpdatesIsPausedMirrorSynchronously()
+    {
+        using var pb = new Playback.Playback(a => a());
+        pb.SetPaused(true);
+        Assert.That(pb.IsPaused, Is.True, "commanded pause must be mirrored before mpv echoes");
+        pb.SetPaused(false);
+        Assert.That(pb.IsPaused, Is.False, "commanded resume must be mirrored before mpv echoes");
+    }
+
     // HDR-transition tests drive UpdateSourceHdr directly on an uninitialized Playback. Skipping Initialize() avoids mpv's event-pump thread, which would concurrently dispatch observed properties onto the same object. Exercising UpdateSourceHdr (internal) rather than the private OnMpvPropertyChanged dispatcher keeps the test seam narrow — dispatch routing itself is a one-line case in OnMpvPropertyChanged.
     [Test]
     public void SourceHdrChangedFiresOnSdrToHdrTransition()

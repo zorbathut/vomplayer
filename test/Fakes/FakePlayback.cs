@@ -127,6 +127,7 @@ internal sealed partial class FakePlayback : ObservableObject, IPlayback
         IsPaused = !IsPaused;
     }
 
+    // Synchronous mirror update is the IPlayback.SetPaused contract (matches real Playback), not a test convenience — the coordinator's sync-broadcast reads IsPaused at gesture time.
     public void SetPaused(bool paused)
     {
         SetPausedCalls.Add(paused);

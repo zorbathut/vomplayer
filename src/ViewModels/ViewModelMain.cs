@@ -45,7 +45,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     public IReadOnlyList<string>? InitialFiles { get; set; }
     private bool initialFileLoaded;
 
-    // The stored intended delta between the two streams: Secondary.Position == Primary.Position + targetOffsetSeconds. This is the single source of truth for sync-mode absolute seeks — they re-pin Secondary to primaryTarget + this — and the value the continuous drift controller defends. The governing rule: the offset is (re)captured ONLY by actions that establish the sync relationship from the current positions — EnablePip → 0; FileLoaded → null/pending; the selected→sync transition → captured divergence; EnsureTargetOffset's baseline-on-first-use of a pending value; and a sync-mode PlayPause that changes only ONE stream's play state (converging a differed pair "joins" one stream to the other, which sets the sync point). Actions that move BOTH streams together (sync Seek/StepChapter/StepFrame, a same-state play-both) never write it — they read and defend it, so ordinary seeking/playback can't shift the user's sync. Null means "pending" — no PiP, or not yet baselined after a load; reads go through EnsureTargetOffset, which resolves a pending value from the current divergence.
+    // The stored intended delta between the two streams: Secondary.Position == Primary.Position + targetOffsetSeconds. This is the single source of truth for sync-mode absolute seeks — they re-pin Secondary to primaryTarget + this — and the value the continuous drift controller defends. The governing rule (user spec): only an intentional asymmetric seek/pause/play may change the sync. Concretely, the writes are: EnablePip → 0; FileLoaded → null/pending (the load broke the position relationship); each isolated transport action (seek/pause/step routed to one stream alone) → null/pending, because the user is deliberately moving one stream against the other; EnsureTargetOffset's baseline of a pending value at the next moment sync is well-defined (a sync transport gesture, or the drift controller's first both-advancing tick); and a sync-mode PlayPause that converges a genuinely differed pair — only ONE stream actually changes state there, an asymmetric "join" that defines the sync point from the live positions. Selection changes never touch it (the fullscreen controls auto-hide timer deselects mechanically — a timer must never move the user's sync), and actions that move BOTH streams together (sync Seek/StepChapter/StepFrame, a same-state play-both) never write it — they read and defend it, so ordinary seeking/playback can't shift the user's sync. Null means "pending" — no PiP, or not yet baselined; reads go through EnsureTargetOffset, which resolves a pending value from the current divergence.
     private double? targetOffsetSeconds;
 
     // PiP drift-correction controller state, driven by PipController's repeating timer via ApplyDriftCorrection. driftMode latches CatchUp — full ±5% held until the drift overshoots zero — per the three-tier control law. catchUpSign is the drift sign captured on entering CatchUp (the overshoot detector). secondarySpeed mirrors the last speed pushed to mpv so redundant SetSpeed posts are skipped.
@@ -401,17 +401,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     // Auto-generated [ObservableProperty] partial hook fired AFTER SelectedSlot's value updates. We use it to push the selection swap through to the view: re-fire PropertyChanged for every proxy property so existing OnViewModelPropertyChanged handlers re-read against the new target context's values (volume slider snaps to target's volume, seek bar to target's position, etc.).
     partial void OnSelectedSlotChanged(VideoSlot? value)
     {
-        // Sync-mode targetOffset bookkeeping. Setter equality gating means every fire here is a real transition, so we just branch on the new value:
-        //   - newValue != null  ⇒ entering selected mode (slave inactive). Clear the offset; the user is about to deliberately move one stream alone.
-        //   - newValue == null  ⇒ returning to sync. Capture from current positions — the user just demonstrated their intended offset by leaving isolated mode at this configuration.
-        if (value != null)
-        {
-            targetOffsetSeconds = null;
-        }
-        else if (Secondary != null)
-        {
-            targetOffsetSeconds = Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds;
-        }
+        // Deliberately NO targetOffset bookkeeping here: selection is orthogonal to the sync offset (governing rule on targetOffsetSeconds). Selecting a stream only re-routes input; it's the isolated transport ACTIONS that void the offset, so a select/deselect round-trip with no action — including the fullscreen auto-hide timer's mechanical SetSelected(null) — leaves the user's sync untouched.
         for (int i = 0; i < ProxyPropertyNames.Length; i++)
         {
             OnPropertyChanged(ProxyPropertyNames[i]);
@@ -466,21 +456,6 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
     }
 
-    // Iterates the contexts that should receive a *transport* command. Selected ⇒ just that one; null ⇒ Primary plus Secondary if present (sync broadcast).
-    private IEnumerable<VideoContext> RoutingTargets()
-    {
-        if (SelectedContext != null)
-        {
-            yield return SelectedContext;
-            yield break;
-        }
-        yield return Primary;
-        if (Secondary != null)
-        {
-            yield return Secondary;
-        }
-    }
-
     [RelayCommand]
     private Task OpenAsync()
     {
@@ -508,9 +483,10 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     [RelayCommand]
     private void PlayPause()
     {
-        // Selection set ⇒ isolated toggle on that one stream. Other streams are deliberately untouched (the "cue PiP without disturbing primary" workflow). VideoContext.PlayPause handles the no-file-loaded UX gate.
+        // Selection set ⇒ isolated toggle on that one stream. Other streams are deliberately untouched (the "cue PiP without disturbing primary" workflow) — which makes this an asymmetric adjustment, so it voids the offset (governing rule on targetOffsetSeconds). VideoContext.PlayPause handles the no-file-loaded UX gate.
         if (SelectedContext != null)
         {
+            ClearTargetOffsetForIsolatedAction();
             SelectedContext.PlayPause();
             return;
         }
@@ -521,6 +497,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         if (driver == null)
         {
             return;
+        }
+        // A sync transport gesture is where a pending offset becomes real: resolve it NOW, from the pre-command positions — frozen and exact when both streams are paused (the cueing endgame: isolated adjustments left the offset pending, and this Space starts the pair at the cued alignment). Deferring to the drift controller's first both-advancing tick would bake each decoder's startup skew into the very target the controller is supposed to correct. Same eager-resolution pattern as SeekTo. Gated on both files: a fileless stream has no meaningful position to baseline against.
+        if (Secondary != null && primaryHasFile && secondaryHasFile)
+        {
+            EnsureTargetOffset();
         }
         bool target = !driver.Playback.IsPaused;
         bool primaryWasPaused = Primary.Playback.IsPaused;
@@ -533,7 +514,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         Secondary.SetPaused(target);
         if (primaryHasFile && secondaryHasFile && primaryWasPaused != secondaryWasPaused)
         {
-            // The two streams started in DIFFERENT play states, so converging them to a common state actually changed only ONE of them — the other was already there. That stream just "joined" the other at the live positions, which (like a single-track adjustment) defines a fresh sync point: capture the offset from the current divergence. Both streams must actually have files — a fileless stream's differed pre-state is vacuous (its SetPaused was gated to a no-op, so nothing "joined") and capturing against its zero position would store garbage. We deliberately do NOT schedule a corrective seek — the offset we just captured already matches the positions, and a deferred correction would only yank the stream that was ALREADY playing to absorb the joining stream's decoder-startup lag, which is exactly the spurious resync this fixes.
+            // The two streams started in DIFFERENT play states, so converging them to a common state actually changed only ONE of them — the other was already there. That stream just "joined" the other at the live positions: an intentional asymmetric play/pause (governing rule on targetOffsetSeconds), which defines a fresh sync point — capture the offset from the current divergence. The pre-states are trustworthy because IPlayback.SetPaused mirrors IsPaused synchronously, which closes the command→echo gap that used to let a same-state pair look differed right after a previous toggle (a residual window remains — a stale echo from a rapid re-toggle can transiently revert a mirror until the next echo lands — with consequence bounded to capturing the current live drift; see Playback.SetPaused). Both streams must actually have files — a fileless stream's differed pre-state is vacuous (its SetPaused was gated to a no-op, so nothing "joined") and capturing against its zero position would store garbage. We deliberately do NOT schedule a corrective seek — the offset we just captured already matches the positions, and a deferred correction would only yank the stream that was ALREADY playing to absorb the joining stream's decoder-startup lag, which is exactly the spurious resync this fixes.
             targetOffsetSeconds = Secondary.Playback.PositionSeconds - Primary.Playback.PositionSeconds;
             return;
         }
@@ -622,6 +603,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     {
         if (SelectedContext != null)
         {
+            // Isolated seek moves one stream alone — an asymmetric adjustment, so it voids the offset (governing rule on targetOffsetSeconds).
+            ClearTargetOffsetForIsolatedAction();
             SelectedContext.SeekTo(normalizedPosition);
             return;
         }
@@ -638,7 +621,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         // Even pinned to the same content-time target, the two `+exact` seeks land at slightly different wall-clock times (codec asymmetry / hr-seek rewind distance). The continuous drift controller absorbs that residual skew once both have settled.
     }
 
-    // Returns the stored sync offset (Secondary − Primary), baselining it from the current divergence if it hasn't been established yet (null = "pending" after a file load / EnablePip). Once set it is immutable until the next file load (→ ClearTargetOffset) or the authorized selected→sync capture — no transport command ever writes it, which is what keeps the two streams locked at the user's intended delta. Only call when Secondary != null.
+    // Returns the stored sync offset (Secondary − Primary), baselining it from the current divergence if it hasn't been established yet (null = "pending" after a file load or an isolated adjustment). Once set it is immutable until the next file load or isolated transport action (→ ClearTargetOffset) or the sync-converge join capture — no both-stream transport ever writes it, which is what keeps the two streams locked at the user's intended delta. Only call when Secondary != null. The sync SeekTo/StepChapter callers don't gate on files, so a pending baseline can read a fileless stream's zero position — transient garbage that self-heals: that stream's transport no-ops, its eventual FileLoaded re-clears to pending, and the drift controller gates on both durations.
     private double EnsureTargetOffset()
     {
         if (!targetOffsetSeconds.HasValue)
@@ -663,10 +646,19 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         SeekTo(target / dur);
     }
 
-    // FileLoaded handler: when either Primary or Secondary loads a new file, mpv resets the loaded context's position to 0, breaking the captured sync-mode offset entirely. Setting it "pending" (null) makes the next EnsureTargetOffset re-baseline against fresh post-load state — so the two streams adopt whatever positions they legitimately come up at (resume positions on a session restore, ~0 for fresh content loaded together) rather than collapsing one onto the other.
+    // The shared void-to-pending primitive: called when the stored offset stops describing the user's intent — a FileLoaded on either slot (mpv resets that context's position to 0, breaking the position relationship), an isolated transport action (the user is deliberately moving one stream against the other), and DisablePip. Setting "pending" (null) makes the next EnsureTargetOffset re-baseline from the then-current divergence — so the streams adopt whatever positions they legitimately end up at (resume positions on a session restore, the user's cued alignment after isolated adjustments) rather than collapsing one onto the other.
     private void ClearTargetOffset()
     {
         targetOffsetSeconds = null;
+    }
+
+    // Isolated-transport variant of ClearTargetOffset: void the offset only when the action can actually move the selected stream. On a fileless stream (Duration 0) every underlying transport is a gated no-op — VideoContext.PlayPause bails, Playback.Seek/StepFrame* no-op pre-load — and a true no-op must not invalidate the user's sync (same principle as StepChapter's resolved-target gate). Only call when SelectedContext != null.
+    private void ClearTargetOffsetForIsolatedAction()
+    {
+        if (SelectedContext!.Duration > TimeSpan.Zero)
+        {
+            ClearTargetOffset();
+        }
     }
 
     // Beyond this drift, a speed nudge would take too long — snap Secondary back with a hard seek instead.
@@ -795,13 +787,17 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         return new PipSyncDiagnostic(true, targetOffsetSeconds, currentOffset, drift, secondarySpeed, mode);
     }
 
-    // Relative seek stays a uniform fan-out across both contexts — mpv handles per-context edge clamping. Unlike SeekTo it does NOT re-pin to an absolute target: moving both by the same delta is offset-preserving by construction, and it never reads the offset or Primary's position, so it can't shift the locked sync. Same fan-out for both isolated and sync modes; isolated reduces to a one-element loop.
+    // Sync-mode relative seek fans out to both contexts — mpv handles per-context edge clamping. Unlike SeekTo it does NOT re-pin to an absolute target: moving both by the same delta is offset-preserving by construction, and it never reads the offset or Primary's position. Isolated mode routes to the selected stream alone — an asymmetric adjustment, so it voids the offset (governing rule on targetOffsetSeconds).
     public void SeekRelative(double seconds)
     {
-        foreach (var ctx in RoutingTargets())
+        if (SelectedContext != null)
         {
-            ctx.SeekRelative(seconds);
+            ClearTargetOffsetForIsolatedAction();
+            SelectedContext.SeekRelative(seconds);
+            return;
         }
+        Primary.SeekRelative(seconds);
+        Secondary?.SeekRelative(seconds);
     }
 
     public void StepFrameForward()
@@ -819,6 +815,8 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     {
         if (SelectedContext != null)
         {
+            // Isolated frame-step moves one stream alone — an asymmetric adjustment, so it voids the offset (governing rule on targetOffsetSeconds).
+            ClearTargetOffsetForIsolatedAction();
             if (forward) { SelectedContext.StepFrameForward(); } else { SelectedContext.StepFrameBack(); }
             return;
         }
@@ -849,7 +847,11 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
     {
         if (SelectedContext != null)
         {
-            StepChapterIsolated(SelectedContext, delta);
+            // Void the offset only when the step actually moved the stream (governing rule on targetOffsetSeconds): a chapterless/at-the-edge press resolves to null — a true no-op that must not invalidate the user's sync.
+            if (StepChapterIsolated(SelectedContext, delta))
+            {
+                ClearTargetOffset();
+            }
             return;
         }
         if (Secondary == null)
@@ -868,13 +870,16 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         Secondary.Playback.Seek(target.Value + offset);
     }
 
-    private void StepChapterIsolated(VideoContext context, int delta)
+    // Returns whether the step actually seeked (false = no chapters / stepping past the edge), so the isolated caller can gate its offset invalidation on a real move.
+    private bool StepChapterIsolated(VideoContext context, int delta)
     {
         double? target = ChapterStep.ResolveTarget(context.Chapters, context.Position.TotalSeconds, delta, ChapterSeekPrerollSeconds);
         if (target.HasValue)
         {
             context.Playback.Seek(target.Value);
+            return true;
         }
+        return false;
     }
 
     public void SetVolume(double percent)
