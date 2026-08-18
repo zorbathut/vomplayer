@@ -18,9 +18,9 @@ App code is MIT. libmpv is LGPLv2.1+ (dynamic linking keeps us permissive). This
 src/
   Program.cs             # entry, arg parsing, Gtk.Application wiring, primary Playback construction, StateDatabase open
   StartupHelpers.cs      # pure: GApplication flag computation + command-line path/URI resolution
-  GLibLogDiag.cs         # g_log_set_writer_func — adds C# stack traces to GLib ERROR/CRITICAL
+  GLibLogDiag.cs         # g_log_set_writer_func + g_set_printerr_handler — adds C# stack traces to GLib ERROR/CRITICAL and g_assert aborts
   Epoxy.cs               # eglGetProcAddress + glGetIntegerv for FBO binding
-  LibC.cs                # setlocale(LC_NUMERIC,"C") — mpv refuses non-C LC_NUMERIC
+  LibC.cs                # setlocale(LC_NUMERIC,"C") — mpv refuses non-C LC_NUMERIC; raw write(2)-to-stderr helpers for crash-path diagnostics
   MainWindow.cs          # code-only GTK4 window: widgets, input controllers, fullscreen / autohide / screensaver, VM <-> view glue
   MainWindow.Menu.cs     # menubar + Gio.SimpleAction registration + per-kind track menus + accel refresh + File→Recent
   MainWindow.PlaylistIo.cs # File → Open/Save Playlist handlers (file dialogs + clipboard, PlaylistFile format glue)
@@ -228,7 +228,7 @@ NUnit in `test/`, biased toward code that's testable without a GTK/mpv runtime: 
 - Tomlyn (NuGet) — TOML deserialization for `UserConfig`. 2.x uses `System.Text.Json.JsonNamingPolicy.SnakeCaseLower` for property naming so `[ui_section] some_key` maps to PascalCase POCO members
 - Microsoft.Data.Sqlite (NuGet) — SQLite for `state.db`. Bundles `SQLitePCLRaw.bundle_e_sqlite3`, so no system SQLite needed
 - CommunityToolkit.Mvvm (NuGet) — `ObservableObject`, `[ObservableProperty]`, `[RelayCommand]` for VM/context plumbing
-- `libgtk-4.so.1`, `libgobject-2.0.so.0`, `libEGL.so.1`, `libGL.so.1`, `libc.so.6` — P/Invoke targets with explicit SONAMEs (bare `.so` names are dev-package symlinks that don't exist on runtime-only hosts)
+- `libgtk-4.so.1`, `libgobject-2.0.so.0`, `libglib-2.0.so.0`, `libEGL.so.1`, `libGL.so.1`, `libc.so.6` — P/Invoke targets with explicit SONAMEs (bare `.so` names are dev-package symlinks that don't exist on runtime-only hosts)
 - GirCore 0.7.0 — note its `Gtk.EventControllerLegacy` `event` signal is not marshallable; `MainWindow.cs` connects that one signal via raw `g_signal_connect_data`.
 
 ## Known blockers / tracked issues

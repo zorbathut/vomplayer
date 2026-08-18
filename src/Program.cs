@@ -8,7 +8,7 @@ public static class Program
 {
     public static int Main(string[] args)
     {
-        // GLib log diagnostics. Install before any GTK / GLib call so we own the writer slot exclusively (g_log_set_writer_func g_error's on a second call). Adds a managed stack trace to every ERROR / CRITICAL — most importantly to the abort path used by g_assert, where without this we'd see only the GLib message and no clue which C# code path was active.
+        // GLib log diagnostics. Install before any GTK / GLib call so we own the writer slot exclusively (g_log_set_writer_func g_error's on a second call). Adds a managed stack trace to GLib's fatal paths — g_error/CRITICAL via the structured-log writer, and the g_assert abort path via a g_printerr hook (g_assertion_message bypasses the writer) — where without this we'd see only the GLib message and no clue which C# code path was active.
         GLibLogDiag.Install();
 
         // Cheap last-resort safety nets for the never-swallow policy. Most surfacing already works through GirCore's MainLoopSynchronizationContext (which catches Post exceptions and routes them to GLib.UnhandledException → stderr + Environment.Exit(1)) — so async-RelayCommand faults and signal-handler throws are already loud by default. These two handlers cover the residual cases the SyncContext doesn't see: finalizer-thread exceptions and faulted Tasks that get GC'd while still unobserved.
