@@ -145,6 +145,42 @@ public class UserConfigTests
     }
 
     [Test]
+    public void YtDlpCookiesFromBrowserHandEditedTomlReads()
+    {
+        // Same reasoning as ApplicationOpenInNewWindowHandEditedTomlReads, and it matters more here: YtDlp is the config's first two-token property name, so this is the first key whose snake_case mapping (yt_dlp, not ytdlp) is non-obvious. A Save->Load round-trip alone is self-consistent and would pass even with the wrong section name.
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+        File.WriteAllText(path, "[yt_dlp]\ncookies_from_browser = \"firefox\"\n");
+
+        var cfg = UserConfig.LoadOrDefault(path);
+        Assert.That(cfg.YtDlp.CookiesFromBrowser, Is.EqualTo("firefox"));
+    }
+
+    [Test]
+    public void YtDlpCookiesFromBrowserRoundTripsAFullSpec()
+    {
+        var path = Path.Combine(tempDir!, "config.toml");
+        var cfg = new UserConfig();
+        cfg.YtDlp.CookiesFromBrowser = "firefox:/home/u/.mozilla/firefox/abc.default::work";
+        cfg.Save(path);
+
+        var reloaded = UserConfig.LoadOrDefault(path);
+        Assert.That(reloaded.YtDlp.CookiesFromBrowser, Is.EqualTo("firefox:/home/u/.mozilla/firefox/abc.default::work"));
+    }
+
+    [Test]
+    public void YtDlpSectionAbsentDefaultsToNoCookies()
+    {
+        // Pre-existing configs written before this option existed must keep the no-cookies behavior.
+        var path = Path.Combine(tempDir!, "config.toml");
+        Directory.CreateDirectory(tempDir!);
+        File.WriteAllText(path, "[application]\ntheme = \"dark\"\n");
+
+        var cfg = UserConfig.LoadOrDefault(path);
+        Assert.That(cfg.YtDlp.CookiesFromBrowser, Is.EqualTo(""));
+    }
+
+    [Test]
     public void ApplicationOpenInNewWindowHandEditedTomlReads()
     {
         // A user hand-writes the TOML file (not via Save). Exercises the snake_case naming policy on the read path directly, independent of Save's serialization shape. Catches the failure mode where Tomlyn's naming policy changes shape and Save→Load round-trips silently while hand-edited configs revert to default.

@@ -25,13 +25,36 @@ public class YtDlpDownloaderTests
         }
     }
 
-    // Writes an executable bash script the downloader will spawn instead of yt-dlp.
+    // Writes an executable bash script the downloader will spawn instead of yt-dlp. Every stub records its own argv to ArgFile first, before `body` runs — the download stubs below destructively consume "$@" in a while loop, so recording has to happen ahead of them. One invocation's record overwrites the previous, so a test that spawns twice must read between the calls.
     private string WriteStub(string body)
     {
         var path = System.IO.Path.Combine(tempDir!, "fake-ytdlp.sh");
-        System.IO.File.WriteAllText(path, "#!/bin/bash\n" + body + "\n");
+        System.IO.File.WriteAllText(path, "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"" + ArgFile + "\"\n" + body + "\n");
         System.IO.File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return path;
+    }
+
+    private string ArgFile
+    {
+        get { return System.IO.Path.Combine(tempDir!, "recorded-args.txt"); }
+    }
+
+    // The argv the most recent stub invocation saw, one element per entry. Empty entries are preserved so an argument-count assertion stays honest.
+    private string[] RecordedArgs()
+    {
+        return System.IO.File.ReadAllLines(ArgFile);
+    }
+
+    // The element following `flag` in the recorded argv, or null if the flag isn't there (or is last). Adjacency is the property that matters — a flag and a value both merely *present* somewhere in argv would pass a Contains check while meaning something entirely different to yt-dlp.
+    private string? RecordedValueAfter(string flag)
+    {
+        var args = RecordedArgs();
+        int i = System.Array.IndexOf(args, flag);
+        if (i < 0 || i + 1 >= args.Length)
+        {
+            return null;
+        }
+        return args[i + 1];
     }
 
     private YtDlpDownloader NewWithStub(string body)
@@ -240,6 +263,115 @@ public class YtDlpDownloaderTests
         Assert.That(
             YtDlpDownloader.BuildCommand(true),
             Is.EqualTo(new[] { "flatpak-spawn", "--host", "--watch-bus", "yt-dlp" }));
+    }
+
+    [Test]
+    public async Task CookieSpecReachesEveryExtractorInvocation()
+    {
+        // Probe, classify and download all run extractors, and all three can be the call that fails without cookies — a members-only video errors during classify, before any download starts. Cookies have to be on all of them, not just the download.
+        var dl = NewWithStub("echo generic");
+        dl.CookiesFromBrowser = "firefox";
+
+        await dl.ProbeAsync("https://example.com/v", CancellationToken.None);
+        Assert.That(RecordedValueAfter("--cookies-from-browser"), Is.EqualTo("firefox"), "probe");
+
+        await dl.ClassifyAsync("https://example.com/v", CancellationToken.None);
+        Assert.That(RecordedValueAfter("--cookies-from-browser"), Is.EqualTo("firefox"), "classify");
+
+        var downloadStub = WriteStub(string.Join("\n", new[]
+        {
+            "while [[ $# -gt 0 ]]; do case \"$1\" in -P) dir=\"$2\"; shift 2;; *) shift;; esac; done",
+            "mkdir -p \"$dir\"",
+            "printf 'bytes' > \"$dir/clip.mp4\"",
+        }));
+        var downloader = new YtDlpDownloader(new UrlDownloadCache(System.IO.Path.Combine(tempDir!, "cache2")), new[] { downloadStub });
+        downloader.CookiesFromBrowser = "firefox";
+        await downloader.DownloadAsync("https://example.com/v", null, CancellationToken.None);
+        Assert.That(RecordedValueAfter("--cookies-from-browser"), Is.EqualTo("firefox"), "download");
+    }
+
+    [TestCase(null)]
+    [TestCase("")]
+    [TestCase("   ")]
+    public async Task BlankCookieSpecPassesNoCookieFlagAtAll(string? spec)
+    {
+        // The default must reproduce the pre-feature invocation exactly — an empty --cookies-from-browser value would make yt-dlp error out.
+        var dl = NewWithStub("echo generic");
+        dl.CookiesFromBrowser = spec;
+
+        await dl.ClassifyAsync("https://example.com/v", CancellationToken.None);
+        Assert.That(RecordedArgs(), Does.Not.Contain("--cookies-from-browser"));
+    }
+
+    [Test]
+    public async Task AvailabilityProbeNeverPaysForCookies()
+    {
+        // --version only answers "is the binary there"; decrypting a browser cookie DB for it is pure cost on a call that gates every URL flow.
+        var dl = NewWithStub("echo 2026.01.01; exit 0");
+        dl.CookiesFromBrowser = "firefox";
+
+        await dl.IsAvailableAsync(CancellationToken.None);
+        Assert.That(RecordedArgs(), Is.EqualTo(new[] { "--version" }));
+    }
+
+    [Test]
+    public async Task CookieSpecWithSpacesStaysOneArgument()
+    {
+        // Profile names routinely contain spaces. ArgumentList passes each element through untouched — nothing shell-splits it, which is also why there's no injection surface here.
+        var dl = NewWithStub("echo generic");
+        dl.CookiesFromBrowser = "chrome:My Profile";
+
+        await dl.ClassifyAsync("https://example.com/v", CancellationToken.None);
+        Assert.That(RecordedValueAfter("--cookies-from-browser"), Is.EqualTo("chrome:My Profile"));
+    }
+
+    [Test]
+    public async Task CookieFlagPrecedesTheEndOfOptionsSeparator()
+    {
+        // Everything after "--" is a positional URL. If a later edit appended the cookie flag instead of inserting it, yt-dlp would silently treat it as a second URL rather than an option.
+        var dl = NewWithStub("echo generic");
+        dl.CookiesFromBrowser = "firefox";
+
+        await dl.ClassifyAsync("https://example.com/v", CancellationToken.None);
+        var args = RecordedArgs();
+        Assert.That(System.Array.IndexOf(args, "--cookies-from-browser"), Is.LessThan(System.Array.IndexOf(args, "--")));
+    }
+
+    [Test]
+    public async Task CookieSpecDropsNoWarningsSoCookieFailuresAreVisible()
+    {
+        // yt-dlp reports *partial* cookie failures as warnings and still exits 0 — "cannot decrypt v11 cookies: no key found" is the Chrome-without-an-unlocked-keyring case. Under --no-warnings the user gets zero cookies, a zero exit code, and no signal whatsoever.
+        var dl = NewWithStub("echo generic");
+
+        dl.CookiesFromBrowser = null;
+        await dl.ClassifyAsync("https://example.com/v", CancellationToken.None);
+        Assert.That(RecordedArgs(), Does.Contain("--no-warnings"), "no cookies: stderr stays quiet as before");
+
+        dl.CookiesFromBrowser = "firefox";
+        await dl.ClassifyAsync("https://example.com/v", CancellationToken.None);
+        Assert.That(RecordedArgs(), Does.Not.Contain("--no-warnings"), "cookies set: warnings must survive");
+    }
+
+    [Test]
+    public async Task ChangingTheCookieSpecDoesNotReplayTheOldCachedDownload()
+    {
+        // Turning cookies on is how a user asks for the authenticated version of a URL they already fetched unauthenticated. Keying the cache on the URL alone would hand back the old free-tier file with no spawn and no visible cause.
+        var stub = WriteStub(string.Join("\n", new[]
+        {
+            "while [[ $# -gt 0 ]]; do case \"$1\" in -P) dir=\"$2\"; shift 2;; *) shift;; esac; done",
+            "mkdir -p \"$dir\"",
+            "printf 'bytes' > \"$dir/clip.mp4\"",
+            "echo \"VOMPLFILE $dir/clip.mp4\"",
+        }));
+        var dl = new YtDlpDownloader(new UrlDownloadCache(System.IO.Path.Combine(tempDir!, "cache")), new[] { stub });
+
+        var anonymous = await dl.DownloadAsync("https://example.com/v", null, CancellationToken.None);
+        dl.CookiesFromBrowser = "firefox";
+        var authenticated = await dl.DownloadAsync("https://example.com/v", null, CancellationToken.None);
+
+        Assert.That(authenticated, Is.Not.EqualTo(anonymous));
+        // Same spec twice still dedupes — the cookie spec partitions the cache, it doesn't disable it.
+        Assert.That(await dl.DownloadAsync("https://example.com/v", null, CancellationToken.None), Is.EqualTo(authenticated));
     }
 
     [Test]

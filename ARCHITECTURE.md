@@ -25,7 +25,7 @@ src/
   MainWindow.Menu.cs     # menubar + Gio.SimpleAction registration + per-kind track menus + accel refresh + File→Recent
   MainWindow.PlaylistIo.cs # File → Open/Save Playlist handlers (file dialogs + clipboard, PlaylistFile format glue)
   PipController.cs       # picture-in-picture controller: secondary widget set, drag/resize, layout, drift-controller tick timer, stream-selector toolbar. MainWindow implements IPipHost to expose the GTK widget tree the controller needs.
-  PreferencesDialog.cs   # preferences UI: HotkeyAction → Trigger bindings plus application settings (theme, open-in-new-window, chapter preroll)
+  PreferencesDialog.cs   # preferences UI: HotkeyAction → Trigger bindings plus application settings (theme, open-in-new-window, chapter preroll, yt-dlp cookie source)
 
   Controls/
     IVideoHost.cs          # seam over the two render paths; consumers hold one IVideoHost instead of per-path fields
@@ -62,11 +62,12 @@ src/
 
   UserData/
     UserDataPaths.cs       # XDG-aware paths; VOMPL_CONFIG_DIR / VOMPL_STATE_DIR overrides for tests / portable installs
-    UserConfig.cs          # TOML, Tomlyn-backed; load-or-defaults; today only [hotkeys]
+    UserConfig.cs          # TOML, Tomlyn-backed; load-or-defaults; [hotkeys], [application], [yt_dlp]
     Hotkeys.cs             # HotkeyAction enum, Trigger discriminated record (Key | MouseClick), HotkeyMap, defaults
     StateDatabase.cs       # owns the SQLite connection + append-only Migrations[] registry walked vs PRAGMA user_version
     IRecentFiles.cs / RecentFiles.cs              # SQLite-backed; recents + per-file resume position
     ThemeMode.cs           # theme preference enum + parser (auto/light/dark)
+    CookieSource.cs        # pure: yt-dlp cookies_from_browser config string <-> (none | browser | custom) + browser-name validation
     ISavedPlaylists.cs / SavedPlaylists.cs        # SQLite-backed; autosaved playlist history (single + multi-stream PiP)
     ITrackPreferences.cs / TrackPreferences.cs    # SQLite-backed; per-directory remembered video/audio/subtitle choice
     TrackPreference.cs / TrackMatcher.cs / MediaKind.cs   # pure record + matcher used by both save and apply paths
@@ -188,7 +189,7 @@ Keyboard input goes through a window-level capture-phase `Gtk.EventControllerKey
 
 ## Persistence
 
-- **`config.toml`** (TOML, Tomlyn-backed). `[hotkeys]` (a plain action → trigger-strings table; HotkeyMap owns schema and defaults) and `[application]` (open_in_new_window, theme, chapter_seek_preroll_seconds). Loaded eagerly at startup; saved on preferences edits.
+- **`config.toml`** (TOML, Tomlyn-backed). `[hotkeys]` (a plain action → trigger-strings table; HotkeyMap owns schema and defaults), `[application]` (open_in_new_window, theme, chapter_seek_preroll_seconds), and `[yt_dlp]` (cookies_from_browser). Loaded eagerly at startup; saved on preferences edits.
 - **`state.db`** (SQLite, `Microsoft.Data.Sqlite`, WAL). Owned by `StateDatabase`; per-feature persistence classes (`RecentFiles`, `TrackPreferences`, `SavedPlaylists`) take the `SqliteConnection` in their ctor. Append-only `Migrations[]` registry walked against `PRAGMA user_version`. Schema today:
   - v1: `recent_files(path_or_uri UNIQUE, last_opened, open_count)`
   - v2: `track_preferences(directory, kind, …)` PK `(directory, kind)`
@@ -223,7 +224,7 @@ NUnit in `test/`, biased toward code that's testable without a GTK/mpv runtime: 
 
 - `libmpv.so` — runtime required (`mpv_*`)
 - `libhdr_helper.so` — built from `src/Native/hdr_helper.c` + generated protocol glue
-- `yt-dlp` — runtime optional, required for the Open URL flow. `IUrlDownloader.IsAvailable()` gates the menu path; missing yt-dlp surfaces a clear "install yt-dlp" message rather than letting the user type a URL and then failing.
+- `yt-dlp` — runtime optional, required for the Open URL flow. `IUrlDownloader.IsAvailable()` gates the menu path; missing yt-dlp surfaces a clear "install yt-dlp" message rather than letting the user type a URL and then failing. The optional `[yt_dlp] cookies_from_browser` setting is passed through as `--cookies-from-browser` on the three extractor-running calls (probe, classify, download) and folded into the download cache key, since the same URL fetched anonymously and authenticated are different files. It does *not* reach URLs classified `generic`: those are handed straight to mpv, which fetches them itself with no cookies — forcing a download instead would turn every direct stream into a full fetch.
 - Tomlyn (NuGet) — TOML deserialization for `UserConfig`. 2.x uses `System.Text.Json.JsonNamingPolicy.SnakeCaseLower` for property naming so `[ui_section] some_key` maps to PascalCase POCO members
 - Microsoft.Data.Sqlite (NuGet) — SQLite for `state.db`. Bundles `SQLitePCLRaw.bundle_e_sqlite3`, so no system SQLite needed
 - CommunityToolkit.Mvvm (NuGet) — `ObservableObject`, `[ObservableProperty]`, `[RelayCommand]` for VM/context plumbing

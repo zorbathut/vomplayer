@@ -16,6 +16,7 @@ public sealed class UserConfig
     // Shaped as a plain action-key → trigger-strings dictionary rather than a fixed POCO so the schema has a single source of truth: HotkeyMap owns the action set (ActionToTomlKey / FromTomlForm) and the defaults (HotkeyMap.Default). A fixed-property section here once duplicated both and drifted — it silently dropped every action added after the original seven on save, and its stale copy of the play_pause default shadowed the real one. Missing keys fall back to defaults in HotkeyMap.FromTomlForm; an explicit `play_pause = []` survives as "no binding"; unknown keys warn there too.
     public Dictionary<string, List<string>> Hotkeys { get; set; } = new();
     public ApplicationSection Application { get; set; } = new();
+    public YtDlpSection YtDlp { get; set; } = new();
 
     // Process-level behavior toggles. Today this is just the open-in-new-window switch, but the section exists as a stable home for future startup/runtime toggles (default volume, window-size memory, …) so we don't churn the schema every time one shows up.
     //
@@ -27,6 +28,14 @@ public sealed class UserConfig
         public bool OpenInNewWindow { get; set; } = false;
         public string Theme { get; set; } = "auto";
         public double ChapterSeekPrerollSeconds { get; set; } = 0.0;
+    }
+
+    // Settings for the external yt-dlp binary. Separate from [application] because that section is for process-level behavior toggles; this one is about how we invoke a downloader, and gives future yt-dlp knobs (format selection, rate limiting) an obvious home.
+    //
+    // `cookies_from_browser` is passed straight through to yt-dlp's --cookies-from-browser, which reads cookies out of a local browser profile so age-gated / members-only / login-walled videos resolve. Empty (the default) means the flag isn't passed at all. Otherwise it's a full BROWSER[+KEYRING][:PROFILE][::CONTAINER] spec; a bare browser name is the common case. Stored as a raw string — not a parsed type — so this POCO stays GTK-free and the file stays human-editable, exactly like `theme`; CookieSource splits it into the dropdown/textfield pair the preferences dialog shows.
+    public sealed class YtDlpSection
+    {
+        public string CookiesFromBrowser { get; set; } = "";
     }
 
     // Tomlyn 2.x reuses System.Text.Json.JsonNamingPolicy for property naming. SnakeCaseLower maps PascalCase POCO members to snake_case TOML keys: ApplicationSection.OpenInNewWindow becomes [application].open_in_new_window. Dictionary keys (the [hotkeys] section) pass through untouched. SourceName feeds Tomlyn's diagnostics so a parse-error message names the file we were reading instead of leaving SourceName blank.

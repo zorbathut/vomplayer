@@ -156,7 +156,13 @@ public sealed class UrlLoadCoordinator : IDisposable
             // Show the busy overlay before classification — the classify spawn is a second yt-dlp round-trip that was previously silent. Cancel is wired to this load's CTS so the user can abort through classify and download alike; on the interactive single-video path this replaces the "Fetching…" overlay OpenUrlInteractiveAsync just disposed. The hide/re-show land in separate main-loop turns (across the await in OpenUrlAsync), so there's usually no visible gap, but a one-frame flicker is possible — accepted in exchange for each method owning a self-contained, leak-proof overlay lifecycle.
             status = prompt.ShowUrlStatus("Preparing…", () => TryCancel(cts));
 
-            // Classification step. StartUrlLoad already gated on IsAvailable(), so yt-dlp is present here — a failure is a transient classify glitch (network blip, extractor crash), not an absent binary. We fall back to mpv-direct: a true direct stream plays natively, and an extractor URL that needed yt-dlp simply fails in mpv (our build disables Lua, so there's no ytdl-hook fallback). That's a best-effort for the rare transient case; the common "yt-dlp not installed" case never reaches here. Cancellation must propagate (the user clicked another row mid-probe).
+            // Classification step. StartUrlLoad already gated on IsAvailable(), so yt-dlp is present here — a failure is a classify glitch (network blip, extractor crash, an unusable --cookies-from-browser spec), not an absent binary. We still fall back to mpv-direct so a true direct stream keeps playing natively, but we report the failure first.
+            //
+            // Reporting is not optional, and what mpv does next doesn't change that. Whether mpv can rescue the URL depends on the libmpv it's linked against: a full build ships the ytdl_hook Lua script (the system libmpv on the primary dev platform does), our slim flatpak libmpv doesn't (see Playback.cs's `osc` note). But ytdl_hook shells out to the *same* yt-dlp binary we just failed on, so it only helps when the failure came from something we passed and it doesn't — i.e. the user's --cookies-from-browser spec. Every other cause (network blip, extractor breakage, an URL yt-dlp genuinely can't handle) fails there too, and nothing downstream turns that into a message: MpvClient documents that nothing consumes the end-file reason.
+            //
+            // So the two outcomes are "mpv fails too and the user would otherwise see nothing at all", or "mpv succeeds precisely because the cookie source is broken" — where the dialog is telling them something true and actionable that they'd otherwise never learn. Both want the report. The cost is a dialog in front of a video that then plays; that's the second case, and it's still the right call.
+            //
+            // Cancellation must propagate (the user clicked another row mid-probe).
             UrlLoadKind kind;
             try
             {
@@ -169,6 +175,7 @@ public sealed class UrlLoadCoordinator : IDisposable
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[vompl] yt-dlp classify failed for {url}: {ex.Message}; falling back to mpv-direct");
+                prompt.ShowError("Failed to identify URL", ex.Message);
                 kind = UrlLoadKind.MpvDirect;
             }
 
@@ -181,6 +188,8 @@ public sealed class UrlLoadCoordinator : IDisposable
             if (kind == UrlLoadKind.MpvDirect)
             {
                 // Direct stream — mpv plays it natively, no download. The brief "Preparing…" busy flash is fine (and desirable feedback); the finally hides it.
+                //
+                // Known limitation: mpv fetches this itself and never sees the user's --cookies-from-browser setting, so an authenticated direct media link is classified *with* cookies and then played *without* them. Neither fix is worth it — forcing YtDlpDownload whenever cookies are configured would turn every direct 4 GB .mp4 from a stream into a full download, and exporting a cookie jar into mpv's HTTP headers is worse still. The preference's help text says cookies apply to videos yt-dlp downloads, not to direct stream links.
                 onResolved(url, url);
                 return;
             }

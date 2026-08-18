@@ -10,7 +10,7 @@ namespace Vomplayer.Services;
 
 // IUrlDownloader backed by an external yt-dlp binary. Dedup via UrlDownloadCache. Progress is parsed from yt-dlp's stdout — we use --progress-template to emit a stable "VOMPLPROG <downloaded> <total> <status>" prefix that's trivial to split on whitespace, sidestepping yt-dlp's default human-readable lines that change format between versions. --newline forces one update per line (default is carriage-return-rewrite which won't survive line-buffered redirection).
 //
-// The binary is supplied as a command list (see BuildCommand): bare ["yt-dlp"] on a normal host, or ["flatpak-spawn", "--host", "--watch-bus", "yt-dlp"] inside a flatpak sandbox, where the host's yt-dlp is reached through the Flatpak portal because the sandbox PATH doesn't see it. Every invocation goes through NewStartInfo so the executable + arg prefix are applied in exactly one place.
+// The binary is supplied as a command list (see BuildCommand): bare ["yt-dlp"] on a normal host, or ["flatpak-spawn", "--host", "--watch-bus", "yt-dlp"] inside a flatpak sandbox, where the host's yt-dlp is reached through the Flatpak portal because the sandbox PATH doesn't see it. Every invocation goes through NewStartInfo so the executable + arg prefix are applied in exactly one place; the three that run an extractor go through NewExtractorStartInfo, which layers the user's cookie source on top.
 //
 // IsAvailableAsync() shells `<command> --version`. Cached after the first call because subsequent UI gates would otherwise spawn the process repeatedly per click. The cache stays valid for the process lifetime; if the user installs yt-dlp mid-session they'll need to restart, but that's an extreme edge case.
 public sealed class YtDlpDownloader : IUrlDownloader
@@ -74,6 +74,45 @@ public sealed class YtDlpDownloader : IUrlDownloader
         return psi;
     }
 
+    // The --cookies-from-browser spec (a bare browser name, or the full BROWSER[+KEYRING][:PROFILE][::CONTAINER] form); null or blank means the flag isn't passed at all. Mutable rather than constructor-injected because a preferences save has to apply live to this one instance, which every VideoContext shares — same shape as ViewModelMain.ChapterSeekPrerollSeconds. No synchronization needed: the write comes from the preferences Save handler and the reads happen while building a ProcessStartInfo, synchronously ahead of any await, and Program.Main runs the app under RunWithSynchronizationContext — so both sides are the GTK main thread.
+    public string? CookiesFromBrowser { get; set; }
+
+    // Start info for the calls that actually run a yt-dlp extractor (probe, classify, download) — as NewStartInfo, plus the user's cookie source when one is configured. The availability probe deliberately doesn't use this: `--version` only answers "is the binary installed", and decrypting a browser cookie DB for it would be pure cost on the call that gates every URL flow.
+    //
+    // Dropping --no-warnings alongside the flag is not incidental. yt-dlp treats *partial* cookie failures as warnings, not errors — "cannot decrypt v11 cookies: no key found", "failed to decrypt cookie (AES-GCM) because the MAC check failed", "possibly unsupported firefox cookies database version". That's the common Chrome-on-Linux-with-a-locked-keyring case, where yt-dlp extracts nothing, exits 0, and the video then fails for the underlying auth reason. Suppressing those lines would leave the user with no signal at all; the callers log a non-empty stderr on success so they land somewhere.
+    //
+    // Cost note: this puts a cookie-DB read on ClassifyAsync, which runs for *every* http(s) load — a large Chrome profile makes previously-free loads measurably slower. Accepted: cookies that only applied to the download would miss the members-only case, which fails during extraction.
+    private ProcessStartInfo NewExtractorStartInfo()
+    {
+        var psi = NewStartInfo();
+        if (!string.IsNullOrWhiteSpace(CookiesFromBrowser))
+        {
+            psi.ArgumentList.Add("--cookies-from-browser");
+            psi.ArgumentList.Add(CookiesFromBrowser);
+        }
+        else
+        {
+            psi.ArgumentList.Add("--no-warnings");
+        }
+        return psi;
+    }
+
+    // What the download cache keys on. The cookie spec is part of a download's identity, not just how it was fetched: a URL pulled anonymously can yield a free/preview tier, and a user who then turns cookies on is asking for the authenticated version. Keying on the URL alone would replay the old file from cache with no spawn, no progress, and nothing to explain it. Two consequences, both accepted under the 24h sweep: entries cached before this existed are orphaned once, and editing a profile path re-keys and re-downloads identical bytes.
+    private string CacheIdentity(string url)
+    {
+        return $"{CookiesFromBrowser}\0{url}";
+    }
+
+    // Log yt-dlp's stderr from a run that *succeeded*. Normally empty (we pass --no-warnings), but with a cookie source configured we deliberately let warnings through, and those warnings are the only evidence of a half-working cookie setup — a zero exit code with zero cookies extracted. Dropping them on the floor would be exactly the silent failure the flag exists to expose.
+    private static void LogStderrOnSuccess(string what, string stderr)
+    {
+        var trimmed = stderr.Trim();
+        if (trimmed.Length > 0)
+        {
+            Console.Error.WriteLine($"[vompl] yt-dlp {what}: {trimmed}");
+        }
+    }
+
     public async Task<bool> IsAvailableAsync(CancellationToken ct)
     {
         if (isAvailableCachedTrue)
@@ -132,12 +171,11 @@ public sealed class YtDlpDownloader : IUrlDownloader
         {
             throw new ArgumentException("url must be non-empty", nameof(url));
         }
-        var psi = NewStartInfo();
+        var psi = NewExtractorStartInfo();
         psi.ArgumentList.Add("--flat-playlist");
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add("%(webpage_url)s");
-        psi.ArgumentList.Add("--no-warnings");
         psi.ArgumentList.Add("--");
         psi.ArgumentList.Add(url);
 
@@ -169,6 +207,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         {
             throw new InvalidOperationException($"yt-dlp probe failed (exit {proc.ExitCode}): {stderr.Trim()}");
         }
+        LogStderrOnSuccess("probe", stderr);
         var urls = stdout
             .Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(line => line.Trim())
@@ -182,19 +221,18 @@ public sealed class YtDlpDownloader : IUrlDownloader
         return urls;
     }
 
-    // Ask yt-dlp which extractor matches `url`. Used by the load path to distinguish "yt-dlp's generic extractor (the URL is a direct media link mpv can stream)" from "a specific extractor (YouTube, Twitch, …) where mpv-direct fails and we want to download instead." --flat-playlist keeps the call cheap — yt-dlp pattern-matches the URL without fetching video metadata. Exit-nonzero / process-start-fail throws; the caller treats that as "fall back to mpv-direct" rather than refusing to load.
+    // Ask yt-dlp which extractor matches `url`. Used by the load path to distinguish "yt-dlp's generic extractor (the URL is a direct media link mpv can stream)" from "a specific extractor (YouTube, Twitch, …) where mpv-direct fails and we want to download instead." --flat-playlist keeps a *playlist* URL cheap by not descending into its entries; for a single-video URL yt-dlp still runs the extractor's real fetch, which is why this call needs cookies too — a members-only video fails here, before any download starts. Exit-nonzero / process-start-fail throws; the caller reports it and falls back to mpv-direct rather than refusing to load.
     public async Task<UrlLoadKind> ClassifyAsync(string url, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(url))
         {
             throw new ArgumentException("url must be non-empty", nameof(url));
         }
-        var psi = NewStartInfo();
+        var psi = NewExtractorStartInfo();
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--flat-playlist");
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add("%(extractor)s");
-        psi.ArgumentList.Add("--no-warnings");
         psi.ArgumentList.Add("--");
         psi.ArgumentList.Add(url);
 
@@ -225,6 +263,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         {
             throw new InvalidOperationException($"yt-dlp classify failed (exit {proc.ExitCode}): {stderr.Trim()}");
         }
+        LogStderrOnSuccess("classify", stderr);
         // yt-dlp prints one extractor line per entry; for --no-playlist + a single-video URL there's exactly one. Take the first non-empty line and compare to "generic" case-insensitively. Anything else means yt-dlp has a specific extractor for the URL (YouTube, Twitch, Vimeo, …), so we want to download.
         var firstLine = stdout
             .Split('\n', StringSplitOptions.RemoveEmptyEntries)
@@ -247,7 +286,8 @@ public sealed class YtDlpDownloader : IUrlDownloader
         // Sweep stale entries opportunistically. Cleanup is also called at app startup, but a long-running session never sees the startup pass; doing it on every download keeps disk usage bounded for users who keep the app open for days. Cheap (one stat per cached entry).
         cache.Cleanup(DateTimeOffset.UtcNow, msg => Console.Error.WriteLine($"[vompl] {msg}"));
 
-        var existing = cache.TryGetExistingFile(url);
+        var identity = CacheIdentity(url);
+        var existing = cache.TryGetExistingFile(identity);
         if (existing != null)
         {
             // Synthesize a single 100%-complete progress event so the UI dialog can dismiss itself instead of staring at 0%. DownloadedBytes is unknown for a cache hit (we'd have to stat) — pass 0/0/finished and let the UI render "complete" rather than "loading".
@@ -255,7 +295,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
             return existing;
         }
 
-        var targetDir = cache.DirectoryFor(url);
+        var targetDir = cache.DirectoryFor(identity);
         // Wipe any prior debris (orphan .part files, half-merged .f137.mp4 / .f140.m4a streams from a yt-dlp crash, manifest-less .ytdl resume state). Without this, FindMediaFileIn could pick up a half-product if the after_move print is missed. The TryGetExistingFile call above already verified there's no completed download to preserve.
         // Known, accepted race: the per-URL directory has no cross-process lock, so two concurrent downloads of the SAME URL (two open_in_new_window processes, or Primary + PiP rows) can wipe each other's in-progress work here. The loser fails visibly and a retry hits the winner's cache; adding a lock-file protocol was judged not worth it for degradation-not-corruption on a same-URL-twice edge.
         if (Directory.Exists(targetDir))
@@ -270,22 +310,21 @@ public sealed class YtDlpDownloader : IUrlDownloader
                 Console.Error.WriteLine($"[vompl] yt-dlp: pre-download wipe of {targetDir} failed: {ex.Message}");
             }
         }
-        cache.EnsureDirectoryExists(url);
+        cache.EnsureDirectoryExists(identity);
 
-        var psi = NewStartInfo();
+        var psi = NewExtractorStartInfo();
         // --newline: emit each progress update on its own line (default rewrites in place via \r). Required for stdout line-by-line parsing.
         // --progress-template: stable machine-parseable format. We split on whitespace and read fields by index.
         // --print after_move:filepath: emit the final-file path AFTER all post-processing (merge of separate video+audio streams, format conversion, etc.) so we know exactly which file mpv should open.
         // --no-quiet: --print implicitly enables --quiet, which suppresses *all* other output including the progress lines we depend on. Restore the default verbosity so progress-template lines land on stdout.
         // -P: place all output (incl. .part files) inside the per-URL cache subdir. -o template ensures a single canonical file name; %(ext)s lets yt-dlp pick the actual extension. targetDir is absolute. In the flatpak case a host-spawned yt-dlp writes via this path; it lands where the sandbox reads only because the cache lives under $XDG_DATA_HOME (~/.var/app/<id>/data), a real host path visible at the same absolute location on both sides. Moving the cache to a path-virtualized location (e.g. /tmp, or a --filesystem-mapped dir the host sees elsewhere) would break that.
-        // --no-warnings + --no-progress in stderr keeps stderr clean for actual error output.
+        // --no-warnings (added by NewExtractorStartInfo unless a cookie source is set) keeps stderr clean for actual error output.
         psi.ArgumentList.Add("--newline");
         psi.ArgumentList.Add("--progress-template");
         psi.ArgumentList.Add($"{ProgressPrefix} %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.status)s");
         psi.ArgumentList.Add("--print");
         psi.ArgumentList.Add($"after_move:{FilenamePrefix} %(filepath)s");
         psi.ArgumentList.Add("--no-quiet");
-        psi.ArgumentList.Add("--no-warnings");
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("-P");
         psi.ArgumentList.Add(targetDir);
@@ -353,6 +392,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
         {
             throw new InvalidOperationException($"yt-dlp failed (exit {proc.ExitCode}): {stderr.ToString().Trim()}");
         }
+        LogStderrOnSuccess("download", stderr.ToString());
         if (string.IsNullOrEmpty(finalPath))
         {
             // yt-dlp succeeded but never printed an after_move filepath — fall back to scanning the target directory. Worst case, a user dropping in to inspect cache/<key>/ should still find their file.
@@ -368,7 +408,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
             finalPath = Path.Combine(targetDir, finalPath);
         }
         var relative = Path.GetRelativePath(targetDir, finalPath);
-        cache.RecordDownload(url, relative);
+        cache.RecordDownload(identity, relative);
         return finalPath;
     }
 

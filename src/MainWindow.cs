@@ -23,7 +23,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private readonly ISavedPlaylists savedPlaylists;
     private readonly ITrackPreferences trackPreferences;
     private readonly Services.IFilePicker filePicker;
-    private readonly Services.IUrlDownloader urlDownloader;
+    // Concrete rather than IUrlDownloader: MainWindow is where the real downloader is constructed and where preference changes are pushed onto it (CookiesFromBrowser). The interface exists so ViewModelMain and PipController can be tested against a stub — it isn't a seam MainWindow needs.
+    private readonly Services.YtDlpDownloader urlDownloader;
     private readonly Services.IUrlPrompt urlPrompt;
     private readonly ViewModelMain viewModel;
     private readonly UserConfig userConfig;
@@ -149,6 +150,13 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         var urlDownloadCache = new UrlDownloadCache(UserDataPaths.UrlDownloadCacheRoot);
         urlDownloadCache.Cleanup(DateTimeOffset.UtcNow, msg => Console.Error.WriteLine($"[vompl] {msg}"));
         this.urlDownloader = new YtDlpDownloader(urlDownloadCache, YtDlpDownloader.BuildCommand(FlatpakDetect.IsSandboxed()));
+        // Same startup-diagnostic contract `theme` gets two lines up: a hand-edited value is checked once, loudly, at load. Passed through rather than dropped even when it's bad — the user asked for cookies, so failing visibly on the next URL load beats silently behaving as if they hadn't.
+        var cookieWarning = CookieSource.ValidationError(userConfig.YtDlp.CookiesFromBrowser, OperatingSystem.IsMacOS());
+        if (cookieWarning != null)
+        {
+            Console.Error.WriteLine($"[vompl] config: [yt_dlp] cookies_from_browser: {cookieWarning}");
+        }
+        this.urlDownloader.CookiesFromBrowser = userConfig.YtDlp.CookiesFromBrowser;
         // The download-status overlay is created here so it can be handed to UrlPromptGtk, but it's only parented into videoOverlay further down (once that exists). A standalone Gtk.Box can be built before its parent.
         downloadStatusOverlay = new DownloadStatusOverlay();
         this.urlPrompt = new UrlPromptGtk(this, downloadStatusOverlay);
@@ -772,16 +780,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     }
 
     // Reload the runtime keymap and application-level toggles from the dialog's edits, persist to disk, and refresh the menu accelerator labels. Called by PreferencesDialog when the user clicks Save. Failure to persist is logged but not fatal — the in-memory map is already updated and new bindings are live; the user can retry. open_in_new_window only takes effect on next launch (the toggle changes process-startup behavior), so we just record it.
-    internal void ApplyPreferences(HotkeyMap map, bool openInNewWindow, ThemeMode theme, double chapterSeekPreroll)
+    internal void ApplyPreferences(HotkeyMap map, bool openInNewWindow, ThemeMode theme, double chapterSeekPreroll, string cookiesFromBrowser)
     {
         hotkeys = map;
         userConfig.Hotkeys = map.ToTomlForm();
         userConfig.Application.OpenInNewWindow = openInNewWindow;
         userConfig.Application.Theme = ThemeModeParser.ToConfigString(theme);
         userConfig.Application.ChapterSeekPrerollSeconds = chapterSeekPreroll;
-        // Theme applies live, independent of whether the save below succeeds — the running app and the persisted file are separate concerns. open_in_new_window, by contrast, only changes process-startup behavior, so it just gets recorded for next launch. The preroll also applies live — push it onto the running VM.
+        userConfig.YtDlp.CookiesFromBrowser = cookiesFromBrowser;
+        // Theme applies live, independent of whether the save below succeeds — the running app and the persisted file are separate concerns. open_in_new_window, by contrast, only changes process-startup behavior, so it just gets recorded for next launch. The preroll and the cookie source also apply live — push them onto the running VM and the shared downloader. Already-cached downloads aren't refetched, but the cache keys on the cookie spec, so the next load of the same URL under a new spec does re-run yt-dlp.
         ApplyThemePreference(theme);
         viewModel.ChapterSeekPrerollSeconds = chapterSeekPreroll;
+        urlDownloader.CookiesFromBrowser = cookiesFromBrowser;
         try
         {
             userConfig.Save(configPath);
@@ -818,6 +828,11 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     internal double GetChapterSeekPrerollPreference()
     {
         return userConfig.Application.ChapterSeekPrerollSeconds;
+    }
+
+    internal string GetCookiesFromBrowserPreference()
+    {
+        return userConfig.YtDlp.CookiesFromBrowser;
     }
 
     // Current theme preference for the dialog to seed its dropdown. The warn is discarded (not a silent swallow): this same string was already parsed-and-warned at startup, and re-warning every time Preferences opens would just be noise.

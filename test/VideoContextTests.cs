@@ -1829,9 +1829,9 @@ public class VideoContextTests
     }
 
     [Test]
-    public async Task LoadCurrentItemProbeFailureFallsBackToMpvDirect()
+    public async Task LoadCurrentItemClassifyFailureReportsAndStillFallsBackToMpvDirect()
     {
-        // yt-dlp not on PATH, or any other classify failure — fall back to handing the URL to mpv. mpv's built-in ytdl-hook will surface its own error if the URL really required yt-dlp; a direct-stream URL just plays.
+        // Any classify failure — network blip, extractor crash, an unusable --cookies-from-browser spec — still hands the URL to mpv, so a direct-stream URL just plays. But it's reported too: no playback path turns an mpv failure into a message, and mpv's own ytdl_hook (present in full libmpv builds, absent from our slim flatpak one) shells the same yt-dlp we just failed on, so it rescues only the cookie-misconfiguration case. See UrlLoadCoordinator's classify catch for the full reasoning.
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader { ClassifyException = new InvalidOperationException("yt-dlp not found") };
         var prompt = new FakeUrlPrompt();
@@ -1841,9 +1841,10 @@ public class VideoContextTests
         await Task.Yield();
         await Task.Delay(10);
 
-        Assert.That(pb.LastLoadedFile, Is.EqualTo("https://youtu.be/probe-fails"), "probe-failed URL should still reach mpv (mpv's own ytdl-hook may handle it)");
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("https://youtu.be/probe-fails"), "classify-failed URL should still reach mpv");
         Assert.That(dl.DownloadCalls, Is.Empty);
-        Assert.That(prompt.Errors, Is.Empty, "probe failure is silent — mpv's own error path is the user-facing channel");
+        Assert.That(prompt.Errors, Has.Count.EqualTo(1));
+        Assert.That(prompt.Errors[0].Message, Does.Contain("yt-dlp not found"));
     }
 
     private sealed class FailingProbeDownloader : Vomplayer.Services.IUrlDownloader

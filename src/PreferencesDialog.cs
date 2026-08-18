@@ -1,9 +1,10 @@
 using System;
+using System.Collections.Generic;
 using Vomplayer.UserData;
 
 namespace Vomplayer;
 
-// Modal preferences dialog. Two tabs in a Gtk.Notebook: "General" (theme dropdown + open-in-new-window checkbox) and "Hotkeys" (the per-action shortcut grid). Snapshots the live state on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyPreferences swaps the runtime map, applies the theme live, persists both sections to TOML, and refreshes menu accelerators. Cancel discards the snapshot.
+// Modal preferences dialog. Two tabs in a Gtk.Notebook: "General" (theme, open-in-new-window, chapter-seek preroll, yt-dlp cookie source) and "Hotkeys" (the per-action shortcut grid). Snapshots the live state on open; mutations are local until the user clicks Save, at which point MainWindow.ApplyPreferences swaps the runtime map, applies the theme live, persists both sections to TOML, and refreshes menu accelerators. Cancel discards the snapshot.
 //
 // Hotkeys tab layout: a true spreadsheet via Gtk.Grid wrapped in Gtk.ScrolledWindow. Row 0 is the header (Action, Shortcut 1, Shortcut 2, …). Each subsequent row is one action: action label in column 0, then one cell per binding slot, then trailing empty cells the user can click to add new bindings. Column count is recomputed on each rebuild as `max(MinSlots, max_bindings_across_actions + 1)` so there's always at least one trailing empty cell on every row, but the grid never grows unboundedly: a user with 8 bindings on one action makes the dialog wide, by design — the alternative (truncating with a "more…" indicator) hides what's bound.
 //
@@ -23,6 +24,7 @@ internal sealed class PreferencesDialog : Gtk.Window
     private HotkeyAction? capturingFor;
     private int slotIndex;
 
+    private readonly Gtk.Notebook notebook;
     private readonly Gtk.Grid grid;
     private readonly Gtk.Box statusBar;
     private readonly Gtk.Label statusLabel;
@@ -30,6 +32,9 @@ internal sealed class PreferencesDialog : Gtk.Window
     private readonly Gtk.CheckButton openInNewWindowCheck;
     private readonly Gtk.DropDown themeDropDown;
     private readonly Gtk.SpinButton chapterPrerollSpin;
+    private readonly Gtk.DropDown cookiesDropDown;
+    private readonly Gtk.Entry cookiesCustomEntry;
+    private readonly Gtk.Label cookiesErrorLabel;
 
     // Dropdown row order. Indices are the wire contract between the DropDown's `Selected` uint and ThemeMode — keep aligned with the labels passed to NewFromStrings below.
     private static readonly ThemeMode[] ThemeOrder = { ThemeMode.Auto, ThemeMode.Light, ThemeMode.Dark };
@@ -51,7 +56,7 @@ internal sealed class PreferencesDialog : Gtk.Window
         var outerBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         SetChild(outerBox);
 
-        var notebook = Gtk.Notebook.New();
+        notebook = Gtk.Notebook.New();
         notebook.SetVexpand(true);
         notebook.SetHexpand(true);
         outerBox.Append(notebook);
@@ -94,6 +99,59 @@ internal sealed class PreferencesDialog : Gtk.Window
         chapterPrerollSpin.SetTooltipText("Start chapter jumps this many seconds before the cue (0 = exactly at the cue).");
         prerollRow.Append(chapterPrerollSpin);
         generalPage.Append(prerollRow);
+
+        // Cookie-source row — yt-dlp's --cookies-from-browser. Applies live on Save (pushed onto the shared downloader), so no next-launch note. The custom entry only makes sense on the Custom row, so it's hidden otherwise.
+        var cookiesRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
+        var cookiesLabel = Gtk.Label.New("Cookies from browser:");
+        cookiesLabel.SetXalign(0);
+        cookiesRow.Append(cookiesLabel);
+
+        var cookieRowLabels = new List<string> { "None" };
+        foreach (var browser in CookieSource.Browsers)
+        {
+            // yt-dlp's names are lowercase; title-case them for display only — the value written to config stays yt-dlp's spelling.
+            cookieRowLabels.Add(char.ToUpperInvariant(browser[0]) + browser.Substring(1));
+        }
+        cookieRowLabels.Add("Custom…");
+
+        cookiesDropDown = Gtk.DropDown.NewFromStrings(cookieRowLabels.ToArray());
+        var cookieChoice = CookieSource.Parse(owner.GetCookiesFromBrowserPreference());
+        cookiesDropDown.SetSelected((uint)CookieSource.RowFor(cookieChoice));
+        cookiesRow.Append(cookiesDropDown);
+
+        cookiesCustomEntry = Gtk.Entry.New();
+        cookiesCustomEntry.SetHexpand(true);
+        cookiesCustomEntry.SetPlaceholderText("browser[+keyring][:profile][::container]");
+        cookiesCustomEntry.SetTooltipText("A full yt-dlp --cookies-from-browser spec, e.g. \"firefox:/home/you/.mozilla/firefox/abc.default\" or \"chrome+gnomekeyring\".");
+        if (cookieChoice.Kind == CookieSourceKind.Custom)
+        {
+            cookiesCustomEntry.SetText(cookieChoice.Value);
+        }
+        cookiesRow.Append(cookiesCustomEntry);
+        generalPage.Append(cookiesRow);
+
+        // The Flatpak/Snap caveat belongs here, not on the entry's tooltip: the user it warns is the one who picks "Firefox" from the dropdown and therefore never sees the entry, let alone hovers it.
+        var cookiesNote = Gtk.Label.New("Sends browser cookies to yt-dlp for age-gated or private videos. Applies to videos yt-dlp downloads, not to direct stream links.\nA Flatpak or Snap browser needs Custom with an explicit profile path — yt-dlp only looks in the standard location.");
+        cookiesNote.AddCssClass("dim-label");
+        cookiesNote.SetXalign(0);
+        cookiesNote.SetWrap(true);
+        // Without a width cap the label requests its full natural width and stretches the dialog well past its 720px default.
+        cookiesNote.SetMaxWidthChars(60);
+        cookiesNote.SetMarginStart(24);
+        generalPage.Append(cookiesNote);
+
+        // Only shown when Save rejects the typed spec; keeps the dialog open so the user can fix it in place.
+        cookiesErrorLabel = Gtk.Label.New("");
+        cookiesErrorLabel.AddCssClass("error");
+        cookiesErrorLabel.SetXalign(0);
+        cookiesErrorLabel.SetWrap(true);
+        cookiesErrorLabel.SetMaxWidthChars(60);
+        cookiesErrorLabel.SetMarginStart(24);
+        cookiesErrorLabel.SetVisible(false);
+        generalPage.Append(cookiesErrorLabel);
+
+        cookiesDropDown.OnNotify += OnCookiesDropDownNotify;
+        RefreshCookiesCustomVisibility();
 
         notebook.AppendPage(generalPage, Gtk.Label.New("General"));
 
@@ -176,8 +234,28 @@ internal sealed class PreferencesDialog : Gtk.Window
         saveButton.AddCssClass("suggested-action");
         saveButton.OnClicked += (_, _) =>
         {
+            var cookies = CurrentCookieSpec();
+            // What's checkable without a URL is the browser name — also the part a user is most likely to get wrong, and the part that would otherwise surface as an error on every URL load until they worked out why. Keep the dialog open on a bad one. Custom-with-nothing-typed is caught here too: it would otherwise save as "" and silently reappear as None.
+            string? cookieError;
+            if ((int)cookiesDropDown.Selected == CookieSource.CustomRow && cookies.Length == 0)
+            {
+                cookieError = "Enter a cookie source, or choose None.";
+            }
+            else
+            {
+                cookieError = CookieSource.ValidationError(cookies, OperatingSystem.IsMacOS());
+            }
+            if (cookieError != null)
+            {
+                cookiesErrorLabel.SetLabel(cookieError);
+                cookiesErrorLabel.SetVisible(true);
+                // The message lives on the General page, so a Save clicked from the Hotkeys tab would otherwise look like a dead button.
+                notebook.SetCurrentPage(0);
+                cookiesCustomEntry.GrabFocus();
+                return;
+            }
             // Selected is always 0..2 here: the model has three rows and is never deselected, so it can't be GTK_INVALID_LIST_POSITION.
-            owner.ApplyPreferences(editing.Clone(), openInNewWindowCheck.Active, ThemeOrder[themeDropDown.Selected], chapterPrerollSpin.GetValue());
+            owner.ApplyPreferences(editing.Clone(), openInNewWindowCheck.Active, ThemeOrder[themeDropDown.Selected], chapterPrerollSpin.GetValue(), cookies);
             Close();
         };
         buttonRow.Append(saveButton);
@@ -192,6 +270,28 @@ internal sealed class PreferencesDialog : Gtk.Window
 
         InstallCss();
         RebuildGrid();
+    }
+
+    // The spec the current widget state means. The row->spec arithmetic (including the out-of-range folds) lives in CookieSource so it's unit-testable; this only reads widgets.
+    private string CurrentCookieSpec()
+    {
+        return CookieSource.SpecForRow((int)cookiesDropDown.Selected, cookiesCustomEntry.GetText());
+    }
+
+    private void OnCookiesDropDownNotify(GObject.Object sender, GObject.Object.NotifySignalArgs args)
+    {
+        if (args.Pspec.GetName() != "selected")
+        {
+            return;
+        }
+        RefreshCookiesCustomVisibility();
+    }
+
+    // The custom entry is hidden — not cleared — off the Custom row, so flipping to a browser and back doesn't destroy a long profile path the user typed. It's still dropped on Save, since only one string is persisted.
+    private void RefreshCookiesCustomVisibility()
+    {
+        cookiesCustomEntry.SetVisible((int)cookiesDropDown.Selected == CookieSource.CustomRow);
+        cookiesErrorLabel.SetVisible(false);
     }
 
     private Gtk.Popover BuildMousePopover()

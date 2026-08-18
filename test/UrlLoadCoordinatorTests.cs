@@ -299,10 +299,10 @@ public class UrlLoadCoordinatorTests
     }
 
     [Test]
-    public async Task StartUrlLoad_ClassifyThrows_FallsBackToMpvDirect()
+    public async Task StartUrlLoad_ClassifyThrows_ReportsAndStillFallsBackToMpvDirect()
     {
-        // yt-dlp not installed / network error / extractor crash → we don't refuse the load. Treat probe failure as "fall back to mpv-direct" and let mpv's own ytdl-hook surface a useful error if it actually needed yt-dlp.
-        var dl = new FakeUrlDownloader { ClassifyException = new InvalidOperationException("yt-dlp not on PATH") };
+        // Network error / extractor crash / an unusable --cookies-from-browser spec → we don't refuse the load; mpv still gets a shot at a URL it might handle natively. But the failure is reported rather than swallowed: nothing downstream surfaces an mpv playback error (MpvClient documents that nothing consumes end-file reason), so a silent fallback means the user clicks a playlist row and watches nothing happen, forever, with no clue why. Misconfigured cookies make that a permanent state rather than a rare transient.
+        var dl = new FakeUrlDownloader { ClassifyException = new InvalidOperationException("could not find firefox cookies database") };
         var prompt = new FakeUrlPrompt();
         using var coord = new UrlLoadCoordinator(dl, prompt);
 
@@ -317,7 +317,8 @@ public class UrlLoadCoordinatorTests
         await done.Task;
         Assert.That(completedPath, Is.EqualTo("https://youtu.be/X"));
         Assert.That(dl.Downloads, Is.Empty);
-        Assert.That(prompt.Errors, Is.Empty, "probe failure is silent — mpv surfaces its own error if needed");
+        Assert.That(prompt.Errors, Has.Count.EqualTo(1));
+        Assert.That(prompt.Errors[0].Message, Does.Contain("could not find firefox cookies database"));
     }
 
     [Test]
