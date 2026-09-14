@@ -50,12 +50,12 @@ internal static class StartupHelpers
         return result;
     }
 
-    // Resolves a positional arg to an absolute path or URI. Local paths get rooted against the caller's cwd; URIs are returned unchanged so OpenFile can route them through the URL load path.
+    // Resolves a positional arg to an absolute path or URI. Local paths get rooted against the caller's cwd; file: URIs become local paths (a flatpak launcher forwards `%U` arguments as file: URIs, and one that went through the document portal always arrives that way); other URIs are returned unchanged so OpenFile can route them through the URL load path.
     private static string RootRelativePath(string arg, string? cwd)
     {
         if (Util.UriShape.LooksLikeUri(arg))
         {
-            return arg;
+            return Util.UriShape.TryLocalPathFromFileUri(arg, out var localPath) ? localPath : arg;
         }
         if (Path.IsPathRooted(arg) || string.IsNullOrEmpty(cwd))
         {

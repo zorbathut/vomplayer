@@ -85,7 +85,7 @@ src/
     CursorRevealPolicy.cs   # pure: fullscreen cursor-reveal displacement rule
     ScaleHelpers.cs         # Gtk.Scale gesture tweaks (long-press removal)
     PlaylistFile.cs         # pure: newline-delimited playlist parse/serialize
-    UriShape.cs             # pure: the one URI-vs-local-path sniffer
+    UriShape.cs             # pure: the one URI-vs-local-path sniffer + file: URI → local path conversion shared by argv and drops
     GtkDialogError.cs       # GException → "user dismissed the dialog?" via GError domain/code
     PlaylistMenuSelector.cs # pure: Recent menu's "10 entries with directory coverage" selection rule
     MediaExtensions.cs      # known video extension set (folder-drop expansion)

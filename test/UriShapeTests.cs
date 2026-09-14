@@ -23,4 +23,20 @@ public class UriShapeTests
     {
         Assert.That(UriShape.LooksLikeUri(input), Is.EqualTo(expected));
     }
+
+    [Test]
+    public void TryLocalPathFromFileUriConvertsEmptyAndLocalhostAuthoritiesOnly()
+    {
+        Assert.That(UriShape.TryLocalPathFromFileUri("file:///run/user/1000/doc/abc/x%20y.mkv", out var p1), Is.True);
+        Assert.That(p1, Is.EqualTo("/run/user/1000/doc/abc/x y.mkv"));
+        Assert.That(UriShape.TryLocalPathFromFileUri("file://localhost/tmp/x.mkv", out var p2), Is.True);
+        Assert.That(p2, Is.EqualTo("/tmp/x.mkv"));
+        Assert.That(UriShape.TryLocalPathFromFileUri("file:///media/dir/", out var p3), Is.True);
+        Assert.That(p3, Is.EqualTo("/media/dir/"));
+        Assert.That(UriShape.TryLocalPathFromFileUri("file://nas/share/v.mp4", out _), Is.False);
+        Assert.That(UriShape.TryLocalPathFromFileUri("https://example.com/v.mp4", out _), Is.False);
+        // Degenerate but consistent: a bare file:// is the root directory, which a load then fails on loudly.
+        Assert.That(UriShape.TryLocalPathFromFileUri("file://", out var p4), Is.True);
+        Assert.That(p4, Is.EqualTo("/"));
+    }
 }

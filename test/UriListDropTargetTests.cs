@@ -94,4 +94,18 @@ public class UriListDropTargetTests
         Assert.That(result, Does.Contain(Path.Combine(sandboxDir, "a.mp4")));
         Assert.That(result, Does.Contain(Path.Combine(sub, "c.mkv")));
     }
+
+    [Test]
+    public void NulTerminatedPayloadDoesNotYieldAJunkEntry()
+    {
+        var result = UriListDropTarget.ParseAndConvert("file:///media/a.mkv\r\n\0");
+        Assert.That(result, Is.EqualTo(new[] { "/media/a.mkv" }));
+    }
+
+    [Test]
+    public void FileUriWithAnAuthorityPassesThroughUnconverted()
+    {
+        var result = UriListDropTarget.ParseAndConvert("file://nas/share/v.mp4\n");
+        Assert.That(result, Is.EqualTo(new[] { "file://nas/share/v.mp4" }));
+    }
 }

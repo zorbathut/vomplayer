@@ -137,14 +137,15 @@ public static class UriListDropTarget
         var raw = new List<string>();
         foreach (var line in text.Split('\n'))
         {
-            var trimmed = line.TrimEnd('\r').Trim();
+            // Some sources NUL-terminate the payload; a NUL is not whitespace to Trim, so strip it explicitly or it becomes a one-character "path".
+            var trimmed = line.TrimEnd('\r').Trim().Trim('\0');
             if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#'))
             {
                 continue;
             }
-            if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri) && uri.IsFile)
+            if (UriShape.TryLocalPathFromFileUri(trimmed, out var localPath))
             {
-                raw.Add(uri.LocalPath);
+                raw.Add(localPath);
             }
             else
             {

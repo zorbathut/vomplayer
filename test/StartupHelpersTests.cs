@@ -82,4 +82,35 @@ public class StartupHelpersTests
         Assert.That(result, Is.Empty);
         Assert.That(skipped, Is.Empty);
     }
+
+    [Test]
+    public void ResolveCommandLineFilesConvertsFileUrisToPercentDecodedLocalPaths()
+    {
+        var skipped = new List<string>();
+        var result = StartupHelpers.ResolveCommandLineFiles(
+            new[] { "vomplayer", "file:///media/deck/a%20b/caf%C3%A9.mp4" }, cwd: "/home/me", skipped.Add);
+        Assert.That(result, Is.EqualTo(new[] { "/media/deck/a b/café.mp4" }));
+        Assert.That(skipped, Is.Empty);
+    }
+
+    [Test]
+    public void ResolveCommandLineFilesLeavesRemoteUrisAndFileUrisWithAnAuthorityAlone()
+    {
+        var skipped = new List<string>();
+        var result = StartupHelpers.ResolveCommandLineFiles(
+            new[] { "vomplayer", "https://example.com/v.mp4", "file://nas/share/v.mp4" }, cwd: "/home/me", skipped.Add);
+        Assert.That(result, Is.EqualTo(new[] { "https://example.com/v.mp4", "file://nas/share/v.mp4" }));
+    }
+
+    // The regression guard for "drag-and-drop and double-click disagree about the directory": the same file reaching the app as a file:// URI on argv or in a text/uri-list drop must produce one directory key.
+    [Test]
+    public void ArgvFileUriAndDroppedFileUriYieldTheSameDirectoryKey()
+    {
+        var argv = StartupHelpers.ResolveCommandLineFiles(new[] { "vomplayer", "file:///media/deck/Show%201/e01.mkv" }, cwd: null, _ => { });
+        var dropped = Vomplayer.Util.UriListDropTarget.ParseAndConvert("file:///media/deck/Show%201/e01.mkv\r\n");
+        var argvKey = Vomplayer.UserData.TrackPreferences.TryGetDirectoryKey(argv[0]);
+        var dropKey = Vomplayer.UserData.TrackPreferences.TryGetDirectoryKey(dropped[0]);
+        Assert.That(argvKey, Is.Not.Null);
+        Assert.That(dropKey, Is.EqualTo(argvKey));
+    }
 }

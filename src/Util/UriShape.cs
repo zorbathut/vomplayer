@@ -20,4 +20,16 @@ public static class UriShape
         int colonSlashIdx = text.IndexOf("://", StringComparison.Ordinal);
         return colonSlashIdx > 0 && colonSlashIdx <= 10;
     }
+
+    // A file: URI whose authority is empty or "localhost" (RFC 8089 treats them alike, as does g_filename_from_uri) converts to the percent-decoded local path. A URI naming any other authority (file://nas/share/x) stays a URI — it names a file that isn't here.
+    public static bool TryLocalPathFromFileUri(string text, out string path)
+    {
+        if (Uri.TryCreate(text, UriKind.Absolute, out var uri) && uri.IsFile && (string.IsNullOrEmpty(uri.Host) || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)))
+        {
+            path = Uri.UnescapeDataString(uri.AbsolutePath);
+            return true;
+        }
+        path = string.Empty;
+        return false;
+    }
 }
