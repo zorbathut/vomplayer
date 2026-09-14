@@ -7,7 +7,7 @@ using Vomplayer.Util;
 
 namespace Vomplayer.Services;
 
-// The slow half of path diagnostics: a one-shot dump of what the sandbox and the host know about a problem path — the sandbox's view of the portal root and mounts, a rung-by-rung "where does the real path stop being visible" ladder, and host-side probes through flatpak-spawn (OS release, flatpak version and overrides, the exported launcher, the portal's document table, mounts, and the file's own realpath/stat/findmnt). Runs once per distinct problem directory per process, on a background thread, and only when the diagnostics log is open (there's nowhere else for it to go). Fire-and-forget: a fast app exit abandons whatever hasn't been appended yet; every section already appended survives.
+// The slow half of path diagnostics: a one-shot dump of what the sandbox and the host know about a problem path — the sandbox's view of the portal root and mounts, a rung-by-rung "where does the real path stop being visible" ladder, and host-side probes through flatpak-spawn (OS release, flatpak version and overrides, the exported launcher, the portal's document table, mounts, and the file's own realpath/stat/findmnt). Runs once per distinct origin directory per process — whether a load hit a problem there or a portal path was resolved into it — on a background thread, and only when the diagnostics log is open (there's nowhere else for it to go). Fire-and-forget: a fast app exit abandons whatever hasn't been appended yet; every section already appended survives.
 public static class DiagnosticsEnvironment
 {
     // VOMPL_LOG_PATHS=1 dumps once at launch even without a problem (`flatpak override --user --env=VOMPL_LOG_PATHS=1 <app-id>` reaches launcher-started instances).
@@ -83,6 +83,12 @@ public static class DiagnosticsEnvironment
     public static void DumpForProblem(PathProblem problem)
     {
         Dump($"{problem.Kind} path={problem.Path}", problem.Kind == PathProblemKind.DirectoryUnlistable ? problem.Path : problem.HostPath);
+    }
+
+    // The dump for a successful resolution, so a run where nothing went wrong still records how the sandbox and host saw the file.
+    public static void DumpForResolution(PathResolution resolution)
+    {
+        Dump($"portal-resolved portal={resolution.PortalPath}", resolution.HostPath);
     }
 
     private static void Collect(string trigger, string? hostPath)

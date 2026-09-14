@@ -196,6 +196,30 @@ public static class DiagnosticsLog
         Append($"--- {text}");
     }
 
+    public static void PortalResolved(PathResolution resolution)
+    {
+        var text = $"portal-resolved portal={resolution.PortalPath} host={resolution.HostPath} size={resolution.Length} mtime={resolution.LastWriteUtc:O}";
+        Console.Error.WriteLine($"[vompl] path: {text}");
+        Append($"--- {text}");
+    }
+
+    // A portal path whose reported origin was rejected, with both sides' identity so a mismatch is diagnosable from the log alone.
+    public static void PortalKept(string portalPath, string originPath, string reason, FileInfo portalInfo, FileInfo originInfo)
+    {
+        var text = $"portal-kept portal={portalPath} origin={originPath} reason={reason} portal-file=[{Describe(portalInfo)}] origin-file=[{Describe(originInfo)}]";
+        Console.Error.WriteLine($"[vompl] path: {text}");
+        Append($"--- {text}");
+    }
+
+    private static string Describe(FileInfo info)
+    {
+        if (!info.Exists)
+        {
+            return Directory.Exists(info.FullName) ? "directory" : "absent";
+        }
+        return $"size={info.Length} mtime={info.LastWriteTimeUtc:O}";
+    }
+
     public static string Stamp(DateTimeOffset when)
     {
         return when.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");

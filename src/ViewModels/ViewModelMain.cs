@@ -237,6 +237,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         Primary = new VideoContext(playback, filePicker, recentFiles, trackPreferences, urlDownloader, urlPrompt);
         Primary.PropertyChanged += OnContextPropertyChanged;
         Primary.PathProblemDetected += ForwardPathProblem;
+        Primary.PortalPathResolved += ForwardPortalPathResolved;
         // A Primary file load resets Position to 0 and breaks the captured offset. Clear it to "pending" (null); EnsureTargetOffset re-baselines from the post-load divergence on the next sync seek or correction. Subscribed directly to the playback (not VideoContext) since the offset is purely a coordinator concern and doesn't need to flow through the context's mirror plumbing.
         playback.FileLoaded += ClearTargetOffset;
     }
@@ -317,10 +318,16 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
 
     // One event for the view regardless of which stream hit the problem — the warning row is window-level, not per-stream.
     public event Action<PathProblem>? PathProblemDetected;
+    public event Action<PathResolution>? PortalPathResolved;
 
     private void ForwardPathProblem(PathProblem problem)
     {
         PathProblemDetected?.Invoke(problem);
+    }
+
+    private void ForwardPortalPathResolved(PathResolution resolution)
+    {
+        PortalPathResolved?.Invoke(resolution);
     }
 
     // Take ownership of `secondary` and switch into PiP mode. Caller (MainWindow) constructs the secondary VideoContext (with its own Playback) and hands it over here. The VM then disables per-context auto-advance on both and starts driving lockstep advance itself. Idempotent: calling EnablePip while already in PiP mode is a no-op (the supplied secondary is NOT swapped in — caller should DisablePip first).
@@ -339,6 +346,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         secondary.AutoAdvanceEnabled = false;
         secondary.PropertyChanged += OnContextPropertyChanged;
         secondary.PathProblemDetected += ForwardPathProblem;
+        secondary.PortalPathResolved += ForwardPortalPathResolved;
         autosave?.BindSecondary(secondary);
         // Mirror Primary's targetOffset clear on Secondary's loads.
         secondary.Playback.FileLoaded += ClearTargetOffset;
@@ -366,6 +374,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         {
             secondary.PropertyChanged -= OnContextPropertyChanged;
             secondary.PathProblemDetected -= ForwardPathProblem;
+            secondary.PortalPathResolved -= ForwardPortalPathResolved;
             secondary.Playback.FileLoaded -= ClearTargetOffset;
             secondary.Dispose();
         }
@@ -924,6 +933,7 @@ public sealed partial class ViewModelMain : ObservableObject, IDisposable
         }
         Primary.PropertyChanged -= OnContextPropertyChanged;
         Primary.PathProblemDetected -= ForwardPathProblem;
+        Primary.PortalPathResolved -= ForwardPortalPathResolved;
         Primary.Playback.FileLoaded -= ClearTargetOffset;
         Primary.Dispose();
     }

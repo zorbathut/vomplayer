@@ -152,6 +152,102 @@ public class PathPortalTests
         return (root, host, portal);
     }
 
+    [Test]
+    public void SameFileRequiresBothToExistWithEqualSizeAndMtime()
+    {
+        var (_, host, portal) = MakePortalPair();
+        Assert.That(PathPortal.SameFile(portal, host), Is.True);
+        File.SetLastWriteTimeUtc(portal, File.GetLastWriteTimeUtc(host).AddTicks(1));
+        Assert.That(File.GetLastWriteTimeUtc(portal), Is.Not.EqualTo(File.GetLastWriteTimeUtc(host)), "this filesystem must keep a one-tick difference for the exactness assertion to mean anything");
+        Assert.That(PathPortal.SameFile(portal, host), Is.False, "mtime is compared exactly");
+        File.SetLastWriteTimeUtc(portal, File.GetLastWriteTimeUtc(host));
+        File.AppendAllText(host, "x");
+        File.SetLastWriteTimeUtc(host, File.GetLastWriteTimeUtc(portal));
+        Assert.That(PathPortal.SameFile(portal, host), Is.False, "size differs");
+        var missing = Path.Combine(tempDir, "missing.mkv");
+        Assert.That(PathPortal.SameFile(portal, missing), Is.False);
+        Assert.That(PathPortal.SameFile(missing, missing), Is.False, "two absent files are not the same file");
+    }
+
+    [Test]
+    public void TryResolveToHostResolvesAReachableIdenticalOrigin()
+    {
+        var (root, host, portal) = MakePortalPair();
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, host);
+        var resolution = PathPortal.TryResolveToHost(portal, root);
+        Assert.That(resolution, Is.Not.Null);
+        Assert.That(resolution!.HostPath, Is.EqualTo(host));
+        Assert.That(resolution.PortalPath, Is.EqualTo(portal));
+        Assert.That(resolution.Length, Is.EqualTo(new FileInfo(host).Length));
+    }
+
+    [Test]
+    public void TryResolveToHostNormalizesTheXattrValue()
+    {
+        var (root, host, portal) = MakePortalPair();
+        var dodgy = Path.Combine(Path.GetDirectoryName(host)!, "..", "videos", Path.GetFileName(host)) + "\0";
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, dodgy);
+        var resolution = PathPortal.TryResolveToHost(portal, root);
+        Assert.That(resolution, Is.Not.Null);
+        Assert.That(resolution!.HostPath, Is.EqualTo(host));
+    }
+
+    [Test]
+    public void TryResolveToHostDeclinesWhenThereIsNothingToResolve()
+    {
+        var (root, host, portal) = MakePortalPair();
+        Assert.That(PathPortal.TryResolveToHost(host, root), Is.Null, "not a portal path");
+        Assert.That(PathPortal.TryResolveToHost("https://example.com/x.mkv", root), Is.Null);
+        Assert.That(PathPortal.TryResolveToHost(portal, root), Is.Null, "no xattr");
+    }
+
+    [Test]
+    public void TryResolveToHostDeclinesAMismatchedOrMissingOrDirectoryOrigin()
+    {
+        var (root, host, portal) = MakePortalPair();
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, host);
+        File.SetLastWriteTimeUtc(host, File.GetLastWriteTimeUtc(host).AddSeconds(1));
+        Assert.That(PathPortal.TryResolveToHost(portal, root), Is.Null, "mtime differs");
+
+        var gone = Path.Combine(tempDir, "videos", "gone.mkv");
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, gone);
+        Assert.That(PathPortal.TryResolveToHost(portal, root), Is.Null, "origin missing");
+
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, Path.GetDirectoryName(host)!);
+        Assert.That(PathPortal.TryResolveToHost(portal, root), Is.Null, "origin is a directory");
+    }
+
+    // Execute-only on the directory: the file inside can still be stat'ed (so TryResolveToHost accepts it) but the directory can't be enumerated, which is ResolveAll's own reason to decline.
+    [Test]
+    public void ResolveAllDeclinesWhenTheOriginDirectoryIsUnlistable()
+    {
+        if (Vomplayer.LibC.GetUid() == 0)
+        {
+            Assert.Ignore("root can list an execute-only directory");
+        }
+        var (root, host, portal) = MakePortalPair();
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, host);
+        File.SetUnixFileMode(Path.GetDirectoryName(host)!, UnixFileMode.UserExecute);
+        Assert.That(PathPortal.TryResolveToHost(portal, root), Is.Not.Null, "the file itself is reachable");
+        var resolutions = new List<PathResolution>();
+        var result = PathPortal.ResolveAll(new[] { portal }, root, resolutions.Add);
+        Assert.That(result, Is.EqualTo(new[] { portal }));
+        Assert.That(resolutions, Is.Empty);
+    }
+
+    [Test]
+    public void ResolveAllKeepsOrderAndLeavesNonPortalEntriesAlone()
+    {
+        var (root, host, portal) = MakePortalPair();
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, host);
+        var input = new[] { "/videos/first.mkv", portal, "https://example.com/v", "" };
+        var resolutions = new List<PathResolution>();
+        var result = PathPortal.ResolveAll(input, root, resolutions.Add);
+        Assert.That(result, Is.EqualTo(new[] { "/videos/first.mkv", host, "https://example.com/v", "" }));
+        Assert.That(resolutions.Select(r => r.HostPath), Is.EqualTo(new[] { host }));
+        Assert.That(PathPortal.ResolveAll(new[] { "/videos/a.mkv" }, root, resolutions.Add), Is.EqualTo(new[] { "/videos/a.mkv" }));
+    }
+
     // A portal path whose origin directory the sandbox can see, but whose file was rejected, is reported as its own kind: the "grant the folder" advice would be wrong there. The origin in the problem is the normalized spelling even when the xattr carries a NUL terminator.
     [Test]
     public void DiagnoseReportsOriginRejectedWhenTheOriginDirectoryIsReachable()

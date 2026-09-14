@@ -40,6 +40,9 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     // Raised from LoadCurrentItem when the item's directory can't serve sibling navigation or per-directory memory (see PathPortal.Diagnose). The view turns it into the warning row; nothing about the load itself changes.
     public event Action<PathProblem>? PathProblemDetected;
 
+    // Raised when an incoming document-portal path was replaced by its origin (see PathPortal.TryResolveToHost) before entering the playlist.
+    public event Action<PathResolution>? PortalPathResolved;
+
     // The IPlayback this context drives. Owned: VideoContext.Dispose disposes it. Callers (Program.cs for Primary, PipController for Secondary) construct the Playback and hand it over; once handed in, lifetime is the context's.
     private readonly IPlayback playback;
     private readonly IFilePicker filePicker;
@@ -257,7 +260,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         else
         {
             urlLoad.CancelActive();
-            Playlist.Replace(entries);
+            Playlist.Replace(ResolveIncoming(entries));
         }
     }
 
@@ -343,6 +346,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return;
         }
+        paths = ResolveIncoming(paths);
         bool kickOff;
         if (replace)
         {
@@ -368,7 +372,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         LoadCurrentItem(startPaused: false);
     }
 
-    // Insert without starting playback.
+    // Insert without starting playback, through the same resolution step LoadPaths and RestorePlaylist apply.
     public void InsertPaths(int index, IReadOnlyList<string> paths)
     {
         if (paths == null)
@@ -379,7 +383,17 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return;
         }
-        Playlist.Insert(index, paths);
+        Playlist.Insert(index, ResolveIncoming(paths));
+    }
+
+    // Every list this context puts into its Playlist from outside (loads, restores, inserts, URL-prompt results) passes through here; the sibling-navigation appends are derived from an already-resolved item and don't need it. A document-portal path whose origin the sandbox can reach is replaced by that origin, so the playlist, recents, resume positions, and per-directory memory all see the real location.
+    private IReadOnlyList<string> ResolveIncoming(IReadOnlyList<string> paths)
+    {
+        return PathPortal.ResolveAll(paths, PathPortal.Root, resolution =>
+        {
+            DiagnosticsLog.PortalResolved(resolution);
+            PortalPathResolved?.Invoke(resolution);
+        });
     }
 
     // Restore a saved playlist into this context. Replaces the items list, sets CurrentIndex, and kicks off the load — startPaused threads through LoadCurrentItem to Playback.LoadFile so the file loads paused at the resume position (true) or auto-plays (false). Used by ViewModelMain.LoadFromSaved (Recent menu click + startup autoload). Two Changed events fire (Replace, then SetCurrent if currentIndex != 0); PlaylistAutosave's loading flag swallows both so restoration doesn't re-write the row with placeholder filenames.
@@ -395,6 +409,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return;
         }
+        items = ResolveIncoming(items);
         int clamped = currentIndex >= 0 && currentIndex < items.Count ? currentIndex : 0;
         restoringPlaylist = true;
         try

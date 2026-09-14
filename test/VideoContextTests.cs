@@ -2142,6 +2142,41 @@ public class VideoContextTests
     }
 
     [Test]
+    public void LoadPathsResolvesAReachablePortalPathToItsOrigin()
+    {
+        using var fx = new PortalFixture();
+        var playback = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        using var ctx = new VideoContext(playback, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader { Available = false }, new FakeUrlPrompt());
+        var resolutions = new List<PathResolution>();
+        var problems = new List<PathProblem>();
+        ctx.PortalPathResolved += resolutions.Add;
+        ctx.PathProblemDetected += problems.Add;
+
+        ctx.LoadPaths(new[] { fx.Portal, "/videos/other.mkv" }, replace: true);
+        Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { fx.Host, "/videos/other.mkv" }));
+        Assert.That(playback.LoadedFiles, Is.EqualTo(new[] { fx.Host }));
+        Assert.That(recents.RecordedPaths, Is.EqualTo(new[] { fx.Host }));
+        Assert.That(ctx.CurrentFilePath, Is.EqualTo(fx.Host));
+        Assert.That(resolutions, Has.Count.EqualTo(1));
+        Assert.That(resolutions[0].PortalPath, Is.EqualTo(fx.Portal));
+        Assert.That(problems, Is.Empty);
+    }
+
+    [Test]
+    public void RestorePlaylistAndInsertPathsResolvePortalPathsToo()
+    {
+        using var fx = new PortalFixture();
+        using var ctx = NewContext(out var playback);
+        ctx.RestorePlaylist(new[] { "/videos/a.mkv", fx.Portal }, currentIndex: 1, startPaused: true);
+        Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { "/videos/a.mkv", fx.Host }));
+        Assert.That(playback.LoadedFiles, Is.EqualTo(new[] { fx.Host }));
+
+        ctx.InsertPaths(1, new[] { fx.Portal });
+        Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { "/videos/a.mkv", fx.Host, fx.Host }));
+    }
+
+    [Test]
     public void ARejectedPortalOriginStaysAPortalPathAndRaisesTheOriginRejectedProblem()
     {
         using var fx = new PortalFixture();

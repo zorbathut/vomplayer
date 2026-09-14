@@ -17,6 +17,9 @@ public enum PathProblemKind
 // One detected problem with a path the user asked to play. Path is the normalized absolute spelling (the playlist's own spelling is on the load line that precedes it in the log). For the two portal kinds, HostPath and Directory are the origin the portal reports (the FUSE file's host-path xattr) — a portal problem with a non-null HostPath means the origin was seen and declined, not merely reported — and HostPathErrno is why the xattr couldn't be read when it wasn't (ENODATA on a portal too old to set it, ENOTSUP/EACCES when the read is refused); for DirectoryUnlistable, Directory is the unlistable directory itself.
 public sealed record PathProblem(string Path, PathProblemKind Kind, string? HostPath, int HostPathErrno, string? Directory);
 
+// A portal path that was replaced by its origin: the sandbox could reach the origin, it was the same file, and its directory is listable. Length and LastWriteUtc are the identity that was matched, for the log.
+public sealed record PathResolution(string PortalPath, string HostPath, long Length, DateTime LastWriteUtc);
+
 // "Have I seen this problem's directory before?" — the warning row's once-per-directory-per-session gate, so a run of double-clicks into the same hidden folder produces one notice. Problems without a known directory dedupe on the path itself.
 public sealed class PathProblemDedupe
 {
@@ -97,6 +100,18 @@ public static class PathPortal
         return origin;
     }
 
+    // Whether two paths name the same file: both exist, same size, same mtime — compared exactly, not within a tolerance. The portal's FUSE layer synthesizes device and inode numbers (so those can't be used) but passes the backing file's size and nanosecond mtime straight through, and inside a flatpak the origin is reached over a recursive bind of the very same mount, so the two sides read one cached inode and agree bit for bit; a tolerance would only loosen a check that is exact by construction. Both sides are snapshotted first and gated on existence, so two failed stats can't compare equal through FileInfo's sentinel timestamp.
+    public static bool SameFile(string a, string b)
+    {
+        var infoA = new FileInfo(a);
+        var infoB = new FileInfo(b);
+        if (!infoA.Exists || !infoB.Exists)
+        {
+            return false;
+        }
+        return infoA.Length == infoB.Length && infoA.LastWriteTimeUtc == infoB.LastWriteTimeUtc;
+    }
+
     // Can the directory be enumerated? False, quietly, for one that isn't there at all; false with a stderr report for one that exists but refuses listing — the refusal is a finding.
     public static bool DirectoryListable(string directory)
     {
@@ -117,6 +132,65 @@ public static class PathPortal
         }
     }
 
+    // The origin to play instead of a portal path, when the sandbox can reach it: flatpak decides visibility on the host by stat'ing every directory on the way (a stale share root fails that and forces the portal) while the file itself is readable in the sandbox at its real path. Null when the path isn't portal-shaped, the portal reports no usable origin, or the origin is rejected — not an existing file, or not the same file. Every rejection of a reported origin goes to the diagnostics log with both sides' size and mtime. Whether the origin's directory is worth having (ResolveAll's question) is deliberately not asked here, so a batch can answer it once per directory.
+    public static PathResolution? TryResolveToHost(string path, string portalRoot)
+    {
+        var full = TryNormalize(path);
+        if (full == null || !IsPortalPath(full, portalRoot))
+        {
+            return null;
+        }
+        var host = TryReadOrigin(full, out _);
+        if (host == null)
+        {
+            return null;
+        }
+        var portalInfo = new FileInfo(full);
+        var hostInfo = new FileInfo(host);
+        if (!hostInfo.Exists)
+        {
+            DiagnosticsLog.PortalKept(full, host, Directory.Exists(host) ? "origin is a directory" : "origin not reachable", portalInfo, hostInfo);
+            return null;
+        }
+        if (!SameFile(full, host))
+        {
+            DiagnosticsLog.PortalKept(full, host, "origin is not the same file", portalInfo, hostInfo);
+            return null;
+        }
+        return new PathResolution(full, host, hostInfo.Length, hostInfo.LastWriteTimeUtc);
+    }
+
+    // Resolves every portal path in a batch that is about to enter a playlist, keeping the input order and every non-portal entry untouched. A resolved origin is only taken when its directory is listable (a host path that buys no siblings and no per-directory memory buys nothing), and a batch from one folder — a season drop, a restored playlist — asks that once per directory rather than once per file, since on the machine this exists for the directory is a network share. onResolved fires per substitution, before the returned list is used. Filesystem work happens only for portal-shaped entries.
+    public static IReadOnlyList<string> ResolveAll(IReadOnlyList<string> paths, string portalRoot, Action<PathResolution> onResolved)
+    {
+        List<string>? resolved = null;
+        Dictionary<string, bool>? listable = null;
+        for (int i = 0; i < paths.Count; i++)
+        {
+            var resolution = TryResolveToHost(paths[i], portalRoot);
+            if (resolution == null)
+            {
+                continue;
+            }
+            var hostDir = Path.GetDirectoryName(resolution.HostPath) ?? "/";
+            listable ??= new Dictionary<string, bool>(StringComparer.Ordinal);
+            if (!listable.TryGetValue(hostDir, out bool ok))
+            {
+                ok = DirectoryListable(hostDir);
+                listable[hostDir] = ok;
+            }
+            if (!ok)
+            {
+                DiagnosticsLog.PortalKept(resolution.PortalPath, resolution.HostPath, "origin directory not listable", new FileInfo(resolution.PortalPath), new FileInfo(resolution.HostPath));
+                continue;
+            }
+            resolved ??= new List<string>(paths);
+            resolved[i] = resolution.HostPath;
+            onResolved(resolution);
+        }
+        return resolved ?? paths;
+    }
+
     // Decides whether the directory side of a path is usable for sibling navigation and per-directory memory. `directoryKey` is what TrackPreferences.TryGetDirectoryKey resolved for the same path (null for URIs and portal paths). A portal path is always a problem — even without a host-path xattr, its directory is a one-file FUSE dir. A directory that doesn't exist at all is not reported here: the load itself fails loudly in that case (an existing-but-unlistable one is reported, and DirectoryListable has already written the exception to stderr).
     public static PathProblem? Diagnose(string pathOrUri, string portalRoot, string? directoryKey)
     {
@@ -129,7 +203,7 @@ public static class PathPortal
         {
             var origin = TryReadOrigin(full, out int errno);
             var originDir = origin == null ? null : Path.GetDirectoryName(origin);
-            // A portal path still here at load time means the origin was rejected; when its directory is nonetheless reachable, the problem is the file, not the sandbox's view of the folder.
+            // A portal path still here after ResolveAll had its chance means the origin was rejected; when its directory is nonetheless reachable, the problem is the file, not the sandbox's view of the folder.
             var kind = originDir != null && DirectoryListable(originDir) ? PathProblemKind.DocumentPortalOriginRejected : PathProblemKind.DocumentPortal;
             return new PathProblem(full, kind, origin, errno, originDir);
         }
