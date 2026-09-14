@@ -32,6 +32,9 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     // Don't save (or apply) a resume position within this many seconds of the file's end. Otherwise watching to completion leaves a saved position at ~duration, and the next reload jumps straight to the EOF state.
     private const double NearEndIgnoreSeconds = 5.0;
 
+    // Schemes whose URI names the reader rather than what's loaded in it: every disc opened as `dvd://` is the same string, so a position saved from one would seek into a different film on the next. Excluded from the position layer at both ends; nothing else about the load changes. Live-capture schemes (dvb://, tv://, av://) need no entry here — they report no duration, which both gates already reject.
+    private static readonly string[] DeviceSchemes = { "dvd://", "dvdnav://", "bd://", "bluray://", "cdda://" };
+
     private static readonly bool LogHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
 
     // Raised from LoadCurrentItem when the item's directory can't serve sibling navigation or per-directory memory (see PathPortal.Diagnose). The view turns it into the warning row; nothing about the load itself changes.
@@ -56,7 +59,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
     //
     // Known limitation (rapid file swap): OpenFile(B) overwrites this before FileLoaded for A arrives if the user opens two files in quick succession. The first-file's TracksReloaded then matches against B's directory preferences. Rare in practice, self-correcting on the next load. Fixing properly would require correlating mpv's `path` property with the load that triggered it.
     private string? currentDirectoryKey;
-    // The full path-or-URI for the most recent OpenFile target. Distinct from currentDirectoryKey because the position layer keys on the file itself, not its directory. Set in OpenFile alongside currentDirectoryKey, used by every save trigger to identify which row to update. Null pre-OpenFile and after the outgoing-file save for a non-local source clears it. Exposed as ObservableProperty so the stream-selector toolbar can show the file's basename in its button label and refresh on file change.
+    // The full path-or-URI for the most recent OpenFile target. Distinct from currentDirectoryKey because the position layer keys on the file itself, not its directory. Set in LoadCurrentItem alongside currentDirectoryKey, used by every save trigger to identify which row to update. Null until the first load; on a URL load it holds the URL, not the local cache file mpv ends up playing. Exposed as ObservableProperty so the stream-selector toolbar can show the file's basename in its button label and refresh on file change.
     [ObservableProperty]
     private string? currentFilePath;
     // False from OpenFile until the matching FileLoaded fires. Gates position saves so that mpv's load-time IsPaused churn doesn't spuriously persist position 0 against the new file. (DurationSeconds > 0 is *almost* the same gate, but DurationSeconds can briefly carry the previous file's value across the unload/reload window before the new file's duration arrives — currentFileLoaded is the unambiguous signal.)
@@ -504,8 +507,8 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         lastSavedPositionSeconds = 0;
         // Reset the eof-rising-edge mirror to match the synchronous IsEofReached=false that Playback.LoadFile is about to perform. Ensures the next true→ transition we observe is treated as a rising edge against this file, not against whatever the previous file's tail was.
         wasEofReached = false;
-        // Look up the saved position only for local files. URI sources don't accumulate positions, so skipping the GetPosition call also keeps test fakes' GetPositionCalls clean.
-        pendingResumePosition = TrackPreferences.IsLocalFilesystemPath(pathOrUri) ? recentFiles.GetPosition(pathOrUri) : null;
+        // Resume keys on the path-or-URI exactly as recents stores it. For a yt-dlp source that's the URL, not the cache file mpv is handed below — the cache is swept after 24h and its identity folds in the cookie spec, so the URL is the only key that survives a re-download.
+        pendingResumePosition = NamesADevice(pathOrUri) ? null : recentFiles.GetPosition(pathOrUri);
         PrefsLog($"LoadCurrentItem: pathOrUri={pathOrUri} → directoryKey={currentDirectoryKey ?? "<null>"}, resumePos={(pendingResumePosition?.ToString() ?? "<null>")}");
 
         if (urlLoad.ShouldProbe(pathOrUri))
@@ -592,7 +595,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         ApplyResumePositionIfPending();
     }
 
-    // Seek to the saved position once both FileLoaded has fired AND duration is known. mpv's emission order between MPV_EVENT_FILE_LOADED and the property-change for `duration` isn't contractually guaranteed — track lists arrive before FileLoaded (per OnPlaybackFileLoaded's existing comment) but duration may not — so we re-attempt from both events and only commit pendingResumePosition (clear it) when we have enough info to make a final decision. Brief (~50–150ms) flash of position-0 playback before the seek lands is a known cost; alternatives (mpv's `loadfile … start=N` option, pause-before-loadfile / unpause-after-seek) were rejected for fragility. Filter on (0, duration - NearEndIgnoreSeconds): zero saves a redundant seek when the natural start is fine, near-end avoids the "watched to completion → reload jumps to EOF" footgun.
+    // Seek to the saved position once both FileLoaded has fired AND duration is known. mpv's emission order between MPV_EVENT_FILE_LOADED and the property-change for `duration` isn't contractually guaranteed — track lists arrive before FileLoaded (per OnPlaybackFileLoaded's existing comment) but duration may not — so we re-attempt from both events and only commit pendingResumePosition (clear it) when we have enough info to make a final decision. Brief flash of position-0 playback before the seek lands is a known cost — ~50–150ms on a local file, longer on a network source where duration can arrive well after FileLoaded; alternatives (mpv's `loadfile … start=N` option, pause-before-loadfile / unpause-after-seek) were rejected for fragility. Filter on (0, duration - NearEndIgnoreSeconds): zero saves a redundant seek when the natural start is fine, near-end avoids the "watched to completion → reload jumps to EOF" footgun.
     private void ApplyResumePositionIfPending()
     {
         if (!currentFileLoaded)
@@ -622,6 +625,18 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         lastSavedPositionSeconds = resume;
     }
 
+    private static bool NamesADevice(string pathOrUri)
+    {
+        foreach (var scheme in DeviceSchemes)
+        {
+            if (pathOrUri.StartsWith(scheme, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Single eligibility-checked save path. All four save triggers (periodic, pause-edge, OpenFile-outgoing, Dispose) funnel through here so the gate stays consistent. After a successful save, lastSavedPositionSeconds is updated so the periodic throttle's next milestone is measured from this save, not the previous one.
     private void SaveCurrentPositionIfEligible()
     {
@@ -634,7 +649,7 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         {
             return;
         }
-        if (!TrackPreferences.IsLocalFilesystemPath(filePath))
+        if (NamesADevice(filePath))
         {
             return;
         }

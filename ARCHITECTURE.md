@@ -200,7 +200,7 @@ Keyboard input goes through a window-level capture-phase `Gtk.EventControllerKey
 - **`state.db`** (SQLite, `Microsoft.Data.Sqlite`, WAL). Owned by `StateDatabase`; per-feature persistence classes (`RecentFiles`, `TrackPreferences`, `SavedPlaylists`) take the `SqliteConnection` in their ctor. Append-only `Migrations[]` registry walked against `PRAGMA user_version`. Schema today:
   - v1: `recent_files(path_or_uri UNIQUE, last_opened, open_count)`
   - v2: `track_preferences(directory, kind, …)` PK `(directory, kind)`
-  - v3: `recent_files.position_seconds REAL` for per-file resume
+  - v3: `recent_files.position_seconds REAL` for per-file resume. The key is `path_or_uri` as the playlist holds it, so a yt-dlp source resumes against its **URL**, not the cache file mpv is actually playing — `UrlDownloadCache` sweeps entries after 24h and folds the cookie spec into their identity, so the URL is the only key that survives a re-download. A row may also be minted by a position write alone (`last_opened`/`open_count` 0), for a playlist restored but never deliberately opened.
   - v4: `saved_playlists(guid PK, title, last_used_at, stream_count, payload_json)` — autosaved playlist history; payload is a JSON array of `{slot, current_index, items}`, schemaless room to grow
 
   Adding a v(N+1) is one append + one new migration test that pre-stages a vN DB via the internal `OpenConnectionAndMigrateTo(path, N)` escape hatch and verifies data survives the upgrade. Never edit a published migration's body — that would silently change schema for users whose DB already passed through it.

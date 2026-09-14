@@ -1268,21 +1268,221 @@ public class VideoContextTests
         }
     }
 
+    // --- Per-file play position: URL sources ---
+    //
+    // Every test here must let the URL route's fire-and-forget hop settle and assert the load actually landed BEFORE raising FileLoaded: RaiseFileLoaded sets currentFileLoaded whether or not a LoadFile ever happened, so a test that skips the await would pass against a state the real flow can't produce.
+
     [Test]
-    public void UriSourceDoesNotPersistPosition()
+    public void MpvNativeUriResumesAndSavesAgainstTheUri()
     {
-        // URIs (http/smb/…) skip both the apply lookup AND every save trigger. Position persistence is for local paths only.
+        // smb:// (and every other mpv-native scheme) never reaches the yt-dlp router — ShouldProbe gates on http/https — so this is the synchronous load path with a URI key.
+        const string uri = "smb://nas/share/v.mkv";
         var pb = new FakePlayback();
         var recents = new FakeRecentFiles();
+        recents.Positions[uri] = 90;
         var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
         pb.DurationSeconds = 600;
         pb.IsPaused = false;
-        ctx.OpenFile("https://example.com/stream.m3u8");
+        ctx.OpenFile(uri);
+        Assert.That(pb.LastLoadedFile, Is.EqualTo(uri), "no probe — mpv is handed the URI directly");
+
+        pb.RaiseFileLoaded();
+        Assert.That(pb.LastSeekSeconds, Is.EqualTo(90));
+
+        pb.PositionSeconds = 200;
+        Assert.That(recents.RecordedPositions, Has.Count.EqualTo(1));
+        Assert.That(recents.RecordedPositions[0].Path, Is.EqualTo(uri));
+    }
+
+    [Test]
+    public void DeviceSchemeUriNeitherResumesNorSaves()
+    {
+        // dvd:// names the drive, not the disc in it: a position saved from one disc would seek into a different film on the next. Unlike the live-stream case this can't be caught by the duration gate — the disc reports a real duration.
+        const string uri = "dvd://";
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        recents.Positions[uri] = 90;
+        var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), new FakeUrlDownloader(), new FakeUrlPrompt());
+        pb.DurationSeconds = 600;
+        pb.IsPaused = false;
+        ctx.OpenFile(uri);
+        Assert.That(pb.LastLoadedFile, Is.EqualTo(uri), "the item still plays — only the position layer opts out");
+
+        pb.RaiseFileLoaded();
+        pb.PositionSeconds = 200;
+        pb.IsPaused = true;
+        ctx.Dispose();
+
+        Assert.That(pb.LastSeekSeconds, Is.Null);
+        Assert.That(recents.GetPositionCalls, Is.Empty);
+        Assert.That(recents.RecordedPositions, Is.Empty);
+    }
+
+    [Test]
+    public async Task DirectStreamUrlSavesPositionAgainstTheUrl()
+    {
+        const string url = "https://example.com/stream.mp4";
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.MpvDirect };
+        var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), dl, new FakeUrlPrompt());
+        pb.DurationSeconds = 600;
+        pb.IsPaused = false;
+        ctx.OpenFile(url);
+        await Task.Yield();
+        await Task.Delay(10);
+        Assert.That(pb.LastLoadedFile, Is.EqualTo(url), "mpv-direct loads the URL itself");
+
+        pb.RaiseFileLoaded();
+        pb.PositionSeconds = 50;
+        // The position bump fires a periodic save; drop it so the assertion isolates the pause edge.
+        recents.RecordedPositions.Clear();
+        pb.IsPaused = true;
+
+        Assert.That(recents.RecordedPositions, Has.Count.EqualTo(1));
+        Assert.That(recents.RecordedPositions[0].Path, Is.EqualTo(url));
+        Assert.That(recents.RecordedPositions[0].Position, Is.EqualTo(50));
+    }
+
+    [Test]
+    public async Task DownloadedUrlKeysPositionOnTheUrlNotTheCachePath()
+    {
+        // The load-bearing case: mpv is playing a local cache file while the position layer keys on the URL that produced it. Keying on the cache path would lose the position when the 24h cache sweep evicts the entry.
+        const string url = "https://youtu.be/A";
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        recents.Positions[url] = 120;
+        var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.YtDlpDownload, DownloadResolver = _ => "/cache/a.mp4" };
+        var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), dl, new FakeUrlPrompt());
+        pb.DurationSeconds = 600;
+        pb.IsPaused = false;
+        ctx.OpenFile(url);
+        await Task.Yield();
+        await Task.Delay(10);
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/cache/a.mp4"), "the download resolved — mpv plays the cache file");
+
+        pb.RaiseFileLoaded();
+        Assert.That(pb.LastSeekSeconds, Is.EqualTo(120));
+        Assert.That(recents.GetPositionCalls, Is.EqualTo(new[] { url }));
+
+        pb.PositionSeconds = 200;
+        Assert.That(recents.RecordedPositions, Has.Count.EqualTo(1));
+        Assert.That(recents.RecordedPositions[0].Path, Is.EqualTo(url));
+    }
+
+    [Test]
+    public async Task DownloadedUrlAppliesPositionWhenDurationArrivesAfterFileLoaded()
+    {
+        // Same late-duration retry as the local case, on the branch where it's likelier: a network source can report duration well after FILE_LOADED.
+        const string url = "https://youtu.be/A";
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        recents.Positions[url] = 120;
+        var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.YtDlpDownload, DownloadResolver = _ => "/cache/a.mp4" };
+        var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), dl, new FakeUrlPrompt());
+        ctx.OpenFile(url);
+        await Task.Yield();
+        await Task.Delay(10);
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/cache/a.mp4"));
+
+        pb.RaiseFileLoaded();
+        Assert.That(pb.LastSeekSeconds, Is.Null, "duration not yet known, no seek possible");
+
+        pb.DurationSeconds = 600;
+        Assert.That(pb.LastSeekSeconds, Is.EqualTo(120), "apply must retry once duration is known");
+    }
+
+    [Test]
+    public async Task SwitchingAwayFromADownloadedUrlSavesAgainstTheUrl()
+    {
+        // The outgoing-file save runs inside LoadCurrentItem for the NEXT item, while mpv still holds the cache path. It must reach for CurrentFilePath (the URL), not what mpv is playing.
+        const string url = "https://youtu.be/A";
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.YtDlpDownload, DownloadResolver = _ => "/cache/a.mp4" };
+        var local = LocalPathInTemp("b.mkv");
+        try
+        {
+            var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), dl, new FakeUrlPrompt());
+            pb.DurationSeconds = 600;
+            ctx.OpenFile(url);
+            await Task.Yield();
+            await Task.Delay(10);
+            Assert.That(pb.LastLoadedFile, Is.EqualTo("/cache/a.mp4"));
+
+            pb.RaiseFileLoaded();
+            // Default IsPaused=true gates the periodic save off, so only the outgoing save can appear.
+            pb.PositionSeconds = 60;
+            ctx.OpenFile(local);
+
+            Assert.That(recents.RecordedPositions, Has.Count.EqualTo(1));
+            Assert.That(recents.RecordedPositions[0].Path, Is.EqualTo(url));
+            Assert.That(recents.RecordedPositions[0].Position, Is.EqualTo(60));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(local)!, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task SupersededUrlLoadDoesNotLeakItsResumePositionIntoTheNextItem()
+    {
+        // User clicks row A (download starts), then clicks row B before A completes. B's own position must win — asserting merely that nothing seeks would also pass if resume were broken outright.
+        const string urlA = "https://youtu.be/A";
+        const string urlB = "https://youtu.be/B";
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        recents.Positions[urlA] = 120;
+        recents.Positions[urlB] = 45;
+        var pendingA = new TaskCompletionSource<string>();
+        var dl = new FakeUrlDownloader
+        {
+            NextProbeResult = new[] { urlA, urlB },
+            PendingDownload = pendingA,
+        };
+        var prompt = new FakeUrlPrompt { NextUrl = "https://youtube.com/playlist?list=Z" };
+        var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), dl, prompt);
+        pb.DurationSeconds = 600;
+
+        await ctx.OpenUrlAsync();
+        ctx.PlayPlaylistItem(0);
+        await Task.Yield();
+        dl.PendingDownload = null;
+        dl.DownloadResolver = _ => "/cache/b.mp4";
+        ctx.PlayPlaylistItem(1);
+        await Task.Yield();
+        await Task.Delay(10);
+        Assert.That(pb.LastLoadedFile, Is.EqualTo("/cache/b.mp4"));
+
+        pb.RaiseFileLoaded();
+        Assert.That(pb.LastSeekSeconds, Is.EqualTo(45), "B's own position applies; A's must not carry over");
+        Assert.That(recents.RecordedPositions, Is.Empty);
+    }
+
+    [Test]
+    public async Task ZeroDurationUrlNeitherSeeksNorSaves()
+    {
+        // The live-stream shape: mpv reports no duration, so there's no meaningful position at either end. Both gates are duration-based, not scheme-based.
+        const string url = "https://example.com/live.m3u8";
+        var pb = new FakePlayback();
+        var recents = new FakeRecentFiles();
+        recents.Positions[url] = 30;
+        var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.MpvDirect };
+        var ctx = new VideoContext(pb, new FakeFilePicker(), recents, new FakeTrackPreferences(), dl, new FakeUrlPrompt());
+        pb.DurationSeconds = 0;
+        pb.IsPaused = false;
+        ctx.OpenFile(url);
+        await Task.Yield();
+        await Task.Delay(10);
+        Assert.That(pb.LastLoadedFile, Is.EqualTo(url));
+
         pb.RaiseFileLoaded();
         pb.PositionSeconds = 50;
         pb.IsPaused = true;
         ctx.Dispose();
-        Assert.That(recents.GetPositionCalls, Is.Empty);
+
+        Assert.That(pb.LastSeekSeconds, Is.Null);
         Assert.That(recents.RecordedPositions, Is.Empty);
     }
 
@@ -1503,7 +1703,7 @@ public class VideoContextTests
     [Test]
     public async Task AutoAdvanceIntoUriItemWorks()
     {
-        // The next item is a URI; auto-advance shouldn't bail just because the entry isn't a local-fs path. The IsLocalFilesystemPath gate inside LoadCurrentItem only affects the recents-position lookup, not the load itself. With ClassifyResult=MpvDirect (matches a real HLS m3u8 that yt-dlp's generic extractor handles), the loaded path is the URL itself.
+        // The next item is a URI; auto-advance shouldn't bail just because the entry isn't a local-fs path. With ClassifyResult=MpvDirect (matches a real HLS m3u8 that yt-dlp's generic extractor handles), the loaded path is the URL itself.
         var pb = new FakePlayback();
         var dl = new FakeUrlDownloader { ClassifyResult = Vomplayer.Services.UrlLoadKind.MpvDirect };
         var ctx = new VideoContext(pb, new FakeFilePicker(), new FakeRecentFiles(), new FakeTrackPreferences(), dl, new FakeUrlPrompt());
