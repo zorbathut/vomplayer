@@ -79,7 +79,27 @@ public static class PathPortal
         return LibC.GetXattr(path, HostPathXattr, out errno);
     }
 
-    // Decides whether the directory side of a path is usable for sibling navigation and per-directory memory. `directoryKey` is what TrackPreferences.TryGetDirectoryKey resolved for the same path (null for URIs and portal paths). A portal path is always a problem — even without a host-path xattr, its directory is a one-file FUSE dir. A directory that doesn't exist at all is not reported here: the load itself fails loudly in that case.
+    // Can the directory be enumerated? False, quietly, for one that isn't there at all; false with a stderr report for one that exists but refuses listing — the refusal is a finding.
+    public static bool DirectoryListable(string directory)
+    {
+        try
+        {
+            using var entries = Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
+            entries.MoveNext();
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+        {
+            Console.Error.WriteLine($"[vompl] path: directory '{directory}' can't be listed: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    // Decides whether the directory side of a path is usable for sibling navigation and per-directory memory. `directoryKey` is what TrackPreferences.TryGetDirectoryKey resolved for the same path (null for URIs and portal paths). A portal path is always a problem — even without a host-path xattr, its directory is a one-file FUSE dir. A directory that doesn't exist at all is not reported here: the load itself fails loudly in that case (an existing-but-unlistable one is reported, and DirectoryListable has already written the exception to stderr).
     public static PathProblem? Diagnose(string pathOrUri, string portalRoot, string? directoryKey)
     {
         var full = TryNormalize(pathOrUri);
@@ -92,21 +112,10 @@ public static class PathPortal
             var hostPath = ReadHostPath(full, out int errno);
             return new PathProblem(full, PathProblemKind.DocumentPortal, hostPath, errno, hostPath == null ? null : Path.GetDirectoryName(hostPath));
         }
-        if (directoryKey == null || !Directory.Exists(directoryKey))
+        if (directoryKey == null || !Directory.Exists(directoryKey) || DirectoryListable(directoryKey))
         {
             return null;
         }
-        try
-        {
-            using var entries = Directory.EnumerateFileSystemEntries(directoryKey).GetEnumerator();
-            entries.MoveNext();
-            return null;
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
-        {
-            // The exception is the finding, not something to hide: it becomes the reported problem, and the diagnostics dump records the message.
-            Console.Error.WriteLine($"[vompl] path: directory '{directoryKey}' exists but can't be listed: {ex.GetType().Name}: {ex.Message}");
-            return new PathProblem(full, PathProblemKind.DirectoryUnlistable, null, 0, directoryKey);
-        }
+        return new PathProblem(full, PathProblemKind.DirectoryUnlistable, null, 0, directoryKey);
     }
 }
