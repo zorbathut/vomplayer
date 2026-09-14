@@ -58,7 +58,8 @@ src/
     YtDlpDownloader.cs                  # IUrlDownloader spawning yt-dlp
     UrlLoadCoordinator.cs               # per-VideoContext yt-dlp lifecycle: prompt/probe flow + race-guarded probe-then-route loads
     UrlDownloadCache.cs                 # XDG-cache-dir-rooted, mtime-based stale sweep
-    FlatpakDetect.cs                    # sandbox sniff (drives the flatpak-spawn yt-dlp invocation)
+    FlatpakDetect.cs                    # sandbox sniff
+    HostCommand.cs                      # the one place that knows how to reach the host (flatpak-spawn --host --watch-bus when sandboxed; shared by every caller that shells out to the host)
 
   UserData/
     UserDataPaths.cs       # XDG-aware paths; VOMPL_CONFIG_DIR / VOMPL_STATE_DIR overrides for tests / portable installs

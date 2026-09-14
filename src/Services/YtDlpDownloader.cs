@@ -43,17 +43,7 @@ public sealed class YtDlpDownloader : IUrlDownloader
     // Resolve the yt-dlp invocation command for the current environment. Pure so it's unit-testable; the environment probe lives in FlatpakDetect.IsSandboxed.
     public static IReadOnlyList<string> BuildCommand(bool inFlatpak)
     {
-        // Inside a flatpak sandbox the host's yt-dlp is reached via flatpak-spawn --host.
-        // --watch-bus binds the host process to flatpak-spawn's D-Bus connection: when we
-        // Kill() the in-sandbox flatpak-spawn, the kernel closes its FDs (incl. the bus
-        // socket) and the portal tears down the host yt-dlp. So a cancelled download leaves
-        // no orphan, and neither does an app crash. (flatpak-spawn forwards no signals; the
-        // bus-drop is what does the work — see flatpak/flatpak#4827.)
-        if (inFlatpak)
-        {
-            return new[] { "flatpak-spawn", "--host", "--watch-bus", "yt-dlp" };
-        }
-        return new[] { "yt-dlp" };
+        return HostCommand.Build(inFlatpak, new[] { "yt-dlp" });
     }
 
     // Build a ProcessStartInfo for a yt-dlp invocation: the resolved executable, the shared redirect/no-window flags every call needs, and the fixed arg prefix. Callers add only their own args afterward, so the prefix is applied in exactly one place.
