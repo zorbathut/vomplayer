@@ -694,7 +694,7 @@ public sealed class PipController : IDisposable
     private void RebindPlaylistPanelToTarget()
     {
         var ctx = viewModel.SingleTarget;
-        host.PlaylistPanel.Rebind(ctx.Playlist, ctx.PlayPlaylistItem);
+        host.PlaylistPanel.Rebind(ctx.Playlist, ctx.PlayPlaylistItem, ctx.InsertPaths);
     }
 
     // Re-add controlsBox to the overlay if it's already there (fullscreen). Since Gtk.Overlay renders overlay children in addition order — later AddOverlay = higher — we move controlsBox to the top of the stack so any newly-added PiP overlay child sits below the OSD. Idempotent: when controlsBox is in rootBox (windowed mode) this is a no-op.

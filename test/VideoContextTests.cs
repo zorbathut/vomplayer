@@ -2107,4 +2107,14 @@ public class VideoContextTests
             Directory.Delete(runtimeDir, recursive: true);
         }
     }
+
+    [Test]
+    public void InsertPathsInsertsAtTheGivenIndexWithoutStartingPlayback()
+    {
+        using var ctx = NewContext(out var playback);
+        ctx.LoadPaths(new[] { "/videos/a.mkv", "/videos/c.mkv" }, replace: true);
+        ctx.InsertPaths(1, new[] { "/videos/b.mkv" });
+        Assert.That(ctx.Playlist.Items, Is.EqualTo(new[] { "/videos/a.mkv", "/videos/b.mkv", "/videos/c.mkv" }));
+        Assert.That(playback.LoadedFiles, Is.EqualTo(new[] { "/videos/a.mkv" }));
+    }
 }

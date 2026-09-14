@@ -368,6 +368,20 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         LoadCurrentItem(startPaused: false);
     }
 
+    // Insert without starting playback.
+    public void InsertPaths(int index, IReadOnlyList<string> paths)
+    {
+        if (paths == null)
+        {
+            throw new ArgumentNullException(nameof(paths));
+        }
+        if (paths.Count == 0)
+        {
+            return;
+        }
+        Playlist.Insert(index, paths);
+    }
+
     // Restore a saved playlist into this context. Replaces the items list, sets CurrentIndex, and kicks off the load — startPaused threads through LoadCurrentItem to Playback.LoadFile so the file loads paused at the resume position (true) or auto-plays (false). Used by ViewModelMain.LoadFromSaved (Recent menu click + startup autoload). Two Changed events fire (Replace, then SetCurrent if currentIndex != 0); PlaylistAutosave's loading flag swallows both so restoration doesn't re-write the row with placeholder filenames.
     //
     // Distinct from LoadPaths(replace:true) because LoadPaths always loads from index 0 (no resume position to honor) and the user-initiated open is implicitly "play". Restoration honors the saved CurrentIndex AND the pause-on-restore intent.

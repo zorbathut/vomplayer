@@ -20,6 +20,7 @@ public sealed class PlaylistPanel : IDisposable
     // Mutable so Rebind can swap them when the active VideoContext changes (PiP SelectedSlot transitions). The Changed subscription moves with the swap so the panel always tracks the bound playlist. The drop handlers read these fields live (not captured copies) so a Rebind mid-session lands edits in the right context.
     private Playlist playlist;
     private Action<int> playItem;
+    private Action<int, IReadOnlyList<string>> insertPaths;
     private readonly Gtk.ListBox listBox;
     private readonly Gtk.ScrolledWindow scrolledWindow;
     // Captured once so subscribe and unsubscribe call the same delegate. Inline `k => Rebuild(k)` lambdas would create distinct delegate instances and the unsubscribe in Dispose / Rebind would silently no-op, leaking the subscription past the panel's lifetime.
@@ -32,7 +33,7 @@ public sealed class PlaylistPanel : IDisposable
     private Gtk.ListBoxRow? indicatorRow;
     private bool indicatorAfter;
 
-    public PlaylistPanel(Playlist playlist, Action<int> playItem)
+    public PlaylistPanel(Playlist playlist, Action<int> playItem, Action<int, IReadOnlyList<string>> insertPaths)
     {
         if (playlist == null)
         {
@@ -42,8 +43,13 @@ public sealed class PlaylistPanel : IDisposable
         {
             throw new ArgumentNullException(nameof(playItem));
         }
+        if (insertPaths == null)
+        {
+            throw new ArgumentNullException(nameof(insertPaths));
+        }
         this.playlist = playlist;
         this.playItem = playItem;
+        this.insertPaths = insertPaths;
         changedHandler = OnPlaylistChanged;
 
         listBox = Gtk.ListBox.New();
@@ -98,7 +104,7 @@ public sealed class PlaylistPanel : IDisposable
     }
 
     // Swap the bound playlist + activation callback. Used by MainWindow when the active video changes during PiP (the panel should reflect whichever video is currently active). The Changed subscription is moved atomically and a Rebuild fires immediately so the panel reflects the new playlist's state.
-    public void Rebind(Playlist newPlaylist, Action<int> newPlayItem)
+    public void Rebind(Playlist newPlaylist, Action<int> newPlayItem, Action<int, IReadOnlyList<string>> newInsertPaths)
     {
         if (newPlaylist == null)
         {
@@ -108,14 +114,20 @@ public sealed class PlaylistPanel : IDisposable
         {
             throw new ArgumentNullException(nameof(newPlayItem));
         }
+        if (newInsertPaths == null)
+        {
+            throw new ArgumentNullException(nameof(newInsertPaths));
+        }
         if (ReferenceEquals(newPlaylist, playlist))
         {
             playItem = newPlayItem;
+            insertPaths = newInsertPaths;
             return;
         }
         playlist.Changed -= changedHandler;
         playlist = newPlaylist;
         playItem = newPlayItem;
+        insertPaths = newInsertPaths;
         playlist.Changed += changedHandler;
         Rebuild(null);
     }
@@ -353,7 +365,7 @@ public sealed class PlaylistPanel : IDisposable
         int gap = GapFromY(y);   // 0 on an empty list
         bool wasEmpty = playlist.Items.Count == 0;
         var inserted = Enumerable.Range(gap, paths.Count).ToList();
-        RunWithPendingSelection(inserted, () => playlist.Insert(gap, paths));
+        RunWithPendingSelection(inserted, () => insertPaths(gap, paths));
         // Dropping onto an empty playlist starts playback of the first item (matches the append-from-empty path); inserting into a populated playlist just queues the items behind whatever is playing.
         if (wasEmpty)
         {

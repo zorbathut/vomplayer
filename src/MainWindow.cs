@@ -251,7 +251,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         }
 
         // Playlist panel sits to the right of the video. Hidden by default; toggled by "View → Playlist" or auto-shown when a multi-file drop populates the playlist (so first-time users see the result of their drop without hunting through menus). Wholesale-rebuild on Playlist.Changed.
-        playlistPanel = new Controls.PlaylistPanel(viewModel.Playlist, viewModel.PlayPlaylistItem);
+        playlistPanel = new Controls.PlaylistPanel(viewModel.Playlist, viewModel.PlayPlaylistItem, viewModel.InsertPlaylistPaths);
         playlistPanel.Widget.SetVisible(false);
 
         // PipController must exist before BuildMenuBar so the latter can wire the Add Stream / Delete Stream menu actions through it. Constructed before diagnosticOverlay so the latter's lambda can capture a non-null reference. Toolbar visibility is governed by IsPipEnabled, hidden by default.
