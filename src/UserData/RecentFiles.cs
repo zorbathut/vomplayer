@@ -38,7 +38,7 @@ public sealed class RecentFiles : IRecentFiles
         cmd.ExecuteNonQuery();
     }
 
-    // Internal (not on IRecentFiles): production's Recent menu reads SavedPlaylists since v4 — this query survives purely as the test-observation seam for Record/RecordPosition against real SQLite.
+    // Internal (not on IRecentFiles): the Recent menu reads SavedPlaylists since v4, so the remaining production reader is Program.cs's diagnostics launch banner (DiagnosticsLog.WriteLaunch), which records the most recent paths a session saw. Also the test-observation seam for Record/RecordPosition against real SQLite.
     internal IReadOnlyList<RecentFileEntry> GetMostRecent(int limit)
     {
         if (limit < 0)
@@ -76,16 +76,18 @@ public sealed class RecentFiles : IRecentFiles
             throw new ArgumentException("pathOrUri must be non-empty", nameof(pathOrUri));
         }
         using var cmd = connection.CreateCommand();
-        // UPDATE-only (no INSERT-or-UPSERT): the row is established by Record() at OpenFile time, and reaching this method without a prior Record() means the VM's invariants are broken. Synthesising a phantom recents row from the position side channel would mask that bug.
-        cmd.CommandText = "UPDATE recent_files SET position_seconds = $p WHERE path_or_uri = $u;";
+        // Upsert: a position can legitimately be the first thing we learn about a path. RestorePlaylist loads without calling Record() — a system-driven restore must not overwrite the user's last actual-play timestamp — so a playlist that was populated but never played (the multi-entry Open-URL branch does exactly that) reaches here with no row.
+        //
+        // A row minted here records no open, and both columns say so: open_count 0 leaves Record()'s increment to land the user's first real open on 1, and last_opened 0 sorts the row below every genuinely-opened file so it can't displace them in GetMostRecent's window. Record() overwrites the timestamp when a deliberate open does happen.
+        cmd.CommandText = """
+            INSERT INTO recent_files (path_or_uri, last_opened, open_count, position_seconds)
+            VALUES ($u, 0, 0, $p)
+            ON CONFLICT(path_or_uri) DO UPDATE SET
+              position_seconds = excluded.position_seconds;
+            """;
         cmd.Parameters.AddWithValue("$p", positionSeconds);
         cmd.Parameters.AddWithValue("$u", pathOrUri);
-        int rows = cmd.ExecuteNonQuery();
-        if (rows == 0)
-        {
-            // Per CLAUDE.md "silent error handling is banned" — report rather than swallow. Don't throw: this method is reachable from the dispatcher-driven PropertyChanged handler chain, where an exception would propagate out of the event handler and bring down the VM mid-tick.
-            Console.Error.WriteLine($"[vomplayer] recents: RecordPosition for '{pathOrUri}' affected 0 rows (file not in recents — VM invariant violation)");
-        }
+        cmd.ExecuteNonQuery();
     }
 
     public double? GetPosition(string pathOrUri)

@@ -349,14 +349,40 @@ public class RecentFilesTests
     }
 
     [Test]
-    public void RecordPositionForUnrecordedFileIsSilentNoOp()
+    public void RecordPositionCreatesTheRowForAnUnrecordedFile()
     {
-        // RecordPosition is reachable only via VM paths that always Record() first, so the file should already be in recents. If somehow it isn't, the UPDATE matches zero rows — don't synthesize a phantom recents row from the position side channel.
+        // A position can be the first thing we learn about a path: RestorePlaylist loads without Record() (a system-driven restore must not bump last_opened), so a playlist populated-but-never-played and then restored at startup reaches RecordPosition with no row.
         using var __db_rf = StateDatabase.Open(DbPath());
         var rf = new RecentFiles(__db_rf.Connection);
-        Assert.DoesNotThrow(() => rf.RecordPosition("/never-recorded.mp4", 50));
-        Assert.That(rf.GetPosition("/never-recorded.mp4"), Is.Null);
-        Assert.That(rf.GetMostRecent(10), Is.Empty);
+        rf.RecordPosition("https://example.com/v.mp4", 50);
+        Assert.That(rf.GetPosition("https://example.com/v.mp4"), Is.EqualTo(50));
+    }
+
+    [Test]
+    public void PositionOnlyRowDoesNotOutrankGenuinelyOpenedFiles()
+    {
+        // GetMostRecent feeds Program.cs's diagnostics launch banner, so a row minted by a position write — no deliberate open behind it — must not displace files the user actually opened.
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        rf.Record("/a.mp4");
+        rf.RecordPosition("https://example.com/v.mp4", 50);
+        var entries = rf.GetMostRecent(10);
+        Assert.That(entries, Has.Count.EqualTo(2));
+        Assert.That(entries[0].PathOrUri, Is.EqualTo("/a.mp4"));
+    }
+
+    [Test]
+    public void RecordAfterAPositionOnlyRowCountsAsTheFirstOpen()
+    {
+        // The position-only row carries open_count 0 — no deliberate open has happened yet — so the user's first real open lands on 1, as it would have without the position write.
+        using var __db_rf = StateDatabase.Open(DbPath());
+        var rf = new RecentFiles(__db_rf.Connection);
+        rf.RecordPosition("https://example.com/v.mp4", 50);
+        rf.Record("https://example.com/v.mp4");
+        var entries = rf.GetMostRecent(10);
+        Assert.That(entries, Has.Count.EqualTo(1));
+        Assert.That(entries[0].OpenCount, Is.EqualTo(1));
+        Assert.That(rf.GetPosition("https://example.com/v.mp4"), Is.EqualTo(50));
     }
 
     [Test]
