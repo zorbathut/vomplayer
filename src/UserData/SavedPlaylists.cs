@@ -159,7 +159,7 @@ public sealed class SavedPlaylists : ISavedPlaylists
     // Normalize a single playlist item for storage. Local paths are routed through Path.GetFullPath so cwd-relative invocations land on the same string as absolute ones; URIs (anything with a `scheme://` head) pass through unchanged. On GetFullPath failure (rare — invalid characters), the original string survives and the failure is logged; storing an unnormalized path is a soft regression for dedup, not a correctness bug, and mpv loads by raw string anyway.
     private static string CanonicalizeItem(string pathOrUri)
     {
-        if (!TrackPreferences.IsLocalFilesystemPath(pathOrUri))
+        if (string.IsNullOrEmpty(pathOrUri) || Util.UriShape.LooksLikeUri(pathOrUri))
         {
             return pathOrUri;
         }

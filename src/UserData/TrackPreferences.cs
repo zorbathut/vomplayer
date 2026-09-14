@@ -110,14 +110,4 @@ public sealed class TrackPreferences : ITrackPreferences
         // Path.GetDirectoryName returns "" for paths with no directory component (after GetFullPath, this is unusual but defensive — and an empty string would crash Record's IsNullOrEmpty check rather than be skipped silently). Treat as non-savable.
         return string.IsNullOrEmpty(dir) ? null : dir;
     }
-
-    // Inverse of the shared URI sniff (see Util.UriShape). Also used by the per-file resume-position layer in ViewModelMain, which has the same "is this a persistable local path" question.
-    public static bool IsLocalFilesystemPath(string? pathOrUri)
-    {
-        if (string.IsNullOrEmpty(pathOrUri))
-        {
-            return false;
-        }
-        return !Util.UriShape.LooksLikeUri(pathOrUri);
-    }
 }
