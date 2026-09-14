@@ -184,6 +184,18 @@ public static class DiagnosticsLog
         return $"load path={pathOrUri}\n  directory-key={directoryKey ?? "<none>"}\n  realpath-directory={realText}\n  preferences-saved-under: key={keyKnown} realpath={realKnown}";
     }
 
+    public static void Problem(PathProblem problem)
+    {
+        if (problem == null)
+        {
+            throw new ArgumentNullException(nameof(problem));
+        }
+        var hostText = problem.HostPath ?? $"<none: errno {problem.HostPathErrno}>";
+        var text = $"problem kind={problem.Kind} path={problem.Path} host-path={hostText} directory={problem.Directory ?? "<none>"}";
+        Console.Error.WriteLine($"[vompl] path: {text}");
+        Append($"--- {text}");
+    }
+
     public static string Stamp(DateTimeOffset when)
     {
         return when.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");

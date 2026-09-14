@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Vomplayer.Playback;
 using Vomplayer.Services;
 using Vomplayer.UserData;
+using Vomplayer.Util;
 using Vomplayer.ViewModels;
 using Vomplayer.Wayland;
 
@@ -1871,6 +1872,39 @@ public class VideoContextTests
         public Task<string> DownloadAsync(string url, IProgress<Vomplayer.Services.UrlDownloadProgress>? progress, CancellationToken ct)
         {
             throw new NotImplementedException();
+        }
+    }
+
+    // Document-portal path arrivals raise PathProblemDetected from the one load path every entry point funnels through; an ordinary local path stays quiet. XDG_RUNTIME_DIR is pointed at a temp dir so the portal root is under test control.
+    [Test]
+    public void OpeningADocumentPortalPathRaisesPathProblemDetected()
+    {
+        var saved = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+        var runtimeDir = Path.Combine(Path.GetTempPath(), "vompl-runtime-" + Guid.NewGuid().ToString("N"));
+        var docDir = Path.Combine(runtimeDir, "doc", "abc123");
+        Directory.CreateDirectory(docDir);
+        try
+        {
+            Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", runtimeDir);
+            var portalFile = Path.Combine(docDir, "movie.mkv");
+            File.WriteAllText(portalFile, "");
+            var ctx = NewContext(out var playback);
+            var problems = new List<PathProblem>();
+            ctx.PathProblemDetected += problems.Add;
+
+            ctx.OpenFile(portalFile);
+            Assert.That(problems, Has.Count.EqualTo(1));
+            Assert.That(problems[0].Kind, Is.EqualTo(PathProblemKind.DocumentPortal));
+            Assert.That(problems[0].Path, Is.EqualTo(portalFile));
+            Assert.That(playback.LoadedFiles, Is.EqualTo(new[] { portalFile }), "the portal path is still what gets played");
+
+            ctx.OpenFile(Path.Combine(runtimeDir, "ordinary.mkv"));
+            Assert.That(problems, Has.Count.EqualTo(1));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", saved);
+            Directory.Delete(runtimeDir, recursive: true);
         }
     }
 }

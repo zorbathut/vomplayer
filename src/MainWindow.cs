@@ -44,6 +44,12 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private readonly Gtk.Scale volumeScale;
     private readonly Gtk.Box controlsBox;
     private readonly Gtk.Box rootBox;
+    // Warning row for a file whose directory the sandbox can't use (document-portal export, unlistable folder). A layout row rather than a video overlay: it's an administrative notice, shown rarely, and must not change what clicks over the video do.
+    private readonly Gtk.Box pathNoticeRow;
+    private readonly Gtk.Label pathNoticeLabel;
+    private readonly PathProblemDedupe pathNoticeDedupe = new();
+    // Whether a notice is pending display; the row is hidden in fullscreen regardless and restored from this on the way back.
+    private bool pathNoticeActive;
     private readonly Gtk.Overlay videoOverlay;
     private readonly Gtk.Box noVideoBg;
     private readonly Gtk.PopoverMenuBar menuBar;
@@ -267,10 +273,33 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
 
         menuBar = BuildMenuBar(app);
 
+        // Styled by .vompl-path-notice: padding rather than margins, because margins would sit outside the row's opaque fill and show the transparent window (desktop / subsurface) through — see the controlsBox comment above.
+        pathNoticeRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
+        pathNoticeRow.AddCssClass("vompl-path-notice");
+        pathNoticeLabel = Gtk.Label.New(null);
+        pathNoticeLabel.SetWrap(true);
+        // Break inside the override command's long path token too; otherwise it sets the window's minimum width.
+        pathNoticeLabel.SetWrapMode(Pango.WrapMode.WordChar);
+        pathNoticeLabel.SetXalign(0);
+        pathNoticeLabel.SetHexpand(true);
+        // Selectable so the override command in the text can be copied out.
+        pathNoticeLabel.SetSelectable(true);
+        var pathNoticeDismiss = Gtk.Button.NewWithLabel("Dismiss");
+        pathNoticeDismiss.SetValign(Gtk.Align.Center);
+        pathNoticeDismiss.OnClicked += (_, _) =>
+        {
+            pathNoticeActive = false;
+            pathNoticeRow.SetVisible(false);
+        };
+        pathNoticeRow.Append(pathNoticeLabel);
+        pathNoticeRow.Append(pathNoticeDismiss);
+        pathNoticeRow.SetVisible(false);
+
         rootBox = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         rootBox.Append(menuBar);
         // Toolbar sits between menubar and video region in windowed mode (a solid layout row that displaces the video area, mirroring controlsBox in windowed mode). Reparented to videoOverlay in fullscreen.
         rootBox.Append(pipController.Toolbar);
+        rootBox.Append(pathNoticeRow);
         rootBox.Append(videoAndPlaylistRow);
         rootBox.Append(controlsBox);
         SetChild(rootBox);
@@ -308,6 +337,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         OnNotify += OnWindowNotify;
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        viewModel.PathProblemDetected += OnPathProblemDetected;
         playback.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
         OnCloseRequest += OnWindowCloseRequest;
 
@@ -564,7 +594,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
     private static void InstallVomplCss()
     {
         var provider = Gtk.CssProvider.New();
-        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-download-status { background-color: rgba(0,0,0,0.72); color: #f0f0f0; padding: 12px 14px; margin: 8px; border-radius: 8px; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; } .vompl-playlist-list row.vompl-drop-before { border-top: 2px solid rgb(53, 132, 228); } .vompl-playlist-list row.vompl-drop-after { border-bottom: 2px solid rgb(53, 132, 228); } .vompl-selected-video { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.9); } .vompl-stream-toolbar { padding: 4px 6px; }");
+        provider.LoadFromString("window.vompl-main-window { background: transparent; } .vompl-chrome { background-color: @theme_bg_color; } .vompl-controls-bar { padding: 6px; } .osd { padding: 6px; } .vompl-no-video-bg { background-color: black; } .vompl-diagnostic { background-color: rgba(0,0,0,0.55); color: #e0e0e0; padding: 8px 10px; margin: 8px; border-radius: 6px; font-family: monospace; font-size: 10pt; } .vompl-download-status { background-color: rgba(0,0,0,0.72); color: #f0f0f0; padding: 12px 14px; margin: 8px; border-radius: 8px; } .vompl-time-label { font-variant-numeric: tabular-nums; } .vompl-playlist-panel { border-left: 1px solid @borders; } .vompl-playlist-list row.vompl-playlist-current:not(:selected) { background-color: rgba(53, 132, 228, 0.25); } .vompl-playlist-list row.vompl-playlist-current label { font-weight: bold; } .vompl-playlist-list row.vompl-drop-before { border-top: 2px solid rgb(53, 132, 228); } .vompl-playlist-list row.vompl-drop-after { border-bottom: 2px solid rgb(53, 132, 228); } .vompl-selected-video { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.9); } .vompl-stream-toolbar { padding: 4px 6px; } .vompl-path-notice { background-color: #e8a317; color: #1a1a1a; padding: 6px 8px; }");
         Gtk.StyleContext.AddProviderForDisplay(Gdk.Display.GetDefault()!, provider, (uint)Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
@@ -841,6 +871,18 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         return ThemeModeParser.Parse(userConfig.Application.Theme, _ => { });
     }
 
+    // Shows the warning row once per affected directory per session. A later problem in a different directory replaces the text; every one is in the log regardless.
+    private void OnPathProblemDetected(PathProblem problem)
+    {
+        if (!pathNoticeDedupe.IsFirstFor(problem))
+        {
+            return;
+        }
+        pathNoticeLabel.SetText(PathNoticeText.Compose(problem, UserDataPaths.DiagnosticsLog));
+        pathNoticeActive = true;
+        pathNoticeRow.SetVisible(!isFullscreen);
+    }
+
     // Entry point for files arriving from outside the app — today, the GApplication OnOpen signal fired by a remote-instance forward. Targets Primary directly rather than going through viewModel.LoadPaths (which honors SelectedSlot/SingleTarget) because a CLI second-invocation has no concept of PiP slot selection; landing the file in Primary matches what a user typing `./vomplayer foo.mp4` expects regardless of the running instance's PiP state. Same code path as `HandlePrimaryDrop`, so resume positions, recents, and autosave behave identically. Replace semantics, not append.
     internal void LoadPathsExternal(IReadOnlyList<string> paths)
     {
@@ -896,6 +938,7 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         armPositionY = double.NaN;
         // Asymmetric with controlsBox, which reparents into videoOverlay as an OSD in fullscreen. Menu bars don't OSD well, so we just hide unconditionally; users can still use F11/f/Escape/double-click and the action accelerators (Ctrl+O, Ctrl+Q) while fullscreen.
         menuBar.SetVisible(!on);
+        pathNoticeRow.SetVisible(!on && pathNoticeActive);
         if (on)
         {
             // Snapshot the panel's pre-fullscreen visibility on entry only — re-entering fullscreen while already fullscreen would otherwise lose the original windowed-mode state.

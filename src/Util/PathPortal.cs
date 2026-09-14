@@ -1,7 +1,34 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Vomplayer.Util;
+
+public enum PathProblemKind
+{
+    // The path is inside the document portal's FUSE mount: a per-file directory the sandbox was handed because it can't see the file's real location. Playable, but "its directory" is meaningless.
+    DocumentPortal,
+    // An ordinary local path whose directory exists but can't be enumerated.
+    DirectoryUnlistable,
+}
+
+// One detected problem with a path the user asked to play. Path is the normalized absolute spelling (the playlist's own spelling is on the load line that precedes it in the log). For DocumentPortal, HostPath and Directory are the real location when the portal reports it (the FUSE file's host-path xattr) and HostPathErrno is why it didn't (ENODATA on a portal too old to set the xattr, ENOTSUP/EACCES when the read itself is refused); for DirectoryUnlistable, Directory is the unlistable directory itself.
+public sealed record PathProblem(string Path, PathProblemKind Kind, string? HostPath, int HostPathErrno, string? Directory);
+
+// "Have I seen this problem's directory before?" — one instance per consumer, so the warning row and the environment dump each fire once per directory and a run of double-clicks into the same hidden folder produces one of each. Problems without a known directory dedupe on the path itself.
+public sealed class PathProblemDedupe
+{
+    private readonly HashSet<string> seen = new(StringComparer.Ordinal);
+
+    public bool IsFirstFor(PathProblem problem)
+    {
+        if (problem == null)
+        {
+            throw new ArgumentNullException(nameof(problem));
+        }
+        return seen.Add(problem.Directory ?? problem.Path);
+    }
+}
 
 // Rules for recognising document-portal paths and for deciding whether a local path's directory is usable. Everything a flatpak's file forwarding, FileChooser portal, or OpenURI portal hands us for a file outside the sandbox's filesystem grants lands under Root as /run/user/<uid>/doc/<id>/<basename>; the flatpak runtime mounts the app-scoped doc/by-app/<app-id> view over that same root, so the id directory holds exactly one file.
 public static class PathPortal
@@ -50,5 +77,36 @@ public static class PathPortal
     public static string? ReadHostPath(string path, out int errno)
     {
         return LibC.GetXattr(path, HostPathXattr, out errno);
+    }
+
+    // Decides whether the directory side of a path is usable for sibling navigation and per-directory memory. `directoryKey` is what TrackPreferences.TryGetDirectoryKey resolved for the same path (null for URIs and portal paths). A portal path is always a problem — even without a host-path xattr, its directory is a one-file FUSE dir. A directory that doesn't exist at all is not reported here: the load itself fails loudly in that case.
+    public static PathProblem? Diagnose(string pathOrUri, string portalRoot, string? directoryKey)
+    {
+        var full = TryNormalize(pathOrUri);
+        if (full == null)
+        {
+            return null;
+        }
+        if (IsPortalPath(full, portalRoot))
+        {
+            var hostPath = ReadHostPath(full, out int errno);
+            return new PathProblem(full, PathProblemKind.DocumentPortal, hostPath, errno, hostPath == null ? null : Path.GetDirectoryName(hostPath));
+        }
+        if (directoryKey == null || !Directory.Exists(directoryKey))
+        {
+            return null;
+        }
+        try
+        {
+            using var entries = Directory.EnumerateFileSystemEntries(directoryKey).GetEnumerator();
+            entries.MoveNext();
+            return null;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+        {
+            // The exception is the finding, not something to hide: it becomes the reported problem, and the diagnostics dump records the message.
+            Console.Error.WriteLine($"[vompl] path: directory '{directoryKey}' exists but can't be listed: {ex.GetType().Name}: {ex.Message}");
+            return new PathProblem(full, PathProblemKind.DirectoryUnlistable, null, 0, directoryKey);
+        }
     }
 }

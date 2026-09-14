@@ -34,6 +34,9 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
 
     private static readonly bool LogHdr = Environment.GetEnvironmentVariable("VOMPL_LOG_HDR") == "1";
 
+    // Raised from LoadCurrentItem when the item's directory can't serve sibling navigation or per-directory memory (see PathPortal.Diagnose). The view turns it into the warning row; nothing about the load itself changes.
+    public event Action<PathProblem>? PathProblemDetected;
+
     // The IPlayback this context drives. Owned: VideoContext.Dispose disposes it. Callers (Program.cs for Primary, PipController for Secondary) construct the Playback and hand it over; once handed in, lifetime is the context's.
     private readonly IPlayback playback;
     private readonly IFilePicker filePicker;
@@ -484,10 +487,16 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
         // Resolve and cache the directory key NOW so Select* calls between LoadFile and the next load can reach it. URIs return null and disable persistence for this file.
         currentDirectoryKey = TrackPreferences.TryGetDirectoryKey(pathOrUri);
-        // Every entry route funnels through here, so this is where each load's directory resolution goes on record.
+        // This is the one chokepoint every entry route funnels through, so it's where a path with an unusable directory — a document-portal export, an unlistable folder — is recognised and reported. The item still plays as given.
         if (DiagnosticsLog.IsOpen)
         {
             DiagnosticsLog.Load(pathOrUri, currentDirectoryKey, trackPreferences.ListDirectories());
+        }
+        var pathProblem = PathPortal.Diagnose(pathOrUri, PathPortal.Root, currentDirectoryKey);
+        if (pathProblem != null)
+        {
+            DiagnosticsLog.Problem(pathProblem);
+            PathProblemDetected?.Invoke(pathProblem);
         }
         CurrentFilePath = pathOrUri;
         currentFileLoaded = false;

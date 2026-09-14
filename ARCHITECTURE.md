@@ -86,7 +86,8 @@ src/
     ScaleHelpers.cs         # Gtk.Scale gesture tweaks (long-press removal)
     PlaylistFile.cs         # pure: newline-delimited playlist parse/serialize
     UriShape.cs             # pure: the one URI-vs-local-path sniffer + file: URI → local path conversion shared by argv and drops
-    PathPortal.cs           # document-portal path rules: portal root, portal-shaped test, host-path xattr
+    PathPortal.cs           # document-portal path rules: portal root, portal-shaped test, host-path xattr, PathProblem diagnosis of a load's directory
+    PathNoticeText.cs       # pure: warning-row copy for a PathProblem + per-session dedupe
     DiagnosticsLog.cs       # append-only diagnostics.log sink + the cheap always-on lines: launch banner, raw arrivals, per-load directory-key lines, problem lines
     GtkDialogError.cs       # GException → "user dismissed the dialog?" via GError domain/code
     PlaylistMenuSelector.cs # pure: Recent menu's "10 entries with directory coverage" selection rule
