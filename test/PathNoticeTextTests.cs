@@ -31,6 +31,14 @@ public class PathNoticeTextTests
         Assert.That(portalUnknown, Is.Not.EqualTo(unlistable));
         Assert.That(portalUnknown, Does.Not.Contain("--filesystem="), "no directory to suggest granting");
         Assert.That(unlistable, Does.Contain("/media"));
+        var mismatched = PathNoticeText.Compose(new PathProblem("/run/user/1000/doc/abc/x.mkv", PathProblemKind.DocumentPortalOriginRejected, "/var/mnt/ext/x.mkv", 0, "/var/mnt/ext"), Log);
+        Assert.That(mismatched, Is.Not.Empty);
+        Assert.That(mismatched, Is.Not.EqualTo(portalKnown));
+        Assert.That(mismatched, Is.Not.EqualTo(portalUnknown));
+        Assert.That(mismatched, Is.Not.EqualTo(unlistable));
+        Assert.That(mismatched, Does.Not.Contain("--filesystem="), "the folder is visible, so granting it is not the fix");
+        Assert.That(mismatched, Does.Contain("/var/mnt/ext"));
+        Assert.That(mismatched, Does.Contain(Log));
     }
 
     [Test]

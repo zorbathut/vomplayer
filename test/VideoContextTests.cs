@@ -2108,6 +2108,53 @@ public class VideoContextTests
         }
     }
 
+    // A portal path whose origin is reachable and identical is replaced by the origin before it enters the playlist, on every route in: replace-load, restore, and panel insert. XDG_RUNTIME_DIR points at a temp root; the fake portal file carries the real host-path xattr.
+    private sealed class PortalFixture : IDisposable
+    {
+        public string RuntimeDir { get; }
+        public string Host { get; }
+        public string Portal { get; }
+        private readonly string? savedRuntimeDir;
+
+        public PortalFixture()
+        {
+            savedRuntimeDir = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+            RuntimeDir = Path.Combine(Path.GetTempPath(), "vompl-runtime-" + Guid.NewGuid().ToString("N"));
+            var hostDir = Path.Combine(RuntimeDir, "videos");
+            Directory.CreateDirectory(hostDir);
+            Host = Path.Combine(hostDir, "movie.mkv");
+            File.WriteAllText(Host, "video");
+            var portalDir = Path.Combine(RuntimeDir, "doc", "abc123");
+            Directory.CreateDirectory(portalDir);
+            Portal = Path.Combine(portalDir, "movie.mkv");
+            File.WriteAllText(Portal, "video");
+            File.SetLastWriteTimeUtc(Portal, File.GetLastWriteTimeUtc(Host));
+            // The xattr comes first: an Ignore thrown from here must not leave the environment pointing at a stray tree.
+            XattrSupport.SetUserXattrOrIgnore(Portal, PathPortal.HostPathXattr, Host);
+            Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", RuntimeDir);
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", savedRuntimeDir);
+            Directory.Delete(RuntimeDir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void ARejectedPortalOriginStaysAPortalPathAndRaisesTheOriginRejectedProblem()
+    {
+        using var fx = new PortalFixture();
+        File.AppendAllText(fx.Host, "changed");
+        using var ctx = NewContext(out var playback);
+        var problems = new List<PathProblem>();
+        ctx.PathProblemDetected += problems.Add;
+        ctx.OpenFile(fx.Portal);
+        Assert.That(playback.LoadedFiles, Is.EqualTo(new[] { fx.Portal }));
+        Assert.That(problems, Has.Count.EqualTo(1));
+        Assert.That(problems[0].Kind, Is.EqualTo(PathProblemKind.DocumentPortalOriginRejected));
+    }
+
     [Test]
     public void InsertPathsInsertsAtTheGivenIndexWithoutStartingPlayback()
     {

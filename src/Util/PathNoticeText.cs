@@ -25,6 +25,9 @@ public static class PathNoticeText
                     sb.Append("This file came through the document portal (the sandbox can't see its real folder) and the portal didn't report where it lives. Next/previous and per-folder memory won't work for it.");
                 }
                 break;
+            case PathProblemKind.DocumentPortalOriginRejected:
+                sb.Append($"This file came through the document portal, and although its folder {problem.Directory} is visible here, the file there isn't the one handed over (or isn't there), so the portal's own path is what's playing. Next/previous and per-folder memory won't work for it.");
+                break;
             case PathProblemKind.DirectoryUnlistable:
                 sb.Append($"The folder {problem.Directory} can't be listed, so next/previous and per-folder memory won't work for it.");
                 break;

@@ -102,10 +102,6 @@ public partial class LibCTests
     }
 
     private const int ENODATA = 61;
-    private const int ENOTSUP = 95;
-
-    [LibraryImport("libc.so.6", EntryPoint = "setxattr", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
-    private static partial int SetXattr(string path, string name, byte[] value, nuint size, int flags);
 
     [Test]
     public void GetXattrRoundTripsAUserAttributeAndReturnsNullWhenAbsent()
@@ -116,16 +112,7 @@ public partial class LibCTests
         {
             var file = System.IO.Path.Combine(dir, "f");
             System.IO.File.WriteAllText(file, "");
-            var value = System.Text.Encoding.UTF8.GetBytes("/host/dir/café.mkv");
-            if (SetXattr(file, "user.vompl-test", value, (nuint)value.Length, 0) != 0)
-            {
-                int setErrno = Marshal.GetLastPInvokeError();
-                if (setErrno == ENOTSUP)
-                {
-                    Assert.Ignore("temp filesystem does not support user xattrs");
-                }
-                Assert.Fail($"setxattr failed with errno {setErrno}");
-            }
+            XattrSupport.SetUserXattrOrIgnore(file, "user.vompl-test", "/host/dir/café.mkv");
             Assert.That(Vomplayer.LibC.GetXattr(file, "user.vompl-test", out int errno), Is.EqualTo("/host/dir/café.mkv"));
             Assert.That(errno, Is.Zero);
             Assert.That(Vomplayer.LibC.GetXattr(file, "user.vompl-absent", out errno), Is.Null);

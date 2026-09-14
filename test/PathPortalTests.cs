@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Vomplayer.Util;
 
 namespace Vomplayer.Tests;
@@ -130,5 +132,45 @@ public class PathPortalTests
         Assert.That(problem, Is.Not.Null);
         Assert.That(problem!.Kind, Is.EqualTo(PathProblemKind.DirectoryUnlistable));
         Assert.That(problem.Directory, Is.EqualTo(dir));
+    }
+
+    // Builds an origin file plus a fake one-file "portal" directory holding a byte-identical copy with the same mtime; the caller decides whether to stamp the host-path xattr on the portal copy.
+    private (string root, string host, string portal) MakePortalPair(string content = "video", string hostName = "movie.mkv")
+    {
+        var root = Path.Combine(tempDir, "doc");
+        var hostDir = Path.Combine(tempDir, "videos");
+        Directory.CreateDirectory(hostDir);
+        var host = Path.Combine(hostDir, hostName);
+        File.WriteAllText(host, content);
+        var portalDir = Path.Combine(root, "abc123");
+        Directory.CreateDirectory(portalDir);
+        var portal = Path.Combine(portalDir, hostName);
+        File.WriteAllText(portal, content);
+        var stamp = new DateTime(2024, 5, 14, 21, 59, 23, DateTimeKind.Utc).AddTicks(430787);
+        File.SetLastWriteTimeUtc(host, stamp);
+        File.SetLastWriteTimeUtc(portal, stamp);
+        return (root, host, portal);
+    }
+
+    // A portal path whose origin directory the sandbox can see, but whose file was rejected, is reported as its own kind: the "grant the folder" advice would be wrong there. The origin in the problem is the normalized spelling even when the xattr carries a NUL terminator.
+    [Test]
+    public void DiagnoseReportsOriginRejectedWhenTheOriginDirectoryIsReachable()
+    {
+        var (root, host, portal) = MakePortalPair();
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, host);
+        File.AppendAllText(host, "different");
+        var problem = PathPortal.Diagnose(portal, root, directoryKey: null);
+        Assert.That(problem, Is.Not.Null);
+        Assert.That(problem!.Kind, Is.EqualTo(PathProblemKind.DocumentPortalOriginRejected));
+        Assert.That(problem.Directory, Is.EqualTo(Path.GetDirectoryName(host)));
+        Assert.That(problem.HostPath, Is.EqualTo(host));
+
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, Path.Combine(tempDir, "nowhere", "movie.mkv"));
+        var unreachable = PathPortal.Diagnose(portal, root, directoryKey: null);
+        Assert.That(unreachable!.Kind, Is.EqualTo(PathProblemKind.DocumentPortal));
+
+        XattrSupport.SetUserXattrOrIgnore(portal, PathPortal.HostPathXattr, host + "\0");
+        var nulTerminated = PathPortal.Diagnose(portal, root, directoryKey: null);
+        Assert.That(nulTerminated!.HostPath, Is.EqualTo(host));
     }
 }

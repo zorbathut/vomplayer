@@ -8,11 +8,13 @@ public enum PathProblemKind
 {
     // The path is inside the document portal's FUSE mount: a per-file directory the sandbox was handed because it can't see the file's real location. Playable, but "its directory" is meaningless.
     DocumentPortal,
+    // A portal path whose origin directory the sandbox can see, but whose origin file was rejected (missing, a directory, or not the same file). Granting the folder would change nothing here. Directory is always set for this kind.
+    DocumentPortalOriginRejected,
     // An ordinary local path whose directory exists but can't be enumerated.
     DirectoryUnlistable,
 }
 
-// One detected problem with a path the user asked to play. Path is the normalized absolute spelling (the playlist's own spelling is on the load line that precedes it in the log). For DocumentPortal, HostPath and Directory are the real location when the portal reports it (the FUSE file's host-path xattr) and HostPathErrno is why it didn't (ENODATA on a portal too old to set the xattr, ENOTSUP/EACCES when the read itself is refused); for DirectoryUnlistable, Directory is the unlistable directory itself.
+// One detected problem with a path the user asked to play. Path is the normalized absolute spelling (the playlist's own spelling is on the load line that precedes it in the log). For the two portal kinds, HostPath and Directory are the origin the portal reports (the FUSE file's host-path xattr) — a portal problem with a non-null HostPath means the origin was seen and declined, not merely reported — and HostPathErrno is why the xattr couldn't be read when it wasn't (ENODATA on a portal too old to set it, ENOTSUP/EACCES when the read is refused); for DirectoryUnlistable, Directory is the unlistable directory itself.
 public sealed record PathProblem(string Path, PathProblemKind Kind, string? HostPath, int HostPathErrno, string? Directory);
 
 // "Have I seen this problem's directory before?" — the warning row's once-per-directory-per-session gate, so a run of double-clicks into the same hidden folder produces one notice. Problems without a known directory dedupe on the path itself.
@@ -73,10 +75,26 @@ public static class PathPortal
         return path.Length > portalRoot.Length + 1 && path.StartsWith(portalRoot + "/", StringComparison.Ordinal);
     }
 
-    // The real host location of a portal file, from the xattr the portal's FUSE layer exposes; null with the errno when it isn't there or can't be read.
+    // The real host location of a portal file, from the xattr the portal's FUSE layer exposes; null with the errno when it isn't there or can't be read. Raw: see TryReadOrigin for the usable form.
     public static string? ReadHostPath(string path, out int errno)
     {
         return LibC.GetXattr(path, HostPathXattr, out errno);
+    }
+
+    // The origin as a normalized local path, or null when the portal reports none (errno says why) or reports something unusable. The xattr is a C string, so a NUL terminator that made it into the value is dropped before normalizing; every consumer of the origin — resolution, diagnosis, the environment dump's probes — goes through here so none of them ever sees the raw bytes.
+    public static string? TryReadOrigin(string portalPath, out int errno)
+    {
+        var raw = ReadHostPath(portalPath, out errno);
+        if (raw == null)
+        {
+            return null;
+        }
+        var origin = TryNormalize(raw.TrimEnd('\0'));
+        if (origin == null)
+        {
+            Console.Error.WriteLine($"[vompl] path: portal origin unusable for '{portalPath}': '{raw}'");
+        }
+        return origin;
     }
 
     // Can the directory be enumerated? False, quietly, for one that isn't there at all; false with a stderr report for one that exists but refuses listing — the refusal is a finding.
@@ -109,8 +127,11 @@ public static class PathPortal
         }
         if (IsPortalPath(full, portalRoot))
         {
-            var hostPath = ReadHostPath(full, out int errno);
-            return new PathProblem(full, PathProblemKind.DocumentPortal, hostPath, errno, hostPath == null ? null : Path.GetDirectoryName(hostPath));
+            var origin = TryReadOrigin(full, out int errno);
+            var originDir = origin == null ? null : Path.GetDirectoryName(origin);
+            // A portal path still here at load time means the origin was rejected; when its directory is nonetheless reachable, the problem is the file, not the sandbox's view of the folder.
+            var kind = originDir != null && DirectoryListable(originDir) ? PathProblemKind.DocumentPortalOriginRejected : PathProblemKind.DocumentPortal;
+            return new PathProblem(full, kind, origin, errno, originDir);
         }
         if (directoryKey == null || !Directory.Exists(directoryKey) || DirectoryListable(directoryKey))
         {
