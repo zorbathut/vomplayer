@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using Vomplayer.UserData;
+using Vomplayer.Util;
 
 namespace Vomplayer.ViewModels;
 
@@ -269,7 +270,7 @@ public sealed class PlaylistAutosave
             string path = ctx.Playlist.Items[ctx.Playlist.CurrentIndex];
             try
             {
-                if (path.Contains("://"))
+                if (UriShape.LooksLikeUri(path))
                 {
                     return path;
                 }

@@ -199,7 +199,7 @@ public sealed class PlaylistPanel : IDisposable
     private void ShowRowMenu(int index, double x, double y)
     {
         string item = playlist.Items[index];
-        bool isUrl = item.Contains("://");
+        bool isUrl = UriShape.LooksLikeUri(item);
 
         var box = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         box.AddCssClass("vompl-playlist-menu");
@@ -515,7 +515,7 @@ public sealed class PlaylistPanel : IDisposable
     // Local paths render as basename — tiny rows look nicer with just the filename. URIs render in full because their basename is rarely meaningful (e.g. a streaming URL's path component is often a hash).
     private static string GetDisplayName(string pathOrUri)
     {
-        if (pathOrUri.Contains("://"))
+        if (UriShape.LooksLikeUri(pathOrUri))
         {
             return pathOrUri;
         }
