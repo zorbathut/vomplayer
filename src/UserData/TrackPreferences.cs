@@ -82,23 +82,19 @@ public sealed class TrackPreferences : ITrackPreferences
     // Resolves the directory key used as the row's identity from a path-or-URI. Returns null for any input that doesn't have a meaningful local-filesystem directory: empty strings, URI schemes other than file (http/https/smb/...), paths with no parent (a bare filename like "foo.mp4" with no leading directory), and paths that fail GetFullPath/GetDirectoryName for any reason. Returning null means "don't save and don't look up" — non-local sources just don't participate in the per-directory preference system.
     public static string? TryGetDirectoryKey(string? pathOrUri)
     {
-        if (!IsLocalFilesystemPath(pathOrUri))
+        var full = Util.PathPortal.TryNormalize(pathOrUri ?? "");
+        if (full == null)
         {
             return null;
         }
-        try
+        // A document-portal path lives in a per-file FUSE directory that exists only for this export; keying preferences on it would persist junk that never matches again.
+        if (Util.PathPortal.IsPortalPath(full, Util.PathPortal.Root))
         {
-            var full = Path.GetFullPath(pathOrUri!);
-            var dir = Path.GetDirectoryName(full);
-            // Path.GetDirectoryName returns "" for paths with no directory component (after GetFullPath, this is unusual but defensive — and an empty string would crash Record's IsNullOrEmpty check rather than be skipped silently). Treat as non-savable.
-            return string.IsNullOrEmpty(dir) ? null : dir;
-        }
-        catch (Exception ex)
-        {
-            // Path.GetFullPath throws on invalid characters in some platforms; treat as non-savable rather than crashing the menu action that triggered the call. Logged per the never-swallow policy so a real bug producing a stream of these isn't invisible.
-            Console.Error.WriteLine($"[vompl] track-prefs: GetFullPath('{pathOrUri}') failed: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
+        var dir = Path.GetDirectoryName(full);
+        // Path.GetDirectoryName returns "" for paths with no directory component (after GetFullPath, this is unusual but defensive — and an empty string would crash Record's IsNullOrEmpty check rather than be skipped silently). Treat as non-savable.
+        return string.IsNullOrEmpty(dir) ? null : dir;
     }
 
     // Inverse of the shared URI sniff (see Util.UriShape). Also used by the per-file resume-position layer in ViewModelMain, which has the same "is this a persistable local path" question.

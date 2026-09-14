@@ -85,4 +85,70 @@ internal static partial class LibC
             written += (nuint)n;
         }
     }
+
+    private const int ENODATA = 61;
+    private const int ENOTSUP = 95;
+
+    // `value` is an out-buffer the kernel writes into; the generated marshalling pins the span for the call, and a size of 0 turns the call into a length query.
+    [LibraryImport("libc.so.6", EntryPoint = "getxattr", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
+    private static partial nint GetXattrRaw(string path, string name, Span<byte> value, nuint size);
+
+    // Reads one extended attribute as UTF-8 text. Null with the errno when it can't be read: ENODATA (not set) and ENOTSUP (filesystem has no xattrs) are ordinary answers; anything else is a real failure and is also reported to stderr, so the caller can carry on without the value but the failure isn't invisible.
+    public static string? GetXattr(string path, string name, out int errno)
+    {
+        nint size = GetXattrRaw(path, name, Span<byte>.Empty, 0);
+        if (size < 0)
+        {
+            errno = ReportXattrFailure(path, name);
+            return null;
+        }
+        var buffer = new byte[size];
+        nint got = GetXattrRaw(path, name, buffer, (nuint)buffer.Length);
+        if (got < 0)
+        {
+            errno = ReportXattrFailure(path, name);
+            return null;
+        }
+        errno = 0;
+        return System.Text.Encoding.UTF8.GetString(buffer, 0, (int)got);
+    }
+
+    private static int ReportXattrFailure(string path, string name)
+    {
+        int errno = Marshal.GetLastPInvokeError();
+        if (errno != ENODATA && errno != ENOTSUP)
+        {
+            Console.Error.WriteLine($"[vompl] getxattr({path}, {name}) failed: errno {errno}");
+        }
+        return errno;
+    }
+
+    [LibraryImport("libc.so.6", EntryPoint = "realpath", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
+    private static partial IntPtr RealPathRaw(string path, IntPtr resolved);
+
+    [LibraryImport("libc.so.6", EntryPoint = "free")]
+    private static partial void Free(IntPtr ptr);
+
+    // Canonical absolute path with every symlink resolved (realpath(3)), or null with the errno when any component can't be resolved. Path.GetFullPath only normalizes syntax; this is the one that answers "which directory is this really".
+    public static string? RealPath(string path, out int errno)
+    {
+        IntPtr resolved = RealPathRaw(path, IntPtr.Zero);
+        if (resolved == IntPtr.Zero)
+        {
+            errno = Marshal.GetLastPInvokeError();
+            return null;
+        }
+        try
+        {
+            errno = 0;
+            return Marshal.PtrToStringUTF8(resolved);
+        }
+        finally
+        {
+            Free(resolved);
+        }
+    }
+
+    [LibraryImport("libc.so.6", EntryPoint = "getuid")]
+    public static partial uint GetUid();
 }

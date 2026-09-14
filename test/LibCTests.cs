@@ -100,4 +100,65 @@ public partial class LibCTests
         Close(fds[1]);
         Close(fds[0]);
     }
+
+    private const int ENODATA = 61;
+    private const int ENOTSUP = 95;
+
+    [LibraryImport("libc.so.6", EntryPoint = "setxattr", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
+    private static partial int SetXattr(string path, string name, byte[] value, nuint size, int flags);
+
+    [Test]
+    public void GetXattrRoundTripsAUserAttributeAndReturnsNullWhenAbsent()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vompl-xattr-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            var file = System.IO.Path.Combine(dir, "f");
+            System.IO.File.WriteAllText(file, "");
+            var value = System.Text.Encoding.UTF8.GetBytes("/host/dir/café.mkv");
+            if (SetXattr(file, "user.vompl-test", value, (nuint)value.Length, 0) != 0)
+            {
+                int setErrno = Marshal.GetLastPInvokeError();
+                if (setErrno == ENOTSUP)
+                {
+                    Assert.Ignore("temp filesystem does not support user xattrs");
+                }
+                Assert.Fail($"setxattr failed with errno {setErrno}");
+            }
+            Assert.That(Vomplayer.LibC.GetXattr(file, "user.vompl-test", out int errno), Is.EqualTo("/host/dir/café.mkv"));
+            Assert.That(errno, Is.Zero);
+            Assert.That(Vomplayer.LibC.GetXattr(file, "user.vompl-absent", out errno), Is.Null);
+            Assert.That(errno, Is.EqualTo(ENODATA));
+        }
+        finally
+        {
+            System.IO.Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
+    public void RealPathResolvesASymlinkChainAndReportsErrnoForMissingPaths()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vompl-realpath-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(System.IO.Path.Combine(dir, "real"));
+        try
+        {
+            var target = System.IO.Path.Combine(dir, "real", "f.mkv");
+            System.IO.File.WriteAllText(target, "");
+            System.IO.File.CreateSymbolicLink(System.IO.Path.Combine(dir, "link1"), System.IO.Path.Combine(dir, "real"));
+            System.IO.File.CreateSymbolicLink(System.IO.Path.Combine(dir, "link2"), System.IO.Path.Combine(dir, "link1"));
+            var resolved = Vomplayer.LibC.RealPath(System.IO.Path.Combine(dir, "link2", "f.mkv"), out int errno);
+            Assert.That(errno, Is.Zero);
+            Assert.That(resolved, Is.EqualTo(Vomplayer.LibC.RealPath(target, out _)));
+            Assert.That(resolved, Does.EndWith("/real/f.mkv"));
+
+            Assert.That(Vomplayer.LibC.RealPath(System.IO.Path.Combine(dir, "missing"), out errno), Is.Null);
+            Assert.That(errno, Is.Not.Zero);
+        }
+        finally
+        {
+            System.IO.Directory.Delete(dir, recursive: true);
+        }
+    }
 }

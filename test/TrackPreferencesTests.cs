@@ -226,4 +226,23 @@ public class TrackPreferencesTests
         var key = TrackPreferences.TryGetDirectoryKey("./relative.mkv");
         Assert.That(key, Is.EqualTo(Path.GetFullPath(".").TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
     }
+
+    [Test]
+    public void TryGetDirectoryKeyIsNullForDocumentPortalPaths()
+    {
+        var saved = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+        try
+        {
+            Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", tempDir);
+            var portalFile = Path.Combine(tempDir!, "doc", "abc123", "movie.mkv");
+            Assert.That(TrackPreferences.TryGetDirectoryKey(portalFile), Is.Null);
+            // A sibling of the portal root is an ordinary directory and keeps its key.
+            var ordinary = Path.Combine(tempDir!, "videos", "movie.mkv");
+            Assert.That(TrackPreferences.TryGetDirectoryKey(ordinary), Is.EqualTo(Path.Combine(tempDir!, "videos")));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", saved);
+        }
+    }
 }

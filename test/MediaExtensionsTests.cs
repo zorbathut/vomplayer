@@ -248,4 +248,24 @@ public class MediaExtensionsTests
             Directory.Delete(dir, recursive: true);
         }
     }
+
+    [Test]
+    public void FindDirectoryNeighborOverAOneFileDirectoryReturnsNullBothWays()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-neighbor-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var only = Path.Combine(dir, "only.mp4");
+            File.WriteAllText(only, "");
+            var errors = new List<string>();
+            Assert.That(MediaExtensions.FindDirectoryNeighbor(dir, only, +1, errors.Add), Is.Null);
+            Assert.That(MediaExtensions.FindDirectoryNeighbor(dir, only, -1, errors.Add), Is.Null);
+            Assert.That(errors, Is.Empty);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }
