@@ -38,7 +38,7 @@ public static class Program
         var userConfig = UserConfig.LoadOrDefault(configPath);
 
         var flags = StartupHelpers.ComputeAppFlags(userConfig.Application.OpenInNewWindow);
-        var app = Gtk.Application.New("io.github.zorbathut.vomplayer", flags);
+        var app = Gtk.Application.New(AppIdentity.FlatpakId, flags);
 
         // Build the argv we feed into Run(). g_application_run expects argv[0] to be the program name and consumes it; .NET Main's `args` already had argv[0] stripped, so we prepend a placeholder. The forwarded-to-primary path will see this same argv minus argv[0] in OnCommandLine.
         var runArgs = new string[args.Length + 1];

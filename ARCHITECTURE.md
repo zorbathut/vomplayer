@@ -18,6 +18,7 @@ App code is MIT. libmpv is LGPLv2.1+ (dynamic linking keeps us permissive). This
 src/
   Program.cs             # entry, arg parsing, Gtk.Application wiring, primary Playback construction, StateDatabase open
   StartupHelpers.cs      # pure: GApplication flag computation + command-line path/URI resolution
+  AppIdentity.cs         # the flatpak application id constant
   GLibLogDiag.cs         # g_log_set_writer_func + g_set_printerr_handler — adds C# stack traces to GLib ERROR/CRITICAL and g_assert aborts
   Epoxy.cs               # eglGetProcAddress + glGetIntegerv for FBO binding
   LibC.cs                # setlocale(LC_NUMERIC,"C") — mpv refuses non-C LC_NUMERIC; raw write(2)-to-stderr helpers for crash-path diagnostics
