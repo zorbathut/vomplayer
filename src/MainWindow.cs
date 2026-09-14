@@ -337,6 +337,8 @@ public sealed partial class MainWindow : Gtk.ApplicationWindow, IPipHost
         OnNotify += OnWindowNotify;
 
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        // The environment dump is wired here rather than inside the VM so the VM stays free of process-spawning globals; it dedupes per directory on its own.
+        viewModel.PathProblemDetected += DiagnosticsEnvironment.Dump;
         viewModel.PathProblemDetected += OnPathProblemDetected;
         playback.PropertyChanged += OnPlaybackPropertyChangedForScreensaver;
         OnCloseRequest += OnWindowCloseRequest;

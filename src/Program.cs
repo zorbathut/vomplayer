@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using Vomplayer.Services;
 using Vomplayer.UserData;
 using Vomplayer.Util;
 
@@ -84,6 +85,10 @@ public static class Program
         // Path diagnostics: opened as soon as the state dir is known so the launch banner and every arrival below are on record (see DiagnosticsLog).
         DiagnosticsLog.Open(UserDataPaths.DiagnosticsLog);
         DiagnosticsLog.WriteLaunch(recentFiles.GetMostRecent(DiagnosticsLog.LaunchRecentsCount).Select(e => e.PathOrUri).ToList(), trackPreferences.ListDirectories());
+        if (DiagnosticsEnvironment.DumpEveryLaunch)
+        {
+            DiagnosticsEnvironment.Dump(null);
+        }
 
         // Captured by OnCommandLine so the first-launch handler builds the window and subsequent remote-forwards reuse it. Today there's at most one window per process; if multi-window ever lands, both branches still apply.
         MainWindow? window = null;

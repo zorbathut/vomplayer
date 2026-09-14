@@ -60,7 +60,8 @@ src/
     UrlLoadCoordinator.cs               # per-VideoContext yt-dlp lifecycle: prompt/probe flow + race-guarded probe-then-route loads
     UrlDownloadCache.cs                 # XDG-cache-dir-rooted, mtime-based stale sweep
     FlatpakDetect.cs                    # sandbox sniff
-    HostCommand.cs                      # the one place that knows how to reach the host (flatpak-spawn --host --watch-bus when sandboxed; shared by every caller that shells out to the host)
+    HostCommand.cs                      # the one place that knows how to reach the host (flatpak-spawn --host --watch-bus when sandboxed; shared by yt-dlp and the diagnostics probes) + a one-shot runner that renders stdout/stderr/exit/timeout as text
+    DiagnosticsEnvironment.cs           # edge-triggered environment dump into diagnostics.log: sandbox portal-root/mount view, visibility ladder for the real path, host probes
 
   UserData/
     UserDataPaths.cs       # XDG-aware paths; VOMPL_CONFIG_DIR / VOMPL_STATE_DIR overrides for tests / portable installs
@@ -195,7 +196,7 @@ Keyboard input goes through a window-level capture-phase `Gtk.EventControllerKey
 ## Persistence
 
 - **`config.toml`** (TOML, Tomlyn-backed). `[hotkeys]` (a plain action → trigger-strings table; HotkeyMap owns schema and defaults), `[application]` (open_in_new_window, theme, chapter_seek_preroll_seconds), and `[yt_dlp]` (cookies_from_browser). Loaded eagerly at startup; saved on preferences edits.
-- **`diagnostics.log`** (plain text, append-only; rotated to `.1` at the next launch once past 4 MiB, so one launch's sections are never split). Written by `Util/DiagnosticsLog`: a banner per launch (`/.flatpak-info`, key env vars, recent paths, remembered directories), one block per raw external arrival (argv, drop payload, picker result), one per file load (path → directory key → realpath spelling → whether preferences exist under either). It is the artifact to ask a user for when files "arrive wrong".
+- **`diagnostics.log`** (plain text, append-only; rotated to `.1` at the next launch once past 4 MiB, so one launch's sections are never split). Written by `Util/DiagnosticsLog`: a banner per launch (`/.flatpak-info`, key env vars, recent paths, remembered directories), one block per raw external arrival (argv, drop payload, picker result), one per file load (path → directory key → realpath spelling → whether preferences exist under either), and — only when a load hits a `PathProblem` (document-portal export, unlistable directory) or `VOMPL_LOG_PATHS=1` — an environment dump with host-side probes via `flatpak-spawn --host`. It is the artifact to ask a user for when files "arrive wrong".
 - **`state.db`** (SQLite, `Microsoft.Data.Sqlite`, WAL). Owned by `StateDatabase`; per-feature persistence classes (`RecentFiles`, `TrackPreferences`, `SavedPlaylists`) take the `SqliteConnection` in their ctor. Append-only `Migrations[]` registry walked against `PRAGMA user_version`. Schema today:
   - v1: `recent_files(path_or_uri UNIQUE, last_opened, open_count)`
   - v2: `track_preferences(directory, kind, …)` PK `(directory, kind)`
