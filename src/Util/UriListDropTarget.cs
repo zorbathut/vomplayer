@@ -87,6 +87,7 @@ public static class UriListDropTarget
                             ms.Write(buffer, 0, (int)n);
                         }
                         var text = Encoding.UTF8.GetString(ms.ToArray());
+                        DiagnosticsLog.Arrival("drop", text);
                         paths = ParseAndConvert(text);
                     }
                     catch (Exception ex)

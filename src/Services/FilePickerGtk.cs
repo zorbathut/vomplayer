@@ -59,7 +59,12 @@ public sealed class FilePickerGtk : IFilePicker
         try
         {
             var file = await dialog.OpenAsync(parent);
-            return file?.GetPath();
+            var path = file?.GetPath();
+            if (path != null)
+            {
+                DiagnosticsLog.Arrival("picker", path);
+            }
+            return path;
         }
         catch (GLib.GException ex) when (Util.GtkDialogError.IsDismissed(ex))
         {

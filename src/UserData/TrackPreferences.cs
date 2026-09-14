@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Microsoft.Data.Sqlite;
 
@@ -77,6 +78,19 @@ public sealed class TrackPreferences : ITrackPreferences
             External: reader.GetInt64(3) != 0,
             ExternalFilename: reader.IsDBNull(4) ? null : reader.GetString(4),
             IndexInKind: reader.IsDBNull(5) ? (int?)null : (int)reader.GetInt64(5));
+    }
+
+    public IReadOnlyList<string> ListDirectories()
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT DISTINCT directory FROM track_preferences ORDER BY directory;";
+        using var reader = cmd.ExecuteReader();
+        var result = new List<string>();
+        while (reader.Read())
+        {
+            result.Add(reader.GetString(0));
+        }
+        return result;
     }
 
     // Resolves the directory key used as the row's identity from a path-or-URI. Returns null for any input that doesn't have a meaningful local-filesystem directory: empty strings, URI schemes other than file (http/https/smb/...), paths with no parent (a bare filename like "foo.mp4" with no leading directory), and paths that fail GetFullPath/GetDirectoryName for any reason. Returning null means "don't save and don't look up" — non-local sources just don't participate in the per-directory preference system.

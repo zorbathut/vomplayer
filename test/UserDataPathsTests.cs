@@ -63,4 +63,12 @@ public class UserDataPathsTests
         Assert.That(UserDataPaths.ConfigDir, Is.Not.Empty);
         Assert.That(Path.IsPathRooted(UserDataPaths.ConfigDir), Is.True);
     }
+
+    [Test]
+    public void DiagnosticsLogLivesUnderTheStateDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vompl-test-state-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("VOMPL_STATE_DIR", dir);
+        Assert.That(UserDataPaths.DiagnosticsLog, Is.EqualTo(Path.Combine(dir, "diagnostics.log")));
+    }
 }

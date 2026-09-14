@@ -27,6 +27,10 @@ public sealed partial class MainWindow
                 var dialog = BuildPlaylistFileDialog("Open Playlist");
                 var file = await dialog.OpenAsync(this);
                 path = file?.GetPath();
+                if (path != null)
+                {
+                    DiagnosticsLog.Arrival("picker-playlist", path);
+                }
             }
             catch (GLib.GException ex) when (Util.GtkDialogError.IsDismissed(ex))
             {

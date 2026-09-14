@@ -87,6 +87,7 @@ src/
     PlaylistFile.cs         # pure: newline-delimited playlist parse/serialize
     UriShape.cs             # pure: the one URI-vs-local-path sniffer + file: URI → local path conversion shared by argv and drops
     PathPortal.cs           # document-portal path rules: portal root, portal-shaped test, host-path xattr
+    DiagnosticsLog.cs       # append-only diagnostics.log sink + the cheap always-on lines: launch banner, raw arrivals, per-load directory-key lines, problem lines
     GtkDialogError.cs       # GException → "user dismissed the dialog?" via GError domain/code
     PlaylistMenuSelector.cs # pure: Recent menu's "10 entries with directory coverage" selection rule
     MediaExtensions.cs      # known video extension set (folder-drop expansion)
@@ -193,6 +194,7 @@ Keyboard input goes through a window-level capture-phase `Gtk.EventControllerKey
 ## Persistence
 
 - **`config.toml`** (TOML, Tomlyn-backed). `[hotkeys]` (a plain action → trigger-strings table; HotkeyMap owns schema and defaults), `[application]` (open_in_new_window, theme, chapter_seek_preroll_seconds), and `[yt_dlp]` (cookies_from_browser). Loaded eagerly at startup; saved on preferences edits.
+- **`diagnostics.log`** (plain text, append-only; rotated to `.1` at the next launch once past 4 MiB, so one launch's sections are never split). Written by `Util/DiagnosticsLog`: a banner per launch (`/.flatpak-info`, key env vars, recent paths, remembered directories), one block per raw external arrival (argv, drop payload, picker result), one per file load (path → directory key → realpath spelling → whether preferences exist under either). It is the artifact to ask a user for when files "arrive wrong".
 - **`state.db`** (SQLite, `Microsoft.Data.Sqlite`, WAL). Owned by `StateDatabase`; per-feature persistence classes (`RecentFiles`, `TrackPreferences`, `SavedPlaylists`) take the `SqliteConnection` in their ctor. Append-only `Migrations[]` registry walked against `PRAGMA user_version`. Schema today:
   - v1: `recent_files(path_or_uri UNIQUE, last_opened, open_count)`
   - v2: `track_preferences(directory, kind, …)` PK `(directory, kind)`

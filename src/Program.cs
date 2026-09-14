@@ -1,6 +1,8 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Vomplayer.UserData;
+using Vomplayer.Util;
 
 namespace Vomplayer;
 
@@ -79,6 +81,10 @@ public static class Program
         var savedPlaylists = new SavedPlaylists(stateDb.Connection);
         var trackPreferences = new TrackPreferences(stateDb.Connection);
 
+        // Path diagnostics: opened as soon as the state dir is known so the launch banner and every arrival below are on record (see DiagnosticsLog).
+        DiagnosticsLog.Open(UserDataPaths.DiagnosticsLog);
+        DiagnosticsLog.WriteLaunch(recentFiles.GetMostRecent(DiagnosticsLog.LaunchRecentsCount).Select(e => e.PathOrUri).ToList(), trackPreferences.ListDirectories());
+
         // Captured by OnCommandLine so the first-launch handler builds the window and subsequent remote-forwards reuse it. Today there's at most one window per process; if multi-window ever lands, both branches still apply.
         MainWindow? window = null;
         app.OnCommandLine += (sender, signalArgs) =>
@@ -87,6 +93,10 @@ public static class Program
             var forwardedArgv = cmd.GetArguments(out _);
             var cwd = cmd.GetCwd();
             var paths = StartupHelpers.ResolveCommandLineFiles(forwardedArgv, cwd, msg => Console.Error.WriteLine($"[vomplayer] {msg}"));
+            var arrivalLines = new[] { $"cwd={cwd ?? "<null>"}" }
+                .Concat(forwardedArgv.Select((a, i) => $"argv[{i}]={a}"))
+                .Concat(paths.Select((p, i) => $"resolved[{i}]={p}"));
+            DiagnosticsLog.Arrival(window == null ? "argv" : "argv-forwarded", string.Join("\n", arrivalLines));
             if (window == null)
             {
                 // First-launch path (whether primary started with no args, with files, or got a forwarded command line). All paths go through as InitialFiles, consumed on the first render-context-ready — same set of files the forwarded-to-running-primary branch below loads, so the two paths agree.

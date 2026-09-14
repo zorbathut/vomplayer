@@ -245,4 +245,16 @@ public class TrackPreferencesTests
             Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", saved);
         }
     }
+
+    [Test]
+    public void ListDirectoriesReturnsEachDirectoryOnceSorted()
+    {
+        using var db = OpenStateDb(DbPath());
+        var prefs = new TrackPreferences(db.Connection);
+        Assert.That(prefs.ListDirectories(), Is.Empty);
+        prefs.Record("/b", MediaKind.Audio, new TrackPreference(false, "x", null, false, null, 0));
+        prefs.Record("/b", MediaKind.Subtitle, new TrackPreference(true, null, null, false, null, null));
+        prefs.Record("/a", MediaKind.Audio, new TrackPreference(false, "y", null, false, null, 1));
+        Assert.That(prefs.ListDirectories(), Is.EqualTo(new[] { "/a", "/b" }));
+    }
 }

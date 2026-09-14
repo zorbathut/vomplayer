@@ -484,6 +484,11 @@ public sealed partial class VideoContext : ObservableObject, IDisposable
         }
         // Resolve and cache the directory key NOW so Select* calls between LoadFile and the next load can reach it. URIs return null and disable persistence for this file.
         currentDirectoryKey = TrackPreferences.TryGetDirectoryKey(pathOrUri);
+        // Every entry route funnels through here, so this is where each load's directory resolution goes on record.
+        if (DiagnosticsLog.IsOpen)
+        {
+            DiagnosticsLog.Load(pathOrUri, currentDirectoryKey, trackPreferences.ListDirectories());
+        }
         CurrentFilePath = pathOrUri;
         currentFileLoaded = false;
         UpdateIsAtPlayableEof();

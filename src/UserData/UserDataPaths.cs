@@ -67,6 +67,12 @@ public static class UserDataPaths
         get { return Path.Combine(StateDir, StateDbFileName); }
     }
 
+    // Append-only human-readable log of how files reached the app (see Util.DiagnosticsLog). Lives with the state DB so a flatpak user finds both under ~/.var/app/<id>/data/vomplayer.
+    public static string DiagnosticsLog
+    {
+        get { return Path.Combine(StateDir, "diagnostics.log"); }
+    }
+
     // Per-URL yt-dlp download cache root. Sits under CacheDir so the override env var (VOMPL_CACHE_DIR) catches it for tests / portable installs without a separate variable. Symmetric with ConfigFile / StateDb — exposing the full path here keeps the literal "url-downloads" out of consumer call sites.
     public static string UrlDownloadCacheRoot
     {

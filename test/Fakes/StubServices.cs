@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vomplayer.Services;
@@ -81,6 +82,11 @@ internal sealed class FakeTrackPreferences : ITrackPreferences
     {
         GetCalls.Add((directory, kind));
         return Stored.TryGetValue((directory, kind), out var p) ? p : null;
+    }
+
+    public IReadOnlyList<string> ListDirectories()
+    {
+        return Stored.Keys.Select(k => k.Dir).Distinct().OrderBy(d => d, StringComparer.Ordinal).ToList();
     }
 }
 
