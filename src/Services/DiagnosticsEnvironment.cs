@@ -129,10 +129,12 @@ public static class DiagnosticsEnvironment
             {
                 rung = rung.TrimEnd('/') + "/" + parts[i - 1];
             }
+            var real = LibC.RealPath(rung, out int realErrno);
             string listing;
             if (!Directory.Exists(rung))
             {
-                listing = "absent";
+                // The errno is what separates a missing rung (ENOENT) from a stale network mount root (ESTALE) or a permission wall (EACCES): three different diagnoses from one word otherwise. realpath succeeding on a non-directory means the rung exists as a file.
+                listing = realErrno == 0 ? "not a directory" : $"absent (errno {realErrno})";
             }
             else
             {
@@ -146,7 +148,6 @@ public static class DiagnosticsEnvironment
                     listing = $"exists but not listable: {ex.GetType().Name}: {ex.Message}";
                 }
             }
-            var real = LibC.RealPath(rung, out _);
             var realNote = real != null && real != rung ? $" (realpath {real})" : "";
             sb.Append($"{rung}: {listing}{realNote}\n");
         }

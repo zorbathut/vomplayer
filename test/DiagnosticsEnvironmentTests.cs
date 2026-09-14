@@ -37,8 +37,9 @@ public class DiagnosticsEnvironmentTests
         Assert.That(lines[0], Is.EqualTo("/: listable"));
         // A rung that is itself a symlink (a symlinked temp dir, say) carries a realpath note after the verdict, so match prefixes.
         Assert.That(lines, Has.Some.StartsWith($"{present}: listable (empty)"));
-        Assert.That(lines, Has.Some.StartsWith($"{present}/missing: absent"));
-        Assert.That(lines, Has.Some.StartsWith($"{present}/missing/deeper: absent"));
+        // ENOENT is 2; a stale share root reports 116.
+        Assert.That(lines, Has.Some.EqualTo($"{present}/missing: absent (errno 2)"));
+        Assert.That(lines, Has.Some.EqualTo($"{present}/missing/deeper: absent (errno 2)"));
         Assert.That(lines[^1], Is.EqualTo($"{hostPath}: file absent"));
         // One rung per path component, plus the root and the file line.
         Assert.That(lines.Length, Is.EqualTo(Path.GetDirectoryName(hostPath)!.Split('/', StringSplitOptions.RemoveEmptyEntries).Length + 2));
@@ -72,8 +73,17 @@ public class DiagnosticsEnvironmentTests
         Assert.That(lines, Has.Some.StartsWith($"{present}: listable (empty)"));
         Assert.That(lines[^1], Is.EqualTo($"{Path.Combine(present, "file.mkv")}: file absent"));
         var relative = DiagnosticsEnvironment.VisibilityLadder("sub/x.mkv").Split('\n');
-        Assert.That(relative, Has.None.EqualTo("/sub: absent"));
+        Assert.That(relative, Has.None.StartsWith("/sub:"));
         Assert.That(relative[^1], Does.EndWith("/sub/x.mkv: file absent"));
+    }
+
+    [Test]
+    public void LadderCallsAnExistingFileRungNotADirectory()
+    {
+        var file = Path.Combine(tempDir, "plain.mkv");
+        File.WriteAllText(file, "");
+        var lines = DiagnosticsEnvironment.VisibilityLadder(Path.Combine(file, "inner.mkv")).Split('\n');
+        Assert.That(lines, Has.Some.EqualTo($"{file}: not a directory"));
     }
 
     [Test]
