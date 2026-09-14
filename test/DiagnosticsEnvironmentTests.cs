@@ -87,6 +87,15 @@ public class DiagnosticsEnvironmentTests
     }
 
     [Test]
+    public void DedupeKeyIsTheOriginDirectoryOrTheTriggerText()
+    {
+        Assert.That(DiagnosticsEnvironment.DedupeKey("launch", null), Is.EqualTo("launch"));
+        Assert.That(DiagnosticsEnvironment.DedupeKey("x", "/var/mnt/show/e01.mkv"), Is.EqualTo("/var/mnt/show"));
+        Assert.That(DiagnosticsEnvironment.DedupeKey("y", "/var/mnt/show/e02.mkv"), Is.EqualTo("/var/mnt/show"));
+        Assert.That(DiagnosticsEnvironment.DedupeKey("z", "/"), Is.EqualTo("/"));
+    }
+
+    [Test]
     public void LadderHandlesAFileDirectlyUnderRoot()
     {
         var lines = DiagnosticsEnvironment.VisibilityLadder("/file.mkv").Split('\n');

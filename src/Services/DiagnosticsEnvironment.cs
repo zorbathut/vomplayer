@@ -15,10 +15,23 @@ public static class DiagnosticsEnvironment
 
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly object gate = new();
-    private static readonly PathProblemDedupe dedupe = new();
+    // One dump per origin directory per process (keyed on the trigger text when there is no host path), so a run of loads from one hidden folder produces one dump.
+    private static readonly HashSet<string> seen = new(StringComparer.Ordinal);
     private static bool dumping;
 
-    public static void Dump(PathProblem? trigger)
+    public static void DumpForLaunch()
+    {
+        Dump("launch", null);
+    }
+
+    // One dump per key: the origin's directory when there is one, else the trigger text. Pure so the rule is pinned by a test.
+    internal static string DedupeKey(string trigger, string? hostPath)
+    {
+        return hostPath == null ? trigger : (Path.GetDirectoryName(hostPath) ?? hostPath);
+    }
+
+    // `trigger` is a short description for the section header; `hostPath` is the real-world path to probe (ladder, stat, mount) when there is one.
+    private static void Dump(string trigger, string? hostPath)
     {
         if (!DiagnosticsLog.IsOpen)
         {
@@ -26,23 +39,27 @@ public static class DiagnosticsEnvironment
         }
         lock (gate)
         {
-            // Two chains interleaving their sections would make the log unreadable, so a dump that arrives mid-dump is skipped — checked before the dedupe is consumed, so the next load from that directory still gets its dump.
-            if (dumping)
+            // A directory already dumped has nothing new to say, so that check comes first and stays silent; only a genuinely new directory arriving mid-dump is worth a "skipped" line. Two chains interleaving their sections would make the log unreadable, and the dedupe is not consumed for the skipped one, so its next load still gets a dump.
+            if (!seen.Contains(DedupeKey(trigger, hostPath)))
             {
-                DiagnosticsLog.Append($"--- environment dump skipped (one already running) trigger={trigger?.Path ?? "launch"}");
+                if (dumping)
+                {
+                    DiagnosticsLog.Append($"--- environment dump skipped (one already running) trigger={trigger}");
+                    return;
+                }
+                seen.Add(DedupeKey(trigger, hostPath));
+                dumping = true;
+            }
+            else
+            {
                 return;
             }
-            if (trigger != null && !dedupe.IsFirstFor(trigger))
-            {
-                return;
-            }
-            dumping = true;
         }
         var thread = new Thread(() =>
         {
             try
             {
-                Collect(trigger);
+                Collect(trigger, hostPath);
             }
             catch (Exception ex)
             {
@@ -62,21 +79,21 @@ public static class DiagnosticsEnvironment
         thread.Start();
     }
 
-    private static void Collect(PathProblem? trigger)
+    // The dump for a path problem: the origin when the portal reported one, the path itself for an unlistable directory.
+    public static void DumpForProblem(PathProblem problem)
+    {
+        Dump($"{problem.Kind} path={problem.Path}", problem.Kind == PathProblemKind.DirectoryUnlistable ? problem.Path : problem.HostPath);
+    }
+
+    private static void Collect(string trigger, string? hostPath)
     {
         var sandboxed = FlatpakDetect.IsSandboxed();
-        var triggerText = trigger == null ? "trigger=launch" : $"trigger={trigger.Kind} path={trigger.Path}";
         var portalRoot = PathPortal.Root;
-        DiagnosticsLog.Append($"--- environment dump {DiagnosticsLog.Stamp(DateTimeOffset.UtcNow)} {triggerText} sandboxed={sandboxed}");
+        DiagnosticsLog.Append($"--- environment dump {DiagnosticsLog.Stamp(DateTimeOffset.UtcNow)} trigger={trigger} sandboxed={sandboxed}");
 
         DiagnosticsLog.Append($"[sandbox: portal root {portalRoot}] (the root is a symlink into /run/flatpak/doc, followed; inside a flatpak that is the app-scoped doc/by-app/<app-id> view, so this lists every document ever forwarded to this app)\n" + HostCommand.Run("ls", new[] { "-laL", portalRoot }, ProbeTimeout));
         DiagnosticsLog.Append("[sandbox: /proc/self/mountinfo]\n" + ReadTextOrError("/proc/self/mountinfo"));
 
-        string? hostPath = trigger?.HostPath;
-        if (trigger?.Kind == PathProblemKind.DirectoryUnlistable)
-        {
-            hostPath = trigger.Path;
-        }
         if (hostPath != null)
         {
             DiagnosticsLog.Append("[sandbox: visibility ladder for " + hostPath + "] (which prefix of the real path the sandbox can still reach)\n" + VisibilityLadder(hostPath));

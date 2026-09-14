@@ -87,7 +87,7 @@ public static class Program
         DiagnosticsLog.WriteLaunch(recentFiles.GetMostRecent(DiagnosticsLog.LaunchRecentsCount).Select(e => e.PathOrUri).ToList(), trackPreferences.ListDirectories());
         if (DiagnosticsEnvironment.DumpEveryLaunch)
         {
-            DiagnosticsEnvironment.Dump(null);
+            DiagnosticsEnvironment.DumpForLaunch();
         }
 
         // Captured by OnCommandLine so the first-launch handler builds the window and subsequent remote-forwards reuse it. Today there's at most one window per process; if multi-window ever lands, both branches still apply.

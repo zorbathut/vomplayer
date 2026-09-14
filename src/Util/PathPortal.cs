@@ -15,7 +15,7 @@ public enum PathProblemKind
 // One detected problem with a path the user asked to play. Path is the normalized absolute spelling (the playlist's own spelling is on the load line that precedes it in the log). For DocumentPortal, HostPath and Directory are the real location when the portal reports it (the FUSE file's host-path xattr) and HostPathErrno is why it didn't (ENODATA on a portal too old to set the xattr, ENOTSUP/EACCES when the read itself is refused); for DirectoryUnlistable, Directory is the unlistable directory itself.
 public sealed record PathProblem(string Path, PathProblemKind Kind, string? HostPath, int HostPathErrno, string? Directory);
 
-// "Have I seen this problem's directory before?" — one instance per consumer, so the warning row and the environment dump each fire once per directory and a run of double-clicks into the same hidden folder produces one of each. Problems without a known directory dedupe on the path itself.
+// "Have I seen this problem's directory before?" — the warning row's once-per-directory-per-session gate, so a run of double-clicks into the same hidden folder produces one notice. Problems without a known directory dedupe on the path itself.
 public sealed class PathProblemDedupe
 {
     private readonly HashSet<string> seen = new(StringComparer.Ordinal);
