@@ -21,6 +21,8 @@ public sealed class PlaylistPanel : IDisposable
     private Playlist playlist;
     private Action<int> playItem;
     private Action<int, IReadOnlyList<string>> insertPaths;
+    // URL → its completed cached download (or null). Fixed for the panel's lifetime, unlike the fields above: every VideoContext shares one downloader, so a Rebind doesn't change it.
+    private readonly Func<string, string?> cachedFileFor;
     private readonly Gtk.ListBox listBox;
     private readonly Gtk.ScrolledWindow scrolledWindow;
     // Captured once so subscribe and unsubscribe call the same delegate. Inline `k => Rebuild(k)` lambdas would create distinct delegate instances and the unsubscribe in Dispose / Rebind would silently no-op, leaking the subscription past the panel's lifetime.
@@ -33,7 +35,7 @@ public sealed class PlaylistPanel : IDisposable
     private Gtk.ListBoxRow? indicatorRow;
     private bool indicatorAfter;
 
-    public PlaylistPanel(Playlist playlist, Action<int> playItem, Action<int, IReadOnlyList<string>> insertPaths)
+    public PlaylistPanel(Playlist playlist, Action<int> playItem, Action<int, IReadOnlyList<string>> insertPaths, Func<string, string?> cachedFileFor)
     {
         if (playlist == null)
         {
@@ -47,9 +49,14 @@ public sealed class PlaylistPanel : IDisposable
         {
             throw new ArgumentNullException(nameof(insertPaths));
         }
+        if (cachedFileFor == null)
+        {
+            throw new ArgumentNullException(nameof(cachedFileFor));
+        }
         this.playlist = playlist;
         this.playItem = playItem;
         this.insertPaths = insertPaths;
+        this.cachedFileFor = cachedFileFor;
         changedHandler = OnPlaylistChanged;
 
         listBox = Gtk.ListBox.New();
@@ -207,7 +214,7 @@ public sealed class PlaylistPanel : IDisposable
         ShowRowMenu(row.GetIndex(), args.X, args.Y);
     }
 
-    // Per-click context menu. A plain Gtk.Popover of flat buttons rather than a Gio-action-backed PopoverMenu: the panel's idiom is direct callbacks (OnRowActivated, the drag OnReorderDrop), and a transient menu doesn't earn the action-map machinery the live menubar needs. Items adapt to the row kind — a URL opens in a browser, a local path reveals its folder. The remove item acts on the whole selection. Built fresh each time and unparented on close so right-clicks don't accumulate parented popovers.
+    // Per-click context menu. A plain Gtk.Popover of flat buttons rather than a Gio-action-backed PopoverMenu: the panel's idiom is direct callbacks (OnRowActivated, the drag OnReorderDrop), and a transient menu doesn't earn the action-map machinery the live menubar needs. Items adapt to the row kind — a URL opens in a browser (and reveals its cached download, if any), a local path reveals its folder. The remove item acts on the whole selection. Built fresh each time and unparented on close so right-clicks don't accumulate parented popovers.
     private void ShowRowMenu(int index, double x, double y)
     {
         string item = playlist.Items[index];
@@ -227,6 +234,12 @@ public sealed class PlaylistPanel : IDisposable
         {
             AppendMenuItem(box, popover, "Open in Browser", () => OpenInBrowser(item));
             AppendMenuItem(box, popover, "Copy URL", () => CopyToClipboard(item));
+            // Only yt-dlp downloads have a local copy; direct streams, not-yet-downloaded and swept URLs get no item.
+            string? cached = cachedFileFor(item);
+            if (cached != null)
+            {
+                AppendMenuItem(box, popover, "Open Download Folder", () => OpenContainingFolder(cached));
+            }
         }
         else
         {

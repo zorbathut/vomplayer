@@ -375,6 +375,29 @@ public class YtDlpDownloaderTests
     }
 
     [Test]
+    public async Task CachedFileForFindsACompletedDownloadUnderTheCurrentCookieSpec()
+    {
+        var stub = WriteStub(string.Join("\n", new[]
+        {
+            "while [[ $# -gt 0 ]]; do case \"$1\" in -P) dir=\"$2\"; shift 2;; *) shift;; esac; done",
+            "mkdir -p \"$dir\"",
+            "printf 'bytes' > \"$dir/clip.mp4\"",
+            "echo \"VOMPLFILE $dir/clip.mp4\"",
+        }));
+        var dl = new YtDlpDownloader(new UrlDownloadCache(System.IO.Path.Combine(tempDir!, "cache")), new[] { stub });
+
+        Assert.That(dl.CachedFileFor("https://example.com/v"), Is.Null, "nothing downloaded yet");
+
+        var path = await dl.DownloadAsync("https://example.com/v", null, CancellationToken.None);
+        Assert.That(dl.CachedFileFor("https://example.com/v"), Is.EqualTo(path));
+        Assert.That(dl.CachedFileFor("https://example.com/other"), Is.Null);
+
+        // The lookup keys the same way the next play would, so a file fetched under another cookie spec isn't reported.
+        dl.CookiesFromBrowser = "firefox";
+        Assert.That(dl.CachedFileFor("https://example.com/v"), Is.Null);
+    }
+
+    [Test]
     public void ConstructorRejectsEmptyCommand()
     {
         var cache = new UrlDownloadCache(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vompl-ctor-test"));

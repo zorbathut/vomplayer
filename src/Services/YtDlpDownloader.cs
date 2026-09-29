@@ -93,6 +93,12 @@ public sealed class YtDlpDownloader : IUrlDownloader
         return $"{CookiesFromBrowser}\0{url}";
     }
 
+    // The completed cached download a play of `url` would reuse right now, or null. Keyed through CacheIdentity so it agrees with DownloadAsync; a hit counts as a use and bumps the entry's mtime.
+    public string? CachedFileFor(string url)
+    {
+        return cache.TryGetExistingFile(CacheIdentity(url));
+    }
+
     // Log yt-dlp's stderr from a run that *succeeded*. Normally empty (we pass --no-warnings), but with a cookie source configured we deliberately let warnings through, and those warnings are the only evidence of a half-working cookie setup — a zero exit code with zero cookies extracted. Dropping them on the floor would be exactly the silent failure the flag exists to expose.
     private static void LogStderrOnSuccess(string what, string stderr)
     {
