@@ -156,9 +156,9 @@ public sealed class UrlDownloadCache
         {
             Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Touching is best-effort — if it fails, the worst case is the entry gets cleaned up earlier than expected. Don't disrupt the play path for it. Intentionally silent (not "swallowed"): a read-only cache directory would otherwise log on every URL play, which is pure noise — the failure is by design tolerable. If a real bug ever needs to be diagnosed here, replace this with throw + handle at the caller, not blanket logging.
+            // Touching is best-effort — if it fails, the worst case is the entry gets cleaned up earlier than expected. Don't disrupt the play path for it. Intentionally silent (not "swallowed"): a read-only or foreign-owned cache directory would otherwise log on every URL play, which is pure noise — the failure is by design tolerable. If a real bug ever needs to be diagnosed here, replace this with throw + handle at the caller, not blanket logging.
         }
     }
 }
